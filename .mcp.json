@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "aegis": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.js"],
+      "env": {
+        "AEGIS_API_KEY": "${AEGIS_API_KEY}",
+        "AEGIS_API_BASE": "${AEGIS_API_BASE}"
+      }
+    }
+  }
+}

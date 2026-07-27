@@ -1,0 +1,20 @@
+{
+  "name": "aegiscode",
+  "owner": {
+    "name": "AEGIS Code",
+    "email": "nborneklint@gmail.com"
+  },
+  "metadata": {
+    "description": "AEGIS tooling for Claude Code",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "aegiscode",
+      "source": "./",
+      "description": "AEGIS tooling inside Claude Code — pooled multi-provider inference, cross-machine cloud memory, and account tools via your AEGIS API key.",
+      "category": "productivity",
+      "homepage": "https://aegiscloud.org"
+    }
+  ]
+}

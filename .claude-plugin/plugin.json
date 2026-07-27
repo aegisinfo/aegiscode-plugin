@@ -1,0 +1,11 @@
+{
+  "name": "aegiscode",
+  "version": "0.1.0",
+  "description": "AEGIS tooling inside Claude Code — pooled multi-provider inference, cross-machine memory, and account tools, all driven by your AEGIS API key.",
+  "author": {
+    "name": "AEGIS Code",
+    "email": "nborneklint@gmail.com"
+  },
+  "homepage": "https://aegiscloud.org",
+  "keywords": ["aegis", "aegiscloud", "inference", "memory", "mcp"]
+}
