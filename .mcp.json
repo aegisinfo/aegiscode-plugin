@@ -5,6 +5,7 @@
       "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.js"],
       "env": {
         "AEGIS_API_KEY": "${AEGIS_API_KEY}",
+        "AEGIS_MEMORY_TOKEN": "${AEGIS_MEMORY_TOKEN}",
         "AEGIS_API_BASE": "${AEGIS_API_BASE}"
       }
     }

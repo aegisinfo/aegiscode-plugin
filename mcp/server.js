@@ -16,6 +16,9 @@ const { randomUUID } = require('node:crypto');
 
 const API_BASE = (process.env.AEGIS_API_BASE || 'https://aegiscloud.org').replace(/\/+$/, '');
 const API_KEY = process.env.AEGIS_API_KEY || '';
+// Optional: a memory token supplied directly, bypassing the api_key exchange.
+// Some accounts hold a memory token separate from (or without) an API key.
+const MEMORY_TOKEN = process.env.AEGIS_MEMORY_TOKEN || '';
 const CLIENT_VERSION = '3.1.0';
 const SERVER_NAME = 'aegis';
 const SERVER_VERSION = '0.1.0';
@@ -44,14 +47,6 @@ async function apiPost(path, body, headers) {
   return parseResponse(res);
 }
 
-async function apiGet(path, headers) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: 'GET',
-    headers: headers || authHeaders(),
-  });
-  return parseResponse(res);
-}
-
 async function parseResponse(res) {
   const text = await res.text();
   let data;
@@ -75,6 +70,7 @@ async function parseResponse(res) {
 // Memory endpoints authenticate with a memory_token, not the API key.
 let _memoryTokenCache = null;
 async function getMemoryToken() {
+  if (MEMORY_TOKEN) return MEMORY_TOKEN;
   if (_memoryTokenCache) return _memoryTokenCache;
   const info = await apiPost('/api/verify-api-key', { api_key: API_KEY });
   if (!info || !info.memory_token) {
@@ -240,15 +236,19 @@ const TOOLS = {
     },
     async run(args) {
       const token = await getMemoryToken();
+      // /api/memory/list is session-cookie (dashboard) auth, unusable here.
+      // The bearer-authenticated way to get recent entries is search with an
+      // empty query, which the backend returns most-recent-first.
       const limit = args.limit || 10;
-      const data = await apiGet(`/api/memory/list?limit=${limit}`, memoryHeaders(token));
+      const data = await apiPost(
+        '/api/memory/search',
+        { query: '', limit },
+        memoryHeaders(token)
+      );
       const entries = data.entries || [];
       if (!entries.length) return 'AEGIS cloud memory is empty.';
-      const total = typeof data.total === 'number' ? ` (of ${data.total} total)` : '';
-      const body = entries
-        .map((e, i) => `${i + 1}. ${e.content}`)
-        .join('\n');
-      return `Recent ${entries.length} entries${total}:\n${body}`;
+      const body = entries.map((e, i) => `${i + 1}. ${e.content}`).join('\n');
+      return `Recent ${entries.length} entries:\n${body}`;
     },
   },
 };
