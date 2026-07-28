@@ -1,11 +1,15 @@
 ---
-description: Ask AEGIS pooled inference a question (routes to the best provider server-side).
+description: Ask AEGIS pooled inference a question (pick a model, or let it route server-side).
 argument-hint: [question]
 ---
 
 Use the `aegis_ask` MCP tool to answer the user's question: $ARGUMENTS
 
-Pick the `mode` based on the task:
+If the user named a specific model (or you're unsure what's available), call
+`aegis_list_models` first and pass their choice as `model` — this pins that
+exact provider instead of auto-routing.
+
+Otherwise, pick `mode` based on the task (only used when `model` is unset):
 - `fast` — quick lookups, short answers, low cost
 - `smart` — default; balanced quality
 - `neo` — hard reasoning, multi-step problems

@@ -134,15 +134,20 @@ const TOOLS = {
 
   aegis_ask: {
     description:
-      "Send a prompt to AEGIS pooled inference. One AEGIS key routes to the cheapest capable provider server-side (DeepSeek/GPT/Claude/Groq). Use mode 'fast' for quick/cheap, 'smart' for balanced, 'neo' for hardest reasoning. Billed against the account's token bank.",
+      "Send a prompt to AEGIS pooled inference, billed against the account's token bank. Either pick an exact model with `model` (call aegis_list_models to see choices — e.g. 'anthropic', 'deepseek', 'groq'), or leave it unset and let `mode` auto-route to the cheapest capable provider: 'fast' for quick/cheap, 'smart' (default) for balanced, 'neo' for hardest reasoning.",
     inputSchema: {
       type: 'object',
       properties: {
         prompt: { type: 'string', description: 'The user prompt / question.' },
+        model: {
+          type: 'string',
+          description:
+            "Exact model id to pin, from aegis_list_models (e.g. 'anthropic', 'deepseek', 'groq'). Takes priority over mode.",
+        },
         mode: {
           type: 'string',
           enum: ['fast', 'smart', 'neo'],
-          description: "Routing tier. Default 'smart'.",
+          description: "Auto-routing tier, used only when `model` is not set. Default 'smart'.",
         },
         system: { type: 'string', description: 'Optional system instruction.' },
         max_tokens: {
@@ -161,10 +166,12 @@ const TOOLS = {
       messages.push({ role: 'user', content: args.prompt });
       // Use the OpenAI-compatible endpoint (stream:false): it returns structured
       // JSON errors (e.g. 402 insufficient_quota) instead of the opaque 502 that
-      // /api/v1/complete emits. `model` prefix selects the routing tier.
+      // /api/v1/complete emits. An exact `model` id pins that provider directly;
+      // otherwise `nexus-${mode}` selects the auto-routing tier.
       const mode = args.mode || 'smart';
+      const requestedModel = args.model || `nexus-${mode}`;
       const data = await apiPost('/api/v1/chat/completions', {
-        model: `nexus-${mode}`,
+        model: requestedModel,
         messages,
         max_tokens: args.max_tokens || 1024,
         stream: false,
@@ -173,12 +180,28 @@ const TOOLS = {
       const text = (choice.message && choice.message.content) || '(empty response)';
       const meta = [
         data.model ? `model: ${data.model}` : null,
-        `mode: ${mode}`,
+        args.model ? null : `mode: ${mode}`,
         data.usage ? `tokens: ${data.usage.total_tokens}` : null,
       ]
         .filter(Boolean)
         .join('  ·  ');
       return `${text}\n\n— ${meta}`;
+    },
+  },
+
+  aegis_list_models: {
+    description:
+      "List the exact models available to pin with aegis_ask's `model` argument, instead of letting `mode` auto-route to the cheapest provider.",
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    async run() {
+      const data = await apiGet('/api/v1/models');
+      const models = data.models || [];
+      if (!models.length) return 'No pinnable models are currently configured on AEGIS.';
+      return [
+        'Pass one of these as aegis_ask\'s `model` argument:',
+        '',
+        ...models.map((m) => `  ${m.id}  (${(m.capabilities || []).join(', ')})`),
+      ].join('\n');
     },
   },
 

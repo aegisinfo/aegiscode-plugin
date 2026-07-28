@@ -1,6 +1,6 @@
 {
   "name": "aegiscode",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "AEGIS tooling inside Claude Code — pooled multi-provider inference, cross-machine memory, and account tools, all driven by your AEGIS API key.",
   "author": {
     "name": "AEGIS Code",
