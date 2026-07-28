@@ -47,6 +47,14 @@ async function apiPost(path, body, headers) {
   return parseResponse(res);
 }
 
+async function apiGet(path, headers) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'GET',
+    headers: headers || authHeaders(),
+  });
+  return parseResponse(res);
+}
+
 async function parseResponse(res) {
   const text = await res.text();
   let data;
@@ -159,6 +167,69 @@ const TOOLS = {
         .filter(Boolean)
         .join('  ·  ');
       return `${text}\n\n— ${meta}`;
+    },
+  },
+
+  aegis_balance: {
+    description:
+      "Check the AEGIS token bank balance and recent spend. Call this before aegis_ask if you're unsure whether the account has funds, or to see what recent calls cost.",
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    async run() {
+      const data = await apiGet('/api/token-bank/balance');
+      const lines = [`Balance: €${data.balance_eur ?? '0'}`];
+      const ledger = (data.ledger || []).slice(0, 5);
+      if (ledger.length) {
+        lines.push('', 'Recent activity:');
+        for (const l of ledger) {
+          const cost = ((l.charged_micros || 0) / 1_000_000).toFixed(4);
+          lines.push(`  ${l.created_at || ''}  ${l.model_key || l.kind || ''}  -€${cost}`);
+        }
+      } else {
+        lines.push('No spend yet.');
+      }
+      if ((data.balance_eur || 0) <= 0) {
+        lines.push(
+          '',
+          'Balance is empty — top up at https://aegiscloud.org/subscribe, or set your own ' +
+            'provider key with aegis_byok_set to use aegis_ask for free at cost.'
+        );
+      }
+      return lines.join('\n');
+    },
+  },
+
+  aegis_byok_status: {
+    description:
+      "List which providers (anthropic, groq, openai) have a Bring-Your-Own-Key configured on this AEGIS account. A configured BYOK key is used automatically by aegis_ask instead of the pooled balance for that provider, so calls no longer cost AEGIS token-bank funds.",
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    async run() {
+      const data = await apiGet('/api/user/api-keys');
+      const rows = Object.entries(data || {}).map(([provider, info]) => {
+        const set = info && info.set;
+        return `  ${provider}: ${set ? `set (${info.masked})` : 'not set'}`;
+      });
+      return `BYOK keys:\n${rows.join('\n')}`;
+    },
+  },
+
+  aegis_byok_set: {
+    description:
+      "Set or remove a Bring-Your-Own-Key API key for a provider (anthropic, groq, or openai) on this AEGIS account. Once set, aegis_ask uses that key directly for that provider instead of the pooled AEGIS balance — unlimited use at the user's own cost. Omit api_key to remove a previously set key.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        provider: { type: 'string', enum: ['anthropic', 'groq', 'openai'], description: 'Which provider this key is for.' },
+        api_key: { type: 'string', description: "The provider's own API key. Omit to delete the stored key instead." },
+      },
+      required: ['provider'],
+      additionalProperties: false,
+    },
+    async run(args) {
+      const data = await apiPost('/api/user/api-keys', {
+        provider: args.provider,
+        api_key: args.api_key || '',
+      });
+      return data.message || (args.api_key ? `${args.provider} key saved.` : `${args.provider} key removed.`);
     },
   },
 

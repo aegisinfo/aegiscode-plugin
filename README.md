@@ -10,12 +10,24 @@ key.
 |---|---|
 | `/aegis-status` · `aegis_status` | Validate your key, show plan + memory status |
 | `/aegis-ask` · `aegis_ask` | Pooled inference — one key routes to the cheapest capable provider (DeepSeek/GPT/Claude/Groq) server-side. Modes: `fast`, `smart`, `neo` |
+| `aegis_balance` | Check your AEGIS token bank balance and recent spend |
+| `aegis_byok_status` | List which providers have a Bring-Your-Own-Key set |
+| `aegis_byok_set` | Set (or remove) your own provider API key |
 | `aegis_memory_save` | Save a durable note to AEGIS cloud memory |
 | `aegis_memory_search` | Search your cloud memory |
 | `aegis_memory_list` | List recent cloud-memory entries |
 
 Cloud memory persists across machines and sessions, so anything you save on one
 laptop is searchable from another.
+
+### Bring your own key (BYOK)
+
+`aegis_ask` normally spends from your AEGIS token bank. If you'd rather use
+your own Anthropic, Groq, or OpenAI key at your own cost, set it once with
+`aegis_byok_set` (e.g. "set my anthropic key to sk-ant-..."). From then on,
+`aegis_ask` calls for that provider use your key directly instead of the
+pooled balance — no more running out of AEGIS credit. Remove it any time by
+calling `aegis_byok_set` again with no key.
 
 ## Setup
 
@@ -43,7 +55,10 @@ laptop is searchable from another.
 ## How it works
 
 The plugin ships a small stdio MCP server (`mcp/server.js`) that calls the
-aegiscloud REST API with your key. Inference goes through
-`POST /api/v1/complete`; memory endpoints exchange your API key for a
-memory token, then sync via `/api/memory/*`. No key or data is stored locally by
-the plugin — it only forwards to aegiscloud.org over HTTPS.
+aegiscloud REST API with your key. Inference goes through the
+OpenAI-compatible `POST /api/v1/chat/completions`; balance and BYOK tools use
+the same key against `/api/token-bank/*` and `/api/user/api-keys`; memory
+endpoints exchange your API key for a memory token, then sync via
+`/api/memory/*`. No key or data is stored locally by the plugin — it only
+forwards to aegiscloud.org over HTTPS. BYOK keys you set are encrypted at
+rest server-side and never returned in full (only a masked preview).
