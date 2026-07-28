@@ -41,10 +41,11 @@ Prompts for your AEGIS key (get one free at https://aegiscloud.org), writes
 it to your shell rc file, adds the marketplace, and installs the plugin —
 all via the `claude plugin` CLI. Restart Claude Code afterward and run
 `/aegis-status` to confirm. To skip the prompt (e.g. non-interactive shells),
-pipe the key in directly:
+export your **real** key first, then pipe:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/aegisinfo/aegiscode-plugin/main/install.sh | AEGIS_API_KEY=aegis_your_key bash
+export AEGIS_API_KEY="aegis_..."   # your real key from https://aegiscloud.org
+curl -fsSL https://raw.githubusercontent.com/aegisinfo/aegiscode-plugin/main/install.sh | bash
 ```
 
 ### Manual install

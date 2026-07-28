@@ -3,10 +3,11 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/aegisinfo/aegiscode-plugin/main/install.sh | bash
 #
-# To skip the interactive key prompt (e.g. in a non-interactive shell), set
-# AEGIS_API_KEY first:
+# To skip the interactive key prompt (e.g. in a non-interactive shell), export
+# your real key first, then pipe — don't inline a placeholder:
 #
-#   curl -fsSL https://raw.githubusercontent.com/aegisinfo/aegiscode-plugin/main/install.sh | AEGIS_API_KEY=aegis_your_key bash
+#   export AEGIS_API_KEY="aegis_..."   # your real key from https://aegiscloud.org
+#   curl -fsSL https://raw.githubusercontent.com/aegisinfo/aegiscode-plugin/main/install.sh | bash
 
 set -eu
 
@@ -44,6 +45,14 @@ if [ -z "$AEGIS_API_KEY" ] && [ -r /dev/tty ]; then
   printf 'AEGIS API key (get one free at https://aegiscloud.org, looks like aegis_...): ' > /dev/tty
   read -r AEGIS_API_KEY < /dev/tty || true
 fi
+
+case "$AEGIS_API_KEY" in
+  *your_key*|*YOUR_KEY*|*xxxxx*|*placeholder*|*changeme*)
+    error "That looks like a placeholder (\"$AEGIS_API_KEY\"), not a real key — refusing to save it."
+    error "Get your real key at https://aegiscloud.org, then re-run."
+    exit 1
+    ;;
+esac
 
 if [ -z "$AEGIS_API_KEY" ]; then
   warn "No AEGIS_API_KEY set — skipping key setup."

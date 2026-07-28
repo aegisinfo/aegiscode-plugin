@@ -14,11 +14,23 @@
 
 const { randomUUID } = require('node:crypto');
 
-const API_BASE = (process.env.AEGIS_API_BASE || 'https://aegiscloud.org').replace(/\/+$/, '');
-const API_KEY = process.env.AEGIS_API_KEY || '';
+// .mcp.json declares these as "${VAR}" template refs so Claude Code passes
+// the user's real shell env through to this subprocess. When the var is
+// unset in the shell, Claude Code has been observed to leave the template
+// literally unexpanded (e.g. process.env.AEGIS_API_BASE === "${AEGIS_API_BASE}")
+// instead of omitting it — which defeats a plain `|| default` fallback since
+// that literal string is truthy. Treat anything shaped like an unexpanded
+// template as absent.
+function envVar(name) {
+  const v = process.env[name];
+  return v && !/^\$\{[A-Z_]+\}$/.test(v) ? v : '';
+}
+
+const API_BASE = (envVar('AEGIS_API_BASE') || 'https://aegiscloud.org').replace(/\/+$/, '');
+const API_KEY = envVar('AEGIS_API_KEY');
 // Optional: a memory token supplied directly, bypassing the api_key exchange.
 // Some accounts hold a memory token separate from (or without) an API key.
-const MEMORY_TOKEN = process.env.AEGIS_MEMORY_TOKEN || '';
+const MEMORY_TOKEN = envVar('AEGIS_MEMORY_TOKEN');
 const CLIENT_VERSION = '3.1.0';
 const SERVER_NAME = 'aegis';
 const SERVER_VERSION = '0.1.0';
