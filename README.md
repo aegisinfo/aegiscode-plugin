@@ -31,6 +31,24 @@ calling `aegis_byok_set` again with no key.
 
 ## Setup
 
+### Quick install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/aegisinfo/aegiscode-plugin/main/install.sh | bash
+```
+
+Prompts for your AEGIS key (get one free at https://aegiscloud.org), writes
+it to your shell rc file, adds the marketplace, and installs the plugin —
+all via the `claude plugin` CLI. Restart Claude Code afterward and run
+`/aegis-status` to confirm. To skip the prompt (e.g. non-interactive shells),
+pipe the key in directly:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/aegisinfo/aegiscode-plugin/main/install.sh | AEGIS_API_KEY=aegis_your_key bash
+```
+
+### Manual install
+
 1. Get an API key at **https://aegiscloud.org** (looks like `aegis_...`).
 2. Export it so Claude Code inherits it:
 
@@ -38,8 +56,14 @@ calling `aegis_byok_set` again with no key.
    echo 'export AEGIS_API_KEY="aegis_your_key_here"' >> ~/.bashrc   # or ~/.zshrc
    ```
 
-3. Install the plugin and **restart Claude Code**.
-4. Run `/aegis-status` to confirm.
+3. Inside Claude Code:
+
+   ```
+   /plugin marketplace add aegisinfo/aegiscode-plugin
+   /plugin install aegiscode@aegiscode
+   ```
+
+4. **Restart Claude Code**, then run `/aegis-status` to confirm.
 
 ### Optional
 
