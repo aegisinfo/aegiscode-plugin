@@ -8,7 +8,11 @@ key.
 
 | Tool / command | What it does |
 |---|---|
-| `/aegis-status` · `aegis_status` | Validate your key, show plan + memory status |
+| `/aegis-status` | Show ÆGIS ecosystem status — memory stats + cloud sync (via `aegis --memory-stats-json` + `/cloud status`) |
+| `/aegis-recall <topic>` | Search cross-session ÆGIS memory (`aegis --memory-search-json`) |
+| `/aegis-remember <note>` | Save a decision/fact to ÆGIS memory (`aegis --memory-add-json`) |
+| `/aegis-council <question>` | Put a question to the multi-model ÆGIS council (`aegis --print "/council …"`) |
+| `/aegis-multi <task>` | Prepare ÆGIS `/multi` multi-agent orchestration (or run it, on request) |
 | `/aegis-ask` · `aegis_ask` | Pooled inference. Pin an exact `model` (see `aegis_list_models`), or leave it to `mode` auto-routing (`fast`, `smart`, `neo`) to pick the cheapest capable provider server-side |
 | `aegis_list_models` | List the exact models you can pin with `aegis_ask`'s `model` argument |
 | `aegis_balance` | Check your AEGIS token bank balance and recent spend |
@@ -17,6 +21,11 @@ key.
 | `aegis_memory_save` | Save a durable note to AEGIS cloud memory |
 | `aegis_memory_search` | Search your cloud memory |
 | `aegis_memory_list` | List recent cloud-memory entries |
+
+The `/aegis-status`, `/aegis-recall`, `/aegis-remember`, `/aegis-council`, and
+`/aegis-multi` commands shell out to the installed `aegis` CLI (no server, no
+key needed beyond `aegis login`). The `aegis_*` MCP tools are served by the
+bundled stdio MCP server (`mcp/server.js`) against your AEGIS API key.
 
 Cloud memory persists across machines and sessions, so anything you save on one
 laptop is searchable from another.
