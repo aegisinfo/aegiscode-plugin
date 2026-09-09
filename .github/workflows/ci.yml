@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate wrapper
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # --- 1. Syntax: every JS file must parse ------------------------------
+      - name: Node syntax check
+        run: |
+          set -euo pipefail
+          files=$(find . -name '*.js' -o -name '*.mjs' | grep -v '^./.git/' || true)
+          if [ -z "$files" ]; then
+            echo "No JS files found"
+            exit 1
+          fi
+          echo "$files" | while read -r f; do
+            node --check "$f"
+          done
+
+      - name: Shell syntax check
+        run: |
+          set -euo pipefail
+          bash -n install.sh
+
+      # --- 2. JSON validity ---------------------------------------------------
+      - name: JSON validity
+        run: |
+          set -euo pipefail
+          for f in $(find . -name '*.json' | grep -v '^./.git/'); do
+            node -e "JSON.parse(require('fs').readFileSync('$f','utf8'))" \
+              || { echo "Invalid JSON: $f"; exit 1; }
+          done
+
+      # --- 3. Secret scan: reject real keys, allow placeholders --------------
+      - name: Secret scan
+        run: |
+          set -euo pipefail
+          # Real-looking provider keys and AEGIS tokens. Placeholders use
+          # literal dots/ellipses (e.g. "aegis_...", "sk-...") so they pass.
+          patterns=(
+            'sk-ant-[A-Za-z0-9_-]{8,}'      # Anthropic
+            'sk-[A-Za-z0-9]{20,}'          # OpenAI / generic
+            'gsk_[A-Za-z0-9]{20,}'         # Groq
+            'aegis_[A-Za-z0-9]{20,}'       # AEGIS API key (real form)
+            'AIza[0-9A-Za-z_-]{20,}'       # Google
+            'xox[baprs]-[A-Za-z0-9-]{10,}' # Slack
+            'ghp_[A-Za-z0-9]{20,}'         # GitHub PAT
+            'Bearer [A-Za-z0-9._-]{20,}'   # Bearer token literal
+          )
+          found=0
+          for pat in "${patterns[@]}"; do
+            hits=$(grep -rnE --exclude-dir=.git "$pat" . || true)
+            if [ -n "$hits" ]; then
+              echo "SECRET MATCH ($pat):"
+              echo "$hits"
+              found=1
+            fi
+          done
+          if [ "$found" -eq 1 ]; then
+            echo "::error::Secret-looking values found. Rotate and remove before merge."
+            exit 1
+          fi
+          echo "Secret scan clean."
+
+      # --- 4. Thin-shell guard: no engine/brain code may enter ---------------
+      - name: Thin-shell guard
+        run: |
+          set -euo pipefail
+          # These are private-side artifacts that must never ship in the OSS
+          # wrapper. If any appear, the PR is leaking brain/IP code.
+          banned=(
+            'main.js'
+            'SaaS.js'
+            'chat-engine'
+            'chat-service.js'
+            'lib/memory'
+            'obfuscate.mjs'
+          )
+          for name in "${banned[@]}"; do
+            if git ls-files | grep -qF "$name"; then
+              echo "::error::Banned brain/IP file present: $name"
+              exit 1
+            fi
+          done
+          echo "Thin-shell guard clean."
+
+      # --- 5. Smoke test: boot the MCP server, validate tools/list -----------
+      - name: MCP smoke test
+        run: node test/smoke.mjs

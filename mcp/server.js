@@ -33,7 +33,8 @@ const API_KEY = envVar('AEGIS_API_KEY');
 const MEMORY_TOKEN = envVar('AEGIS_MEMORY_TOKEN');
 const CLIENT_VERSION = '3.1.0';
 const SERVER_NAME = 'aegis';
-const SERVER_VERSION = '0.1.0';
+// Keep in sync with .claude-plugin/plugin.json "version".
+const SERVER_VERSION = '0.2.0';
 
 // ---------------------------------------------------------------------------
 // HTTP helpers
