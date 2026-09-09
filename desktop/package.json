@@ -1,7 +1,7 @@
 {
   "name": "aegiscode-desktop",
   "productName": "AEGIS Desktop",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Thin Electron host for AEGIS — a local chat UI over the shared client/aegis.js transport. Ships transport + UI only; engine logic stays server-side.",
   "author": {
     "name": "AEGIS Code",
@@ -17,8 +17,9 @@
     "icon": "node scripts/generate-icon.mjs",
     "dist": "npm run predist && electron-builder",
     "dist:dir": "npm run predist && electron-builder --dir",
-    "check": "node --check main.js && node --check preload.js && node --check renderer/app.js && node --check scripts/predist.mjs && node --check scripts/generate-icon.mjs",
-    "test:shell": "node ../test/desktop-shell.mjs"
+    "check": "node --check main.js && node --check preload.js && node --check renderer/app.js && node --check scripts/predist.mjs && node --check scripts/generate-icon.mjs && node --check lib/local/context.js && node --check lib/local/providers.js && node --check lib/local/ollama.js && node --check lib/local/engine.js && node --check lib/settings.js && node --check lib/sync/sessions.js",
+    "test:shell": "node ../test/desktop-shell.mjs",
+    "test:model": "node ../test/model-dispatch.mjs"
   },
   "devDependencies": {
     "electron": "^33.0.0",

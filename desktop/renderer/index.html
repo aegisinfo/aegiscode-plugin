@@ -17,13 +17,7 @@
       <span id="conn-text">connecting…</span>
     </div>
     <div class="spacer"></div>
-    <div class="toggle-wrap" title="Where compute runs">
-      <span id="mode-label">Aegis server</span>
-      <label class="switch">
-        <input type="checkbox" id="mode-toggle" />
-        <span class="slider"></span>
-      </label>
-    </div>
+    <button type="button" id="new-chat" class="ghost-btn">New chat</button>
   </header>
 
   <main>
@@ -39,14 +33,45 @@
           <dt>balance</dt><dd id="st-balance">–</dd>
         </dl>
       </section>
+
       <section class="card">
         <h2>Model</h2>
-        <label for="model-select">Provider / pinned model</label>
-        <select id="model-select" disabled>
-          <option value="">auto-routing (server)</option>
+        <label for="class-select">Provider class</label>
+        <select id="class-select"></select>
+
+        <label for="model-select">Model</label>
+        <select id="model-select"></select>
+        <input
+          type="text"
+          id="model-input"
+          placeholder="model id"
+          autocomplete="off"
+          hidden
+        />
+
+        <label for="max-tokens">Max tokens</label>
+        <select id="max-tokens">
+          <option value="1024">1k</option>
+          <option value="4096" selected>4k</option>
+          <option value="16384">16k</option>
+          <option value="64000">64k</option>
         </select>
         <p class="hint" id="model-hint"></p>
       </section>
+
+      <section class="card">
+        <h2>Provider settings</h2>
+        <div id="settings-list"></div>
+        <p class="hint" id="settings-hint"></p>
+      </section>
+
+      <section class="card">
+        <h2>Sessions</h2>
+        <button type="button" id="sessions-refresh" class="ghost-btn">Refresh</button>
+        <ul class="sessions-list" id="sessions-list"></ul>
+        <p class="hint" id="sessions-hint"></p>
+      </section>
+
       <section class="card">
         <h2>Memory</h2>
         <form id="memory-search-form" class="memory-search">

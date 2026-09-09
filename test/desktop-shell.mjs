@@ -149,7 +149,7 @@ try {
     'status must not leak the raw key'
   );
   assert(
-    status.appVersion === '0.2.0',
+    status.appVersion === '0.3.0',
     `appVersion should come from desktop/package.json, got ${status.appVersion}`
   );
   assert(

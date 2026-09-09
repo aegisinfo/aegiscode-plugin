@@ -14,11 +14,27 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 const IPC_PREFIX = 'aegis:';
+const MODEL_PREFIX = 'model:';
+const SYNC_PREFIX = 'sync:';
 const CHAT_DELTA_CHANNEL = `${IPC_PREFIX}chatDelta`;
 
 function invoke(name, payload) {
   return ipcRenderer.invoke(
     IPC_PREFIX + name,
+    payload === undefined ? undefined : payload
+  );
+}
+
+function invokeModel(name, payload) {
+  return ipcRenderer.invoke(
+    MODEL_PREFIX + name,
+    payload === undefined ? undefined : payload
+  );
+}
+
+function invokeSync(name, payload) {
+  return ipcRenderer.invoke(
+    SYNC_PREFIX + name,
     payload === undefined ? undefined : payload
   );
 }
@@ -66,4 +82,59 @@ const api = {
   importConversation: (payload) => invoke('importConversation', payload || {}),
 };
 
+// Model-class surface (plan P1 §5.3): backed by the `model:` channels in
+// main.js. Full keys never cross this bridge — settings.get/set return only
+// masked previews.
+const models = {
+  listClasses: () => invokeModel('listClasses'),
+  listModels: (cls) => invokeModel('listModels', { class: cls }),
+  // Always streaming: pass an onDelta callback to receive live chunks over
+  // CHAT_DELTA_CHANNEL; the invoke resolves once with the final result.
+  chat: (payload, onDelta) => {
+    const opts = payload || {};
+    if (typeof onDelta !== 'function') {
+      return invokeModel('chat', opts);
+    }
+    const listener = (_event, chunk) => onDelta(chunk);
+    const cleanup = () =>
+      ipcRenderer.removeListener(CHAT_DELTA_CHANNEL, listener);
+    ipcRenderer.on(CHAT_DELTA_CHANNEL, listener);
+    return invokeModel('chat', opts).then(
+      (result) => {
+        cleanup();
+        return result;
+      },
+      (err) => {
+        cleanup();
+        throw err;
+      }
+    );
+  },
+  settings: {
+    get: () => invokeModel('settings.get'),
+    set: (provider, cfg) =>
+      invokeModel('settings.set', {
+        provider,
+        baseURL: cfg && cfg.baseURL,
+        key: cfg && cfg.key,
+      }),
+    remove: (provider) => invokeModel('settings.remove', { provider }),
+  },
+  cancel: (sessionId) => invokeModel('cancel', { sessionId }),
+};
+
+// Session sync surface (plan P1 §5.3 / P3 §7): local persistence now, cloud
+// push/pull later.
+const sync = {
+  listSessions: () => invokeSync('listSessions'),
+  open: (sessionId) => invokeSync('open', { sessionId }),
+  save: (session) => invokeSync('save', session || {}),
+  append: (sessionId, message) => invokeSync('append', { sessionId, message }),
+  delete: (sessionId) => invokeSync('delete', { sessionId }),
+  push: () => invokeSync('push'),
+  status: () => invokeSync('status'),
+};
+
 contextBridge.exposeInMainWorld('aegis', Object.freeze(api));
+contextBridge.exposeInMainWorld('models', Object.freeze(models));
+contextBridge.exposeInMainWorld('sync', Object.freeze(sync));
