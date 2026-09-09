@@ -83,19 +83,44 @@ const stubClient = {
   async memoryList() {
     return { results: [] };
   },
+  async verifyToken(token) {
+    calls.push(['verifyToken', token]);
+    return { valid: true };
+  },
+  async memoryActivate(token) {
+    calls.push(['memoryActivate', token]);
+    return { ok: true };
+  },
+  async memoryPull(since) {
+    calls.push(['memoryPull', since]);
+    return { entries: [] };
+  },
+  async memorySaveBatch(entries) {
+    calls.push(['memorySaveBatch', entries]);
+    return { ok: true };
+  },
+  async importConversation(payload) {
+    calls.push(['importConversation', payload]);
+    return { ok: true };
+  },
 };
 
 const EXPECTED = [
-  'status',
-  'verifyApiKey',
-  'tokenBankBalance',
-  'listModels',
-  'chatCompletion',
-  'byokStatus',
   'byokSet',
-  'memorySearch',
-  'memorySave',
+  'byokStatus',
+  'chatCompletion',
+  'importConversation',
+  'listModels',
+  'memoryActivate',
   'memoryList',
+  'memoryPull',
+  'memorySave',
+  'memorySaveBatch',
+  'memorySearch',
+  'status',
+  'tokenBankBalance',
+  'verifyApiKey',
+  'verifyToken',
 ];
 
 try {
