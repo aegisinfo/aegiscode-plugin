@@ -265,7 +265,7 @@ function createClient(opts = {}) {
     const body = {
       model: requestedModel,
       messages: buildMessages(messages, system, prompt),
-      max_tokens: maxTokens || 1024,
+      max_tokens: maxTokens || 4096,
       ...(extra || {}),
     };
     if (!stream || typeof onStream !== 'function') {
@@ -297,7 +297,7 @@ function createClient(opts = {}) {
     const body = {
       provider,
       messages: buildMessages(messages, system, prompt),
-      max_tokens: maxTokens || 1024,
+      max_tokens: maxTokens || 4096,
     };
     if (model) body.model = model;
     const headers = {
