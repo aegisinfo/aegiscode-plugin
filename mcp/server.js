@@ -5,111 +5,20 @@
  * Zero dependencies: raw JSON-RPC 2.0 over stdio (newline-delimited), Node's
  * global fetch. Runs from a bare `node server.js` — no npm install required.
  *
- * Auth: reads the user's AEGIS API key from AEGIS_API_KEY (keys look like
- * `aegis_...`). Memory endpoints need a separate memory_token, which we obtain
- * by exchanging the API key via /api/verify-api-key and cache for the process.
+ * This is a thin HOST: all transport lives in ../client/aegis.js. This file
+ * only defines tool schemas, formats results, and speaks MCP JSON-RPC.
  */
 
 'use strict';
 
-const { randomUUID } = require('node:crypto');
+const { createClient } = require('../client/aegis.js');
 
-// .mcp.json declares these as "${VAR}" template refs so Claude Code passes
-// the user's real shell env through to this subprocess. When the var is
-// unset in the shell, Claude Code has been observed to leave the template
-// literally unexpanded (e.g. process.env.AEGIS_API_BASE === "${AEGIS_API_BASE}")
-// instead of omitting it — which defeats a plain `|| default` fallback since
-// that literal string is truthy. Treat anything shaped like an unexpanded
-// template as absent.
-function envVar(name) {
-  const v = process.env[name];
-  return v && !/^\$\{[A-Z_]+\}$/.test(v) ? v : '';
-}
-
-const API_BASE = (envVar('AEGIS_API_BASE') || 'https://aegiscloud.org').replace(/\/+$/, '');
-const API_KEY = envVar('AEGIS_API_KEY');
-// Optional: a memory token supplied directly, bypassing the api_key exchange.
-// Some accounts hold a memory token separate from (or without) an API key.
-const MEMORY_TOKEN = envVar('AEGIS_MEMORY_TOKEN');
-const CLIENT_VERSION = '3.1.0';
+const aegis = createClient();
+const API_KEY = aegis.apiKey;
+const API_BASE = aegis.apiBase;
 const SERVER_NAME = 'aegis';
 // Keep in sync with .claude-plugin/plugin.json "version".
 const SERVER_VERSION = '0.2.0';
-
-// ---------------------------------------------------------------------------
-// HTTP helpers
-// ---------------------------------------------------------------------------
-
-/** Base headers every request carries (version gate + key). */
-function authHeaders(extra) {
-  return {
-    'Content-Type': 'application/json',
-    'X-AEGIS-Version': CLIENT_VERSION,
-    'X-API-Key': API_KEY,
-    Authorization: `Bearer ${API_KEY}`,
-    ...extra,
-  };
-}
-
-async function apiPost(path, body, headers) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: 'POST',
-    headers: headers || authHeaders(),
-    body: JSON.stringify(body || {}),
-  });
-  return parseResponse(res);
-}
-
-async function apiGet(path, headers) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: 'GET',
-    headers: headers || authHeaders(),
-  });
-  return parseResponse(res);
-}
-
-async function parseResponse(res) {
-  const text = await res.text();
-  let data;
-  try {
-    data = text ? JSON.parse(text) : {};
-  } catch {
-    data = { raw: text };
-  }
-  if (!res.ok) {
-    const msg =
-      (data && (data.error?.message || data.error || data.message)) ||
-      `HTTP ${res.status}`;
-    const err = new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
-    err.status = res.status;
-    err.data = data;
-    throw err;
-  }
-  return data;
-}
-
-// Memory endpoints authenticate with a memory_token, not the API key.
-let _memoryTokenCache = null;
-async function getMemoryToken() {
-  if (MEMORY_TOKEN) return MEMORY_TOKEN;
-  if (_memoryTokenCache) return _memoryTokenCache;
-  const info = await apiPost('/api/verify-api-key', { api_key: API_KEY });
-  if (!info || !info.memory_token) {
-    throw new Error(
-      'This AEGIS account has no memory token. Enable cloud memory at https://aegiscloud.org/subscribe.'
-    );
-  }
-  _memoryTokenCache = info.memory_token;
-  return _memoryTokenCache;
-}
-
-function memoryHeaders(token) {
-  return {
-    'Content-Type': 'application/json',
-    'X-AEGIS-Version': CLIENT_VERSION,
-    Authorization: `Bearer ${token}`,
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Tool implementations
@@ -121,7 +30,7 @@ const TOOLS = {
       "Check the current AEGIS account: validates the API key and reports the plan, email, and whether cloud memory is enabled. Call this first to confirm setup.",
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     async run() {
-      const info = await apiPost('/api/verify-api-key', { api_key: API_KEY });
+      const info = await aegis.verifyApiKey();
       const lines = [
         `Key valid: ${info.valid ? 'yes' : 'no'}`,
         `Plan:      ${info.plan || 'unknown'}`,
@@ -162,20 +71,17 @@ const TOOLS = {
       additionalProperties: false,
     },
     async run(args) {
-      const messages = [];
-      if (args.system) messages.push({ role: 'system', content: args.system });
-      messages.push({ role: 'user', content: args.prompt });
       // Use the OpenAI-compatible endpoint (stream:false): it returns structured
       // JSON errors (e.g. 402 insufficient_quota) instead of the opaque 502 that
       // /api/v1/complete emits. An exact `model` id pins that provider directly;
       // otherwise `nexus-${mode}` selects the auto-routing tier.
       const mode = args.mode || 'smart';
-      const requestedModel = args.model || `nexus-${mode}`;
-      const data = await apiPost('/api/v1/chat/completions', {
-        model: requestedModel,
-        messages,
-        max_tokens: args.max_tokens || 1024,
-        stream: false,
+      const data = await aegis.chatCompletion({
+        prompt: args.prompt,
+        system: args.system,
+        model: args.model,
+        mode,
+        maxTokens: args.max_tokens || 1024,
       });
       const choice = (data.choices && data.choices[0]) || {};
       const text = (choice.message && choice.message.content) || '(empty response)';
@@ -195,7 +101,7 @@ const TOOLS = {
       "List the exact models available to pin with aegis_ask's `model` argument, instead of letting `mode` auto-route to the cheapest provider.",
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     async run() {
-      const data = await apiGet('/api/v1/models');
+      const data = await aegis.listModels();
       const models = data.models || [];
       if (!models.length) return 'No pinnable models are currently configured on AEGIS.';
       return [
@@ -211,7 +117,7 @@ const TOOLS = {
       "Check the AEGIS token bank balance and recent spend. Call this before aegis_ask if you're unsure whether the account has funds, or to see what recent calls cost.",
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     async run() {
-      const data = await apiGet('/api/token-bank/balance');
+      const data = await aegis.tokenBankBalance();
       const lines = [`Balance: €${data.balance_eur ?? '0'}`];
       const ledger = (data.ledger || []).slice(0, 5);
       if (ledger.length) {
@@ -239,7 +145,7 @@ const TOOLS = {
       "List which providers (anthropic, groq, openai) have a Bring-Your-Own-Key configured on this AEGIS account. A configured BYOK key is used automatically by aegis_ask instead of the pooled balance for that provider, so calls no longer cost AEGIS token-bank funds.",
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     async run() {
-      const data = await apiGet('/api/user/api-keys');
+      const data = await aegis.byokStatus();
       const rows = Object.entries(data || {}).map(([provider, info]) => {
         const set = info && info.set;
         return `  ${provider}: ${set ? `set (${info.masked})` : 'not set'}`;
@@ -261,10 +167,7 @@ const TOOLS = {
       additionalProperties: false,
     },
     async run(args) {
-      const data = await apiPost('/api/user/api-keys', {
-        provider: args.provider,
-        api_key: args.api_key || '',
-      });
+      const data = await aegis.byokSet(args.provider, args.api_key);
       return data.message || (args.api_key ? `${args.provider} key saved.` : `${args.provider} key removed.`);
     },
   },
@@ -282,12 +185,7 @@ const TOOLS = {
       additionalProperties: false,
     },
     async run(args) {
-      const token = await getMemoryToken();
-      const data = await apiPost(
-        '/api/memory/search',
-        { query: args.query || '', limit: args.limit || 5 },
-        memoryHeaders(token)
-      );
+      const data = await aegis.memorySearch(args.query, args.limit || 5);
       const entries = data.entries || [];
       if (!entries.length) return `No memory entries matched "${args.query}".`;
       return entries
@@ -315,9 +213,8 @@ const TOOLS = {
       additionalProperties: false,
     },
     async run(args) {
-      const token = await getMemoryToken();
       const entry = {
-        id: randomUUID(),
+        id: aegis.randomUUID(),
         content: args.content,
         role: 'assistant',
         source: 'claude-code',
@@ -326,7 +223,7 @@ const TOOLS = {
         importance: typeof args.importance === 'number' ? args.importance : 5,
         timestamp: new Date().toISOString(),
       };
-      const data = await apiPost('/api/memory/save', { entry }, memoryHeaders(token));
+      const data = await aegis.memorySave(entry);
       return `Saved ${data.saved || 1} memory entry (id ${entry.id}).`;
     },
   },
@@ -342,16 +239,7 @@ const TOOLS = {
       additionalProperties: false,
     },
     async run(args) {
-      const token = await getMemoryToken();
-      // /api/memory/list is session-cookie (dashboard) auth, unusable here.
-      // The bearer-authenticated way to get recent entries is search with an
-      // empty query, which the backend returns most-recent-first.
-      const limit = args.limit || 10;
-      const data = await apiPost(
-        '/api/memory/search',
-        { query: '', limit },
-        memoryHeaders(token)
-      );
+      const data = await aegis.memoryList(args.limit || 10);
       const entries = data.entries || [];
       if (!entries.length) return 'AEGIS cloud memory is empty.';
       const body = entries.map((e, i) => `${i + 1}. ${e.content}`).join('\n');
