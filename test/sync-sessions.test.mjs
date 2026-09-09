@@ -90,4 +90,23 @@ assert(getSession(pdir, 'p2').title !== 'should be skipped', 'a locally-pending 
 assert(mergeRemoteSessions(pdir, []) === 0, 'merging an empty list is a no-op');
 assert(mergeRemoteSessions(pdir, [{ title: 'no id' }]) === 0, 'a remote record with no session_id/id is skipped');
 
+// ISO-string `updated_at` (what the cloud actually returns) must be normalized
+// to epoch-ms so last-write-wins ordering works — not coerced to NaN.
+const idir = mkdtempSync(join(tmpdir(), 'aegis-sessions-iso-'));
+upsertSession(idir, { id: 'local1', title: 'local' });
+markSynced(idir, 'local1');
+const newerIso = new Date(Date.now() + 60000).toISOString();
+const olderIso = new Date(Date.now() - 60000).toISOString();
+assert(
+  mergeRemoteSessions(idir, [{ session_id: 'local1', title: 'remote newer', messages: [], updated_at: newerIso }]) === 1,
+  'a remote copy with a newer ISO timestamp overwrites a non-pending local session',
+);
+assert(getSession(idir, 'local1').title === 'remote newer', 'ISO newer remote wins');
+assert(typeof getSession(idir, 'local1').updatedAt === 'number', 'merged updatedAt stays epoch-ms, not an ISO string');
+assert(
+  mergeRemoteSessions(idir, [{ session_id: 'local1', title: 'remote older', messages: [], updated_at: olderIso }]) === 0,
+  'a remote copy with an older ISO timestamp does not clobber a newer local session',
+);
+assert(getSession(idir, 'local1').title === 'remote newer', 'ISO older remote does not clobber');
+
 console.log('sessions tests passed');

@@ -33,6 +33,22 @@ function nextSeq(sessions) {
   return seq;
 }
 
+/**
+ * Normalize a remote `updated_at`/`updatedAt` to epoch milliseconds. The cloud
+ * returns an ISO-8601 string (e.g. "2026-07-16T14:20:00"); the local store
+ * uses `Date.now()` epoch-ms numbers. Comparing the two directly coerces the
+ * string to NaN, which breaks last-write-wins ordering. ISO strings are
+ * parsed; epoch-ms numbers pass through; anything else becomes 0.
+ */
+function toEpochMs(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    const ms = Date.parse(value);
+    if (Number.isFinite(ms)) return ms;
+  }
+  return 0;
+}
+
 function atomicWrite(file, data) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}`;
@@ -147,7 +163,7 @@ function mergeRemoteSessions(dir, remoteSessions) {
     const id = remote && (remote.session_id || remote.id);
     if (!id) continue;
     const local = sessions[id];
-    const remoteUpdatedAt = remote.updated_at || remote.updatedAt || 0;
+    const remoteUpdatedAt = toEpochMs(remote.updated_at ?? remote.updatedAt);
     if (local && (local.pending || (local.updatedAt || 0) >= remoteUpdatedAt)) {
       continue;
     }
