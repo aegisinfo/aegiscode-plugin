@@ -1,13 +1,28 @@
 :root {
-  --bg: #0d1117;
-  --panel: #161b22;
-  --border: #30363d;
-  --text: #e6edf3;
-  --muted: #8b949e;
-  --accent: #58a6ff;
-  --good: #3fb950;
-  --user: #1f6feb;
-  --assistant: #21262d;
+  --bg: #0a0e14;
+  --surface: #12161e;
+  --surface2: #181e28;
+  --border: #2a3342;
+  --border2: #3d4a5e;
+  --text: #d0dfee;
+  --text2: #7e9ab8;
+  --text3: #3a4a60;
+  --teal: #00e5c0;
+  --purple: #6b8fd4;
+  --green: #00ff88;
+  --red: #ff1744;
+  --amber: #ff9100;
+
+  --panel: var(--surface);
+  --muted: var(--text2);
+  --accent: var(--teal);
+  --good: var(--green);
+  --user: var(--purple);
+  --assistant: var(--surface2);
+
+  --font-display: 'Syne', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'DM Mono', monospace;
+  --font-chat: 'Ubuntu', 'Segoe UI', system-ui, sans-serif;
 }
 
 * {
@@ -25,8 +40,7 @@ body {
   flex-direction: column;
   background: var(--bg);
   color: var(--text);
-  font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-    Helvetica, Arial, sans-serif;
+  font: 14px/1.5 var(--font-display);
 }
 
 /* --------------------------------------------------------------- top bar */
@@ -35,18 +49,19 @@ body {
   align-items: center;
   gap: 12px;
   padding: 8px 16px;
-  background: var(--panel);
+  background: var(--surface);
   border-bottom: 1px solid var(--border);
 }
 
 .topbar h1 {
   font-size: 16px;
   margin: 0;
-  font-weight: 600;
+  font-weight: 700;
+  font-family: var(--font-display);
 }
 
 .accent {
-  color: var(--accent);
+  color: var(--teal);
 }
 
 .conn {
@@ -54,18 +69,20 @@ body {
   align-items: center;
   gap: 6px;
   font-size: 12px;
-  color: var(--muted);
+  color: var(--text2);
+  font-family: var(--font-mono);
 }
 
 .dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--muted);
+  background: var(--text3);
 }
 
 .dot.ok {
-  background: var(--good);
+  background: var(--teal);
+  box-shadow: 0 0 6px var(--teal);
 }
 
 .spacer {
@@ -77,11 +94,11 @@ body {
   align-items: center;
   gap: 8px;
   font-size: 12px;
-  color: var(--muted);
+  color: var(--text2);
 }
 
 #mode-label.local {
-  color: var(--accent);
+  color: var(--teal);
 }
 
 .switch {
@@ -100,7 +117,7 @@ body {
   position: absolute;
   inset: 0;
   border-radius: 18px;
-  background: #30363d;
+  background: var(--border);
   transition: 0.15s;
   cursor: pointer;
 }
@@ -118,7 +135,7 @@ body {
 }
 
 .switch input:checked + .slider {
-  background: var(--user);
+  background: var(--purple);
 }
 
 .switch input:checked + .slider::before {
@@ -141,7 +158,7 @@ main {
   flex-direction: column;
   gap: 12px;
   overflow-y: auto;
-  background: var(--panel);
+  background: var(--surface);
 }
 
 .chat {
@@ -149,10 +166,11 @@ main {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  background: var(--bg);
 }
 
 .card {
-  background: var(--bg);
+  background: var(--surface2);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 12px;
@@ -162,8 +180,9 @@ main {
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--muted);
+  color: var(--text2);
   margin: 0 0 8px;
+  font-family: var(--font-display);
 }
 
 .card dl {
@@ -172,10 +191,11 @@ main {
   gap: 4px 10px;
   margin: 0;
   font-size: 13px;
+  font-family: var(--font-mono);
 }
 
 .card dt {
-  color: var(--muted);
+  color: var(--text2);
 }
 
 .card dd {
@@ -186,11 +206,17 @@ main {
 select {
   width: 100%;
   margin-top: 6px;
-  background: var(--bg);
+  background: var(--surface);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 6px;
+  font-family: var(--font-display);
+}
+
+select:focus {
+  outline: none;
+  border-color: var(--teal);
 }
 
 select:disabled {
@@ -199,7 +225,7 @@ select:disabled {
 
 .hint {
   font-size: 12px;
-  color: var(--muted);
+  color: var(--text2);
   margin: 8px 0 0;
 }
 
@@ -212,7 +238,7 @@ select:disabled {
 .memory-search input {
   flex: 1;
   min-width: 0;
-  background: var(--bg);
+  background: var(--surface);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -222,18 +248,23 @@ select:disabled {
 
 .memory-search input:focus {
   outline: none;
-  border-color: var(--accent);
+  border-color: var(--teal);
 }
 
 .memory-search button {
   border: none;
   border-radius: 6px;
-  background: var(--assistant);
+  background: var(--surface2);
   color: var(--text);
   border: 1px solid var(--border);
   padding: 0 10px;
   font: inherit;
   cursor: pointer;
+}
+
+.memory-search button:hover {
+  border-color: var(--teal);
+  color: var(--teal);
 }
 
 .memory-results {
@@ -256,7 +287,7 @@ select:disabled {
 }
 
 .memory-results .empty {
-  color: var(--muted);
+  color: var(--text2);
   border-style: dashed;
 }
 
@@ -264,7 +295,7 @@ select:disabled {
   width: 100%;
   margin-top: 10px;
   resize: none;
-  background: var(--bg);
+  background: var(--surface);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -274,7 +305,7 @@ select:disabled {
 
 #memory-entry:focus {
   outline: none;
-  border-color: var(--accent);
+  border-color: var(--teal);
 }
 
 .btn-block {
@@ -282,12 +313,16 @@ select:disabled {
   margin-top: 6px;
   border: none;
   border-radius: 6px;
-  background: var(--user);
-  color: #fff;
+  background: var(--teal);
+  color: #04140f;
   padding: 6px 0;
   font: inherit;
-  font-weight: 600;
+  font-weight: 700;
   cursor: pointer;
+}
+
+.btn-block:hover:not(:disabled) {
+  box-shadow: 0 0 12px rgba(0, 229, 192, 0.35);
 }
 
 .btn-block:disabled {
@@ -304,6 +339,7 @@ select:disabled {
   flex-direction: column;
   gap: 10px;
   min-height: 0;
+  font-family: var(--font-chat);
 }
 
 .msg {
@@ -314,20 +350,20 @@ select:disabled {
 
 .msg.user {
   align-self: flex-end;
-  background: var(--user);
+  background: var(--purple);
   color: #fff;
 }
 
 .msg.assistant {
   align-self: flex-start;
-  background: var(--assistant);
+  background: var(--surface2);
   border: 1px solid var(--border);
 }
 
 .msg.system {
   align-self: center;
   background: transparent;
-  color: var(--muted);
+  color: var(--text2);
   font-size: 12px;
   border: 1px dashed var(--border);
   max-width: 92%;
@@ -345,6 +381,7 @@ select:disabled {
   letter-spacing: 0.05em;
   opacity: 0.7;
   margin-bottom: 2px;
+  font-family: var(--font-display);
 }
 
 .msg.user .who {
@@ -358,8 +395,9 @@ select:disabled {
 
 .meta {
   font-size: 11px;
-  color: var(--muted);
+  color: var(--text2);
   margin-top: 6px;
+  font-family: var(--font-mono);
 }
 
 .msg.user .meta {
@@ -371,36 +409,53 @@ select:disabled {
 .composer {
   display: flex;
   gap: 8px;
+  align-items: flex-end;
   padding: 12px;
-  border-top: 1px solid var(--border);
-  background: var(--panel);
+  margin: 0 auto;
+  max-width: 100%;
+  width: calc(100% - 24px);
+  border: 1px solid var(--border2);
+  border-radius: 16px;
+  background: var(--surface2);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+  transition: border-color 0.15s, box-shadow 0.15s;
+  margin-bottom: 12px;
+}
+
+.composer:focus-within {
+  border-color: var(--teal);
+  box-shadow: 0 0 0 1px rgba(0, 229, 192, 0.35), 0 6px 22px rgba(0, 229, 192, 0.08);
 }
 
 .composer textarea {
   flex: 1;
   resize: none;
-  background: var(--bg);
+  background: transparent;
   color: var(--text);
-  border: 1px solid var(--border);
+  border: none;
   border-radius: 8px;
   padding: 8px 10px;
   font: inherit;
+  font-family: var(--font-chat);
 }
 
 .composer textarea:focus {
   outline: none;
-  border-color: var(--accent);
 }
 
 .composer button {
   border: none;
   border-radius: 8px;
-  background: var(--user);
-  color: #fff;
+  background: var(--teal);
+  color: #04140f;
   padding: 0 18px;
   font: inherit;
-  font-weight: 600;
+  font-weight: 700;
   cursor: pointer;
+}
+
+.composer button:hover:not(:disabled) {
+  box-shadow: 0 0 12px rgba(0, 229, 192, 0.35);
 }
 
 .composer button:disabled {
@@ -412,14 +467,14 @@ select:disabled {
 label {
   display: block;
   font-size: 12px;
-  color: var(--muted);
+  color: var(--text2);
   margin-top: 8px;
 }
 
 .ghost-btn {
   border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--assistant);
+  background: var(--surface2);
   color: var(--text);
   padding: 4px 10px;
   font: inherit;
@@ -428,7 +483,8 @@ label {
 }
 
 .ghost-btn:hover {
-  border-color: var(--accent);
+  border-color: var(--teal);
+  color: var(--teal);
 }
 
 .ghost-btn:disabled {
@@ -437,14 +493,14 @@ label {
 }
 
 .ghost-btn.danger:hover {
-  border-color: #f85149;
-  color: #f85149;
+  border-color: var(--red);
+  color: var(--red);
 }
 
 #model-input {
   width: 100%;
   margin-top: 6px;
-  background: var(--bg);
+  background: var(--surface);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -454,15 +510,15 @@ label {
 
 #model-input:focus {
   outline: none;
-  border-color: var(--accent);
+  border-color: var(--teal);
 }
 
 .cancel-btn {
   margin-top: 8px;
-  border: 1px solid #f85149;
+  border: 1px solid var(--red);
   border-radius: 6px;
   background: transparent;
-  color: #f85149;
+  color: var(--red);
   padding: 2px 10px;
   font: inherit;
   font-size: 11px;
@@ -471,10 +527,10 @@ label {
 
 .remember-btn {
   margin-top: 8px;
-  border: 1px solid var(--accent);
+  border: 1px solid var(--teal);
   border-radius: 6px;
   background: transparent;
-  color: var(--accent);
+  color: var(--teal);
   padding: 2px 10px;
   font: inherit;
   font-size: 11px;
@@ -504,7 +560,7 @@ label {
 
 .setting-input {
   width: 100%;
-  background: var(--bg);
+  background: var(--surface);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -515,12 +571,12 @@ label {
 
 .setting-input:focus {
   outline: none;
-  border-color: var(--accent);
+  border-color: var(--teal);
 }
 
 .setting-status {
   font-size: 11px;
-  color: var(--muted);
+  color: var(--text2);
 }
 
 .setting-actions {
@@ -542,7 +598,7 @@ label {
 
 .sessions-list .empty {
   font-size: 12px;
-  color: var(--muted);
+  color: var(--text2);
   border: 1px dashed var(--border);
   border-radius: 6px;
   padding: 6px 8px;
@@ -559,7 +615,7 @@ label {
 }
 
 .session-row:hover {
-  border-color: var(--accent);
+  border-color: var(--teal);
 }
 
 .session-title {
@@ -569,5 +625,5 @@ label {
 
 .session-meta {
   font-size: 11px;
-  color: var(--muted);
+  color: var(--text2);
 }
