@@ -214,10 +214,64 @@ function createModelDispatch(engine) {
 
 /**
  * Pure mapping: sync:<name> -> sessions store call (unit-testable in Node).
- * `push` is a P3 cloud-sync surface: for now it is a no-op stub that reports
- * nothing queued — local persistence is fully wired (§5.1/P3 §7).
+ * `push`/`pull` are the P3 cloud-sync surface (plan §7/§8.5): they reuse the
+ * shared client's memory-token auth (`aegis.conversationSyncPush/Pull`) — no
+ * new credential flow. Offline-first: with no AEGIS key configured, both
+ * resolve `{ ok: false, reason }` without ever throwing, and every local
+ * flow (save/append/list) keeps working untouched.
  */
-function createSyncDispatch(sessions, dir) {
+function createSyncDispatch(sessions, dir, aegis) {
+  let lastSyncAt = null;
+
+  function hasCloud() {
+    return Boolean(aegis && aegis.apiKey);
+  }
+
+  async function push() {
+    const pending = sessions.listPending(dir);
+    if (!hasCloud()) {
+      return { ok: false, queued: pending.length, reason: 'no AEGIS key configured' };
+    }
+    if (!pending.length) return { ok: true, queued: 0, pushed: 0 };
+
+    let pushed = 0;
+    let lastError = null;
+    for (const session of pending) {
+      try {
+        const result = await aegis.conversationSyncPush({
+          session_id: session.id,
+          title: session.title,
+          messages: session.messages,
+        });
+        const remoteId = result && (result.session_id || result.id);
+        sessions.markSynced(dir, session.id, { remoteId });
+        pushed += 1;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    const queued = sessions.listPending(dir).length;
+    if (pushed) lastSyncAt = Date.now();
+    if (pushed === 0 && lastError) {
+      return { ok: false, queued, reason: lastError.message || 'push failed' };
+    }
+    return { ok: true, queued, pushed };
+  }
+
+  async function pull() {
+    if (!hasCloud()) {
+      return { ok: false, merged: 0, reason: 'no AEGIS key configured' };
+    }
+    try {
+      const data = await aegis.conversationSyncPull();
+      const merged = sessions.mergeRemoteSessions(dir, (data && data.sessions) || []);
+      lastSyncAt = Date.now();
+      return { ok: true, merged };
+    } catch (err) {
+      return { ok: false, merged: 0, reason: err && err.message ? err.message : String(err) };
+    }
+  }
+
   return {
     listSessions: () => ({ sessions: sessions.listSessions(dir) }),
     open: (payload) => sessions.getSession(dir, payload && payload.sessionId),
@@ -230,15 +284,13 @@ function createSyncDispatch(sessions, dir) {
       ),
     delete: (payload) =>
       sessions.deleteSession(dir, payload && payload.sessionId),
-    push: () => ({
-      ok: false,
-      queued: false,
-      reason: 'cloud sync (P3) not implemented',
-    }),
+    push,
+    pull,
     status: () => ({
       count: sessions.listSessions(dir).length,
-      pending: 0,
-      cloud: false,
+      pending: sessions.listPending(dir).length,
+      cloud: hasCloud(),
+      lastSyncAt,
     }),
   };
 }
@@ -246,11 +298,22 @@ function createSyncDispatch(sessions, dir) {
 /**
  * Register model:<name> and sync:<name> on ipcMain. `model:chat` is always
  * streaming: deltas are pushed over CHAT_DELTA_CHANNEL exactly like the
- * existing `aegis:chatCompletion` special case.
+ * existing `aegis:chatCompletion` special case. `aegis` (the shared client)
+ * is optional — headless/offline callers omit it and every sync method falls
+ * back to its no-cloud branch.
+ *
+ * `model:listModels` and `sync:status` also fire a background retry push of
+ * any pending sessions (plan §7 "retry on a heartbeat"): fire-and-forget,
+ * never awaited, never throws — it just gives queued sessions another
+ * chance to sync without a dedicated poller.
  */
-function registerModelIpc(ipcMain, engine, sessionsDir) {
+function registerModelIpc(ipcMain, engine, sessionsDir, aegis) {
   const modelDispatch = createModelDispatch(engine);
-  const syncDispatch = createSyncDispatch(sessionStore, sessionsDir);
+  const syncDispatch = createSyncDispatch(sessionStore, sessionsDir, aegis);
+
+  function heartbeatRetry() {
+    syncDispatch.push().catch(() => {});
+  }
 
   for (const [name, handler] of Object.entries(modelDispatch)) {
     if (name === 'chat') {
@@ -270,10 +333,24 @@ function registerModelIpc(ipcMain, engine, sessionsDir) {
       });
       continue;
     }
+    if (name === 'listModels') {
+      ipcMain.handle(`${MODEL_PREFIX}${name}`, (_event, payload) => {
+        heartbeatRetry();
+        return handler(payload);
+      });
+      continue;
+    }
     ipcMain.handle(`${MODEL_PREFIX}${name}`, (_event, payload) => handler(payload));
   }
 
   for (const [name, handler] of Object.entries(syncDispatch)) {
+    if (name === 'status') {
+      ipcMain.handle(`${SYNC_PREFIX}${name}`, (_event, payload) => {
+        heartbeatRetry();
+        return handler(payload);
+      });
+      continue;
+    }
     ipcMain.handle(`${SYNC_PREFIX}${name}`, (_event, payload) => handler(payload));
   }
 
@@ -292,7 +369,7 @@ function bootstrap() {
   const aegis = createClient();
   registerIpc(ipcMain, aegis);
   const { engine, sessionsDir } = createEngine(aegis, { app, safeStorage });
-  registerModelIpc(ipcMain, engine, sessionsDir);
+  registerModelIpc(ipcMain, engine, sessionsDir, aegis);
 
   function createWindow() {
     const win = new BrowserWindow({

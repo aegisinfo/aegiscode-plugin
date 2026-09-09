@@ -7,7 +7,7 @@
  *   - window.aegis.*   cloud status / memory / account (back-compat surface)
  *   - window.models.*  4-class provider layer (Aegis Cloud, BYOK, Ollama,
  *                      custom OpenAI-/Anthropic-compatible) — the chat path
- *   - window.sync.*    local session persistence (P3 cloud sync later)
+ *   - window.sync.*    local session persistence + cloud push/pull (P3 §7)
  *
  * No engine/routing logic lives here; the model class is the user's explicit
  * selection, routed in the main process. If this file grows engine logic it is
@@ -48,6 +48,8 @@ const els = {
   sessionsRefresh: $('sessions-refresh'),
   sessionsList: $('sessions-list'),
   sessionsHint: $('sessions-hint'),
+  syncNow: $('sync-now'),
+  syncStatus: $('sync-status'),
   newChat: $('new-chat'),
   memorySearchForm: $('memory-search-form'),
   memoryQuery: $('memory-query'),
@@ -495,6 +497,52 @@ async function loadSessions() {
   }
 }
 
+function renderSyncStatus(status) {
+  if (!els.syncStatus) return;
+  if (!status) {
+    els.syncStatus.textContent = '';
+    return;
+  }
+  const bits = [status.cloud ? 'cloud sync on' : 'cloud sync off (no key)', `${status.pending} pending`];
+  if (status.lastSyncAt) {
+    bits.push(`last synced ${new Date(status.lastSyncAt).toLocaleTimeString()}`);
+  }
+  els.syncStatus.textContent = bits.join(' · ');
+}
+
+async function refreshSyncStatus() {
+  try {
+    renderSyncStatus(await sync.status());
+  } catch {
+    renderSyncStatus(null);
+  }
+}
+
+/** Explicit "Sync now" — push pending sessions, then pull remote ones.
+ *  Offline-first: sync.push()/sync.pull() resolve `{ ok:false, reason }`
+ *  rather than throwing, so this only hits the catch on an unexpected error. */
+async function syncNow() {
+  els.syncNow.disabled = true;
+  els.sessionsHint.textContent = 'syncing…';
+  try {
+    const pushResult = await sync.push();
+    const pullResult = await sync.pull();
+    if (!pushResult.ok && !pullResult.ok) {
+      els.sessionsHint.textContent =
+        `sync failed: ${pushResult.reason || pullResult.reason || 'unknown error'}`;
+    } else {
+      els.sessionsHint.textContent =
+        `synced (pushed ${pushResult.pushed || 0}, pulled ${pullResult.merged || 0})`;
+    }
+  } catch (err) {
+    els.sessionsHint.textContent = `sync failed: ${err && err.message ? err.message : err}`;
+  } finally {
+    els.syncNow.disabled = false;
+    await refreshSyncStatus();
+    await loadSessions();
+  }
+}
+
 function openSession(id) {
   sync.open(id)
     .then((s) => {
@@ -636,6 +684,7 @@ async function init() {
 
   els.newChat.addEventListener('click', newChat);
   els.sessionsRefresh.addEventListener('click', loadSessions);
+  els.syncNow.addEventListener('click', syncNow);
 
   els.composer.addEventListener('submit', (e) => {
     e.preventDefault();
@@ -659,6 +708,7 @@ async function init() {
   await loadClasses();
   await loadSettings();
   await loadSessions();
+  await refreshSyncStatus();
   loadAccountInfo();
   searchMemory('');
 }

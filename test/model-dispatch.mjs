@@ -68,7 +68,7 @@ const MODEL_NAMES = [
   'cancel',
 ];
 
-const SYNC_NAMES = ['listSessions', 'open', 'save', 'append', 'delete', 'push', 'status'];
+const SYNC_NAMES = ['listSessions', 'open', 'save', 'append', 'delete', 'push', 'pull', 'status'];
 
 try {
   // 1. model: dispatch maps exactly the whitelist.
@@ -101,9 +101,12 @@ try {
     'settings.set forwards provider + config'
   );
 
-  // 2. sync: dispatch against the real sessions store in a temp dir.
+  // 2. sync: dispatch against the real sessions store in a temp dir, offline
+  //    (no aegis client passed) — every local flow still works, push/status
+  //    report the no-cloud branch without throwing.
   const dir = mkdtempSync(join(tmpdir(), 'aegis-model-sync-'));
-  const syncDispatch = createSyncDispatch(require('../desktop/lib/sync/sessions.js'), dir);
+  const sessionsStore = require('../desktop/lib/sync/sessions.js');
+  const syncDispatch = createSyncDispatch(sessionsStore, dir);
   const syncKeys = Object.keys(syncDispatch).sort();
   assert(
     syncKeys.length === SYNC_NAMES.length,
@@ -115,10 +118,39 @@ try {
   assert(listed2.sessions.length === 1 && listed2.sessions[0].id === 's1', 'append + list round-trip');
   const opened = await syncDispatch.open({ sessionId: 's1' });
   assert(opened.messages.length === 1, 'open returns the session');
-  const push = await syncDispatch.push();
-  assert(push.queued === false, 'push is the P3 no-op stub');
+  const offlinePush = await syncDispatch.push();
+  assert(offlinePush.ok === false && offlinePush.queued === 1, 'push with no cloud client reports queued, not thrown');
+  const offlinePull = await syncDispatch.pull();
+  assert(offlinePull.ok === false, 'pull with no cloud client reports ok:false, not thrown');
   const status = await syncDispatch.status();
-  assert(status.count === 1 && status.cloud === false, 'status reports local count');
+  assert(
+    status.count === 1 && status.pending === 1 && status.cloud === false,
+    'status reports local count/pending with cloud:false when no key'
+  );
+
+  // 2b. sync: dispatch with a stub cloud client — push clears `pending` via
+  //     markSynced, pull merges a remote session into the local store.
+  const cloudCalls = [];
+  const stubAegis = {
+    apiKey: 'k',
+    async conversationSyncPush(transcript) {
+      cloudCalls.push(['push', transcript.session_id]);
+      return { session_id: `remote-${transcript.session_id}` };
+    },
+    async conversationSyncPull() {
+      cloudCalls.push(['pull']);
+      return { sessions: [{ session_id: 's-remote', title: 'from another machine', messages: [{ role: 'user', content: 'hi' }], updated_at: Date.now() }] };
+    },
+  };
+  const cloudSyncDispatch = createSyncDispatch(sessionsStore, dir, stubAegis);
+  const cloudPush = await cloudSyncDispatch.push();
+  assert(cloudPush.ok === true && cloudPush.pushed === 1 && cloudPush.queued === 0, 'push with a cloud client clears the pending queue');
+  assert(sessionsStore.getSession(dir, 's1').pending === false, 'markSynced cleared pending on the store');
+  const cloudPull = await cloudSyncDispatch.pull();
+  assert(cloudPull.ok === true && cloudPull.merged === 1, 'pull merges the remote session');
+  assert(sessionsStore.getSession(dir, 's-remote').title === 'from another machine', 'pulled session rehydrated locally');
+  const cloudStatus = await cloudSyncDispatch.status();
+  assert(cloudStatus.cloud === true && cloudStatus.pending === 0, 'status reflects cloud:true and no pending after sync');
 
   // 3. registerModelIpc wires model:<name> and sync:<name> channels, and
   //    model:chat forwards deltas over CHAT_DELTA_CHANNEL.

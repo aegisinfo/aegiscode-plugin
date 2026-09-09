@@ -524,6 +524,33 @@ function createClient(opts = {}) {
     );
   }
 
+  /**
+   * Push one local conversation transcript to aegis1's conversation-sync
+   * surface (P4.5), authenticated the same way as the memory endpoints
+   * (memory_token, not the API key — see getMemoryToken()). The response is
+   * returned verbatim; callers read `session_id`/`sessions` off it.
+   */
+  async function conversationSyncPush(transcript) {
+    const token = await getMemoryToken();
+    return apiPost(
+      '/api/conversations/sync',
+      {
+        session_id: transcript && transcript.session_id,
+        title: (transcript && transcript.title) || '',
+        messages: (transcript && transcript.messages) || [],
+        source: (transcript && transcript.source) || 'aegis-desktop',
+      },
+      memoryHeaders(token)
+    );
+  }
+
+  /** Pull the account's remote conversation sessions (no transcript to push —
+   *  same endpoint, list-only request). */
+  async function conversationSyncPull() {
+    const token = await getMemoryToken();
+    return apiPost('/api/conversations/sync', {}, memoryHeaders(token));
+  }
+
   /** Import a conversation transcript for later memory/training use. */
   async function importConversation({ messages, url, title, source } = {}) {
     return apiPost('/api/import', {
@@ -556,6 +583,8 @@ function createClient(opts = {}) {
     memoryActivate,
     memoryPull,
     memorySaveBatch,
+    conversationSyncPush,
+    conversationSyncPull,
     importConversation,
     randomUUID,
   };

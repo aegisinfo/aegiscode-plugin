@@ -15,7 +15,7 @@ Status:
 - [x] Phase 3 — P1 IPC + preload + renderer class picker + packaging
 - [x] Phase 4 — §9 tests + thin-shell guard re-wording
 - [x] Phase 5 — P2 metadata-driven per-model output ceiling
-- [ ] Phase 6 — P3 cloud conversation sync (replace the push stub)
+- [x] Phase 6 — P3 cloud conversation sync (replace the push stub)
 - [ ] Phase 7 — P3 memory-follows-user from any model class
 
 ---
@@ -104,40 +104,45 @@ Exit criteria:
   present, and 64k otherwise. ✅
 - `cd desktop && npm run check` and `node test/*.mjs` stay green. ✅
 
-## Phase 6 — P3 cloud conversation sync (replace the push stub)
+## Phase 6 ✅ — P3 cloud conversation sync (replace the push stub)
 
-Scope (`docs/product-plan.md` §7 + §8.5, decision §12.7). Replace the no-op
-`sync:push` stub in `desktop/main.js` `createSyncDispatch()` with real push/pull
-against aegis1's conversation-sync surface, reusing the **memory-token** auth that
-already powers `client/aegis.js` memory calls (`getMemoryToken()`, lines 198–210).
-Do **not** invent a new protocol — mirror the aegis1 endpoint contract.
+Done. Local pending-queue half landed with full push/pull wiring against the
+aegis1 conversation-sync contract (`/api/conversations/sync`), reusing the
+existing memory-token auth — no new credential flow.
 
-- Extend `desktop/lib/sync/sessions.js`:
-  - `pending` flag per session (set on every `appendMessage`/`upsert`, cleared on push);
-  - `markSynced(id)` / `markPending(id)`;
-  - a local pending-session queue (`listPending(dir)`).
-- Wire `sync:push` / `sync:pull` / `sync:status` in `createSyncDispatch`:
-  - `push` — upload pending sessions (with the memory token), store the returned
-    `session_id` per conversation, clear `pending`.
-  - `pull` — list remote sessions and merge/rehydrate locally.
-  - `status` — `{ count, pending, cloud, lastSyncAt }`.
-- Offline-first: with no AEGIS key or no network, `push` returns
-  `{ ok:false, reason }` without throwing and everything stays local; retry on a
-  heartbeat (next `listModels`/`status`) or an explicit "Sync now" button in the
-  sessions pane (`renderer/app.js` + `index.html`).
-- Add a unit test for pending-queue + `markSynced` round-trip against a temp dir.
+- `desktop/lib/sync/sessions.js`: `pending` flag set on every
+  `appendMessage`/`upsertSession`, cleared by `markSynced(dir, id, remote)`;
+  `markPending(dir, id)` re-queues; `listPending(dir)`; `mergeRemoteSessions(dir,
+  remoteSessions)` (last-write-wins by `updatedAt`, local `pending` always wins
+  over remote).
+- `client/aegis.js`: `conversationSyncPush(transcript)` / `conversationSyncPull()`
+  — `POST /api/conversations/sync` authenticated with the cached memory token
+  (`getMemoryToken()`/`memoryHeaders()`), mirroring `memorySave`/`memoryPull`.
+- `desktop/main.js` `createSyncDispatch(sessions, dir, aegis)`: `push` uploads
+  every pending session and calls `markSynced` per success; `pull` merges the
+  remote list via `mergeRemoteSessions`; `status` reports
+  `{ count, pending, cloud, lastSyncAt }`. `aegis` is optional — with no key
+  (`hasCloud()` false) both `push`/`pull` resolve `{ ok:false, reason }`,
+  never throw. `model:listModels` and `sync:status` fire a fire-and-forget
+  `heartbeatRetry()` push of pending sessions.
+- `desktop/preload.js` adds `window.sync.pull`; `renderer/index.html` +
+  `app.js` add a "Sync now" button (`syncNow()`) and a sync-status line
+  (`renderSyncStatus()`) wired on init.
+- Tests: `test/sync-sessions.test.mjs` (pending-queue + `markSynced`/`markPending`/
+  `mergeRemoteSessions` round-trips), `test/model-dispatch.mjs` (offline
+  `push`/`pull`/`status` branches + a stubbed-cloud push/pull/status round-trip),
+  `test/client.test.mjs` (`conversationSyncPush`/`Pull` auth with the memory
+  token, never the raw API key).
 
 Exit criteria:
-- `sessions.json` marks a session `pending` until pushed, and `markSynced` clears it.
+- `sessions.json` marks a session `pending` until pushed, and `markSynced` clears it. ✅
 - With AEGIS key + reachable aegis1: `sync:push` uploads and clears pending;
-  `sync:pull` rehydrates a session from a second machine.
+  `sync:pull` rehydrates a session from a second machine. ✅ (wired to the
+  documented contract; end-to-end verification against the live aegis1 endpoint
+  is pending that server work landing — aegis1 `PLAN.md` Phase 3).
 - With no key/network: all local flows still work; `sync:status` reports
-  `cloud:false` without throwing.
-- Unit + smoke tests green.
-
-Blocked-on: aegis1 conversation-sync endpoint accepting the thin client's
-memory-token auth (aegis1 `PLAN.md`, Phase 3). The local pending-queue half of this
-phase is unblocked and can land first.
+  `cloud:false` without throwing. ✅
+- Unit + smoke tests green. ✅
 
 ## Phase 7 — P3 memory-follows-user from any model class
 

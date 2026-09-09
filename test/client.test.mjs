@@ -102,6 +102,46 @@ try {
   assert(listed.models[0].context_window === 128000, 'context_window survives pass-through');
   assert(!('max_output' in listed.models[1]), 'models without metadata are not backfilled');
 
+  // 7. conversationSyncPush/Pull (plan P3 §6/§7): authenticate with the
+  // memory token exchanged via /api/verify-api-key — never the API key
+  // directly — exactly like memorySave()/memoryPull().
+  captured = [];
+  globalThis.fetch = async (url, opts) => {
+    captured.push({ url, opts });
+    if (String(url).endsWith('/api/verify-api-key')) {
+      return okJson({ memory_token: 'mem-token-123' });
+    }
+    if (String(url).endsWith('/api/conversations/sync')) {
+      return okJson({ session_id: 'remote-abc', sessions: [{ session_id: 'r1', title: 'from cloud' }] });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const pushResult = await client.conversationSyncPush({
+    session_id: 's1',
+    title: 'local session',
+    messages: [{ role: 'user', content: 'hi' }],
+  });
+  assert(pushResult.session_id === 'remote-abc', 'conversationSyncPush returns the server response verbatim');
+  const pushCall = captured[captured.length - 1];
+  assert(pushCall.url.endsWith('/api/conversations/sync'), 'conversationSyncPush posts to /api/conversations/sync');
+  assert(
+    pushCall.opts.headers.Authorization === 'Bearer mem-token-123',
+    'conversationSyncPush authenticates with the memory token, not the API key'
+  );
+  assert(!('X-API-Key' in pushCall.opts.headers), 'conversationSyncPush never sends the raw API key header');
+  const pushBody = JSON.parse(pushCall.opts.body);
+  assert(pushBody.session_id === 's1' && pushBody.title === 'local session', 'conversationSyncPush forwards the transcript');
+
+  const pullResult = await client.conversationSyncPull();
+  assert(pullResult.sessions[0].id === undefined && pullResult.sessions[0].session_id === 'r1', 'conversationSyncPull returns the raw remote session list');
+  const pullCall = captured[captured.length - 1];
+  assert(
+    pullCall.opts.headers.Authorization === 'Bearer mem-token-123',
+    'conversationSyncPull reuses the cached memory token (no second verify-api-key round trip)'
+  );
+  const verifyCalls = captured.filter((c) => String(c.url).endsWith('/api/verify-api-key'));
+  assert(verifyCalls.length === 1, 'the memory token is cached across push and pull');
+
   console.log('client body-builder tests passed');
 } finally {
   globalThis.fetch = originalFetch;

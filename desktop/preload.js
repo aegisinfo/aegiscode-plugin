@@ -132,6 +132,7 @@ const sync = {
   append: (sessionId, message) => invokeSync('append', { sessionId, message }),
   delete: (sessionId) => invokeSync('delete', { sessionId }),
   push: () => invokeSync('push'),
+  pull: () => invokeSync('pull'),
   status: () => invokeSync('status'),
 };
 
