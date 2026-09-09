@@ -1,0 +1,45 @@
+#!/bin/sh
+# pre-commit guard for aegiscode-plugin (aegiscode client/desktop).
+# Blocks commits that would sweep in runtime state, secrets, or build
+# artifacts (the same leak the autonomous runner caused on aegis1).
+#
+# Bypass (deliberate, loud): git commit --no-verify
+
+set -u
+
+# ── 1. Path blocklist ───────────────────────────────────────────────────────
+BLOCKED_PATH_RE='(^|/)(node_modules|desktop/node_modules|desktop/release|desktop/vendor|web-ext-artifacts|data|instance|__pycache__|\.git)(/|$)|\.log$|\.env([.-]|$)|\.(db|sqlite3)$|^dist/'
+
+# ── 2. Secret content scan ───────────────────────────────────────────────────
+SECRET_RE='jobrep_[A-Za-z0-9_-]{8,}|sk-[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|AEGIS_(MEMORY|DEVICE|OAUTH)_TOKEN=[A-Za-z0-9]'
+
+fail() {
+  echo "✗ pre-commit blocked: $1" >&2
+  echo "  If this is a real change, remove the blocked content or pass --no-verify" >&2
+  echo "  (and rotate the secret if it was ever exposed)." >&2
+  exit 1
+}
+
+if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
+  exit 0
+fi
+
+blocked_paths=$(
+  git diff --cached --name-only -z \
+    | tr '\0' '\n' \
+    | grep -E "$BLOCKED_PATH_RE" || true
+)
+if [ -n "$blocked_paths" ]; then
+  fail "blocked path(s) staged: $(echo "$blocked_paths" | tr '\n' ' ')"
+fi
+
+hits=$(
+  git diff --cached \
+    | grep -aE "^\+" \
+    | grep -aE "$SECRET_RE" || true
+)
+if [ -n "$hits" ]; then
+  fail "possible secret in staged content: $(echo "$hits" | sed -E 's/(jobrep_[A-Za-z0-9]{6}|sk-[A-Za-z0-9]{6}|ghp_[A-Za-z0-9]{6}|github_pat_[A-Za-z0-9]{6}|AKIA[0-9A-Z]{6})[A-Za-z0-9_-]*/\1…/g' | head -3 | tr '\n' ' ')"
+fi
+
+exit 0
