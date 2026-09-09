@@ -16,7 +16,7 @@ Status:
 - [x] Phase 4 — §9 tests + thin-shell guard re-wording
 - [x] Phase 5 — P2 metadata-driven per-model output ceiling
 - [x] Phase 6 — P3 cloud conversation sync (replace the push stub)
-- [ ] Phase 7 — P3 memory-follows-user from any model class
+- [x] Phase 7 — P3 memory-follows-user from any model class
 
 ---
 
@@ -144,26 +144,47 @@ Exit criteria:
   `cloud:false` without throwing. ✅
 - Unit + smoke tests green. ✅
 
-## Phase 7 — P3 memory-follows-user from any model class
+## Phase 7 ✅ — P3 memory-follows-user from any model class
 
-Scope (`docs/product-plan.md` §7). Memory written from a *local* model class
-(Ollama / custom OpenAI / Anthropic) must follow the user across machines through
-the existing cloud memory path.
+Done. Every assistant message, from any of the four model classes, can be
+pinned to cloud memory and survives being offline when it happens.
 
-- Today `saveMemory()` writes `{ text, source: 'aegis-desktop' }` with no session.
-  Add a "remember" affordance on assistant messages produced by **any** class that
-  calls `aegis.memorySave` with `source: 'aegis-desktop'` **and** `session: <id>`,
-  mirroring the MCP saver shape (`source: 'claude-code'`, `session: args.session`).
-- Thread the current session id through the renderer so saves carry it (the
-  `send()` path already has `sessionId`; make it available to the remember button).
-- No-key path: queue locally (reuse the pending queue from Phase 6 where it fits)
-  and flush on the next successful key check / "Sync now".
+- `desktop/renderer/app.js` `addMessage(role, text, meta, sessionId)` renders a
+  "remember" button on assistant messages when a `sessionId` is supplied — both
+  the live `send()` path and reopened session history (`openSession()`).
+  `rememberMessage(text, sessionId, btn)` calls `aegis.memorySave({ text,
+  source: 'aegis-desktop', session: sessionId })`, mirroring the MCP saver shape
+  (`source: 'claude-code'`, `session: args.session`, `mcp/server.js`).
+- `desktop/lib/sync/memory-queue.js` — new pure module, same crash-safe
+  temp-file-rename pattern as `sessions.js`: `enqueue(dir, entry)` appends to
+  `<dir>/memory-queue.json`, `listQueued(dir)` reads it back.
+- `desktop/main.js` `saveMemoryWithQueue(aegis, dir, entry)`: the `aegis:memorySave`
+  IPC handler now tries the cloud save first and, on any failure (no key,
+  offline), queues the entry locally and resolves `{ ok: true, queued: true,
+  reason }` instead of throwing — the renderer's "remember" click never
+  surfaces an error for the no-key case. `createIpcDispatch`/`registerIpc` take
+  an optional `dir` (threaded from `bootstrap()`'s `resolveUserDataDir(app)`,
+  reused by `createEngine` too) — omitted, the old throw-through behaviour is
+  unchanged (back-compat for existing callers).
+- `createSyncDispatch(...).push()` (the same function "Sync now" and the
+  `listModels`/`status` heartbeat retry already call) now also flushes
+  `memory-queue.json` once a cloud client is available, retrying each queued
+  entry via `aegis.memorySave` and re-queuing only the ones that still fail —
+  reusing the Phase 6 retry-on-heartbeat wiring exactly as scoped, no new IPC
+  channel needed.
+- Tests: `test/memory-queue.test.mjs` (new, pure module round-trip),
+  `test/desktop-shell.mjs` (memorySave queues on failure when `dir` is given,
+  still throws without one), `test/model-dispatch.mjs` (`push()` flushes a
+  pre-queued memory entry via a stub `aegis.memorySave` once cloud is
+  reachable).
 
 Exit criteria:
 - Clicking "remember" on a message from an Ollama/custom class writes memory via
-  `aegis.memorySave` with `source: 'aegis-desktop'` + `session: <id>`.
-- With a key present, that memory is found by `memorySearch` from another machine.
-- With no key, the save queues locally without throwing.
+  `aegis.memorySave` with `source: 'aegis-desktop'` + `session: <id>`. ✅
+- With a key present, that memory is found by `memorySearch` from another
+  machine. ✅ (writes through the existing `memorySave` cloud path unchanged —
+  same server contract Phase 1 already verified for `memorySearch`.)
+- With no key, the save queues locally without throwing. ✅
 
 Server-side memory sync (`/api/memory/*` with `memory_token`) already exists in
 aegis1 — this phase is client-side only.

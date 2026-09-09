@@ -52,6 +52,7 @@ const { createSettingsStore } = require('./lib/settings.js');
 const ollama = require('./lib/local/ollama.js');
 const providers = require('./lib/local/providers.js');
 const sessionStore = require('./lib/sync/sessions.js');
+const memoryQueue = require('./lib/sync/memory-queue.js');
 
 const IPC_PREFIX = 'aegis:';
 const MODEL_PREFIX = 'model:';
@@ -74,10 +75,28 @@ function maskKey(key) {
 }
 
 /**
+ * `aegis:memorySave` with the offline-first fallback (plan P3 §7): try the
+ * cloud save first; if it fails (no key, offline, transient error) queue the
+ * entry in <dir>/memory-queue.json instead of throwing, so the renderer's
+ * "remember" affordance never surfaces an error for the no-key case. `dir` is
+ * optional — callers that omit it (e.g. the desktop-shell smoke test) simply
+ * get the un-queued rejection back, unchanged from before this existed.
+ */
+async function saveMemoryWithQueue(aegis, dir, entry) {
+  try {
+    return await aegis.memorySave(entry);
+  } catch (err) {
+    if (!dir || !entry) throw err;
+    memoryQueue.enqueue(dir, entry);
+    return { ok: true, queued: true, reason: err && err.message ? err.message : String(err) };
+  }
+}
+
+/**
  * Pure mapping: IPC payload -> shared-client call. No Electron types here, so
  * tests can drive it with a stub client and a fake ipcMain.
  */
-function createIpcDispatch(aegis) {
+function createIpcDispatch(aegis, dir) {
   const dispatch = {
     status: () => ({
       appVersion: APP_VERSION,
@@ -115,7 +134,7 @@ function createIpcDispatch(aegis) {
     memorySearch: (payload) =>
       aegis.memorySearch(payload && payload.query, payload && payload.limit),
     memorySave: (payload) =>
-      aegis.memorySave(payload && payload.entry),
+      saveMemoryWithQueue(aegis, dir, payload && payload.entry),
     memoryList: (payload) =>
       aegis.memoryList(payload && payload.limit),
 
@@ -133,9 +152,11 @@ function createIpcDispatch(aegis) {
   return dispatch;
 }
 
-/** Register every dispatch method as `aegis:<name>` on ipcMain. */
-function registerIpc(ipcMain, aegis) {
-  const dispatch = createIpcDispatch(aegis);
+/** Register every dispatch method as `aegis:<name>` on ipcMain. `dir` (the
+ *  user-data dir) is optional and threaded through only for the memorySave
+ *  offline-queue fallback — see saveMemoryWithQueue(). */
+function registerIpc(ipcMain, aegis, dir) {
+  const dispatch = createIpcDispatch(aegis, dir);
   for (const [name, handler] of Object.entries(dispatch)) {
     if (name === 'chatCompletion') {
       // Streaming render (D2.1): when the renderer asks for stream, SSE deltas
@@ -185,8 +206,8 @@ function resolveUserDataDir(app) {
  * Wire the real LocalEngine registry: settings store + ollama/providers
  * transports + the shared cloud client. Transport-only — no brain logic.
  */
-function createEngine(aegis, { app, safeStorage } = {}) {
-  const dir = resolveUserDataDir(app);
+function createEngine(aegis, { app, safeStorage, dir: dirOverride } = {}) {
+  const dir = dirOverride || resolveUserDataDir(app);
   const settings = createSettingsStore({ dir, safeStorage });
   const engine = createLocalEngine({ aegis, settings, ollama, providers });
   return { engine, sessionsDir: dir };
@@ -227,12 +248,35 @@ function createSyncDispatch(sessions, dir, aegis) {
     return Boolean(aegis && aegis.apiKey);
   }
 
+  /** Retry every locally queued memory-save (plan P3 §7 "queue locally and
+   *  sync later") now that the cloud is reachable. Entries that still fail
+   *  (e.g. one bad entry among several) stay queued for the next attempt. */
+  async function flushMemoryQueue() {
+    const queued = memoryQueue.listQueued(dir);
+    if (!queued.length) return { flushed: 0 };
+    const remaining = [];
+    let flushed = 0;
+    for (const entry of queued) {
+      try {
+        await aegis.memorySave(entry);
+        flushed += 1;
+      } catch {
+        remaining.push(entry);
+      }
+    }
+    memoryQueue.save(dir, remaining);
+    return { flushed, remaining: remaining.length };
+  }
+
   async function push() {
     const pending = sessions.listPending(dir);
     if (!hasCloud()) {
       return { ok: false, queued: pending.length, reason: 'no AEGIS key configured' };
     }
-    if (!pending.length) return { ok: true, queued: 0, pushed: 0 };
+    const memoryFlush = await flushMemoryQueue();
+    if (!pending.length) {
+      return { ok: true, queued: 0, pushed: 0, memoryFlushed: memoryFlush.flushed };
+    }
 
     let pushed = 0;
     let lastError = null;
@@ -253,9 +297,9 @@ function createSyncDispatch(sessions, dir, aegis) {
     const queued = sessions.listPending(dir).length;
     if (pushed) lastSyncAt = Date.now();
     if (pushed === 0 && lastError) {
-      return { ok: false, queued, reason: lastError.message || 'push failed' };
+      return { ok: false, queued, reason: lastError.message || 'push failed', memoryFlushed: memoryFlush.flushed };
     }
-    return { ok: true, queued, pushed };
+    return { ok: true, queued, pushed, memoryFlushed: memoryFlush.flushed };
   }
 
   async function pull() {
@@ -367,8 +411,9 @@ function bootstrap() {
   app.setName('AEGIS Desktop');
 
   const aegis = createClient();
-  registerIpc(ipcMain, aegis);
-  const { engine, sessionsDir } = createEngine(aegis, { app, safeStorage });
+  const dataDir = resolveUserDataDir(app);
+  registerIpc(ipcMain, aegis, dataDir);
+  const { engine, sessionsDir } = createEngine(aegis, { app, safeStorage, dir: dataDir });
   registerModelIpc(ipcMain, engine, sessionsDir, aegis);
 
   function createWindow() {

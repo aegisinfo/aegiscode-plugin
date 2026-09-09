@@ -129,7 +129,12 @@ try {
   );
 
   // 2b. sync: dispatch with a stub cloud client — push clears `pending` via
-  //     markSynced, pull merges a remote session into the local store.
+  //     markSynced, pull merges a remote session into the local store, and
+  //     flushes any locally-queued memory saves (plan P3 §7).
+  const memoryQueue = require('../desktop/lib/sync/memory-queue.js');
+  memoryQueue.enqueue(dir, { text: 'remember me', source: 'aegis-desktop', session: 's1' });
+  assert(memoryQueue.listQueued(dir).length === 1, 'memory entry queued locally before any cloud client exists');
+
   const cloudCalls = [];
   const stubAegis = {
     apiKey: 'k',
@@ -141,10 +146,17 @@ try {
       cloudCalls.push(['pull']);
       return { sessions: [{ session_id: 's-remote', title: 'from another machine', messages: [{ role: 'user', content: 'hi' }], updated_at: Date.now() }] };
     },
+    async memorySave(entry) {
+      cloudCalls.push(['memorySave', entry.text]);
+      return { ok: true };
+    },
   };
   const cloudSyncDispatch = createSyncDispatch(sessionsStore, dir, stubAegis);
   const cloudPush = await cloudSyncDispatch.push();
   assert(cloudPush.ok === true && cloudPush.pushed === 1 && cloudPush.queued === 0, 'push with a cloud client clears the pending queue');
+  assert(cloudPush.memoryFlushed === 1, 'push also flushes the queued memory entry');
+  assert(memoryQueue.listQueued(dir).length === 0, 'flushed memory entry is removed from the local queue');
+  assert(cloudCalls.some((c) => c[0] === 'memorySave' && c[1] === 'remember me'), 'the queued entry was saved via aegis.memorySave');
   assert(sessionsStore.getSession(dir, 's1').pending === false, 'markSynced cleared pending on the store');
   const cloudPull = await cloudSyncDispatch.pull();
   assert(cloudPull.ok === true && cloudPull.merged === 1, 'pull merges the remote session');

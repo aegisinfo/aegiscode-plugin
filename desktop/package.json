@@ -17,7 +17,7 @@
     "icon": "node scripts/generate-icon.mjs",
     "dist": "npm run predist && electron-builder",
     "dist:dir": "npm run predist && electron-builder --dir",
-    "check": "node --check main.js && node --check preload.js && node --check renderer/app.js && node --check renderer/max-tokens.js && node --check scripts/predist.mjs && node --check scripts/generate-icon.mjs && node --check lib/local/context.js && node --check lib/local/providers.js && node --check lib/local/ollama.js && node --check lib/local/engine.js && node --check lib/settings.js && node --check lib/sync/sessions.js",
+    "check": "node --check main.js && node --check preload.js && node --check renderer/app.js && node --check renderer/max-tokens.js && node --check scripts/predist.mjs && node --check scripts/generate-icon.mjs && node --check lib/local/context.js && node --check lib/local/providers.js && node --check lib/local/ollama.js && node --check lib/local/engine.js && node --check lib/settings.js && node --check lib/sync/sessions.js && node --check lib/sync/memory-queue.js",
     "test:shell": "node ../test/desktop-shell.mjs",
     "test:model": "node ../test/model-dispatch.mjs",
     "test:max-tokens": "node ../test/max-tokens.test.mjs"

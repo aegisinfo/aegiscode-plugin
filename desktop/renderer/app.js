@@ -161,7 +161,10 @@ async function saveMemory() {
   }
 }
 
-function addMessage(role, text, meta) {
+// `sessionId`, when given for an assistant message, renders a "remember"
+// button (plan P3 §7 memory-follows-user from any model class — Ollama,
+// custom OpenAI/Anthropic included, not just Aegis Cloud).
+function addMessage(role, text, meta, sessionId) {
   const row = document.createElement('div');
   row.className = `msg ${role}`;
 
@@ -184,9 +187,52 @@ function addMessage(role, text, meta) {
     row.appendChild(m);
   }
 
+  if (role === 'assistant' && sessionId) {
+    const rememberBtn = document.createElement('button');
+    rememberBtn.type = 'button';
+    rememberBtn.className = 'remember-btn';
+    rememberBtn.textContent = 'remember';
+    rememberBtn.addEventListener('click', () =>
+      rememberMessage(text, sessionId, rememberBtn)
+    );
+    row.appendChild(rememberBtn);
+  }
+
   els.messages.appendChild(row);
   els.messages.scrollTop = els.messages.scrollHeight;
   return row;
+}
+
+/**
+ * "Remember" affordance: pins one assistant message to AEGIS cloud memory
+ * from *any* model class, mirroring the MCP saver shape (source + session)
+ * so it's found by `memorySearch` from another machine. `aegis:memorySave`
+ * (desktop/main.js) queues the entry locally instead of throwing when no key
+ * is configured, so the no-key path here just reports "queued" — it never
+ * surfaces as an error.
+ */
+async function rememberMessage(text, sessionId, btn) {
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'remembering…';
+  }
+  try {
+    const result = await aegis.memorySave({
+      text,
+      source: 'aegis-desktop',
+      session: sessionId,
+    });
+    if (btn) {
+      btn.textContent = result && result.queued ? 'queued (offline)' : 'remembered';
+    }
+  } catch (err) {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'remember';
+    }
+    els.memoryHint.textContent =
+      `remember failed: ${err && err.message ? err.message : err}`;
+  }
 }
 
 function setBusy(busy, { cancellable } = {}) {
@@ -557,7 +603,7 @@ function openSession(id) {
           m.role === 'assistant' ? 'assistant'
             : m.role === 'system' ? 'system'
               : 'user';
-        addMessage(role, m.content || m.text || '');
+        addMessage(role, m.content || m.text || '', undefined, role === 'assistant' ? s.id : undefined);
       }
       els.sessionsHint.textContent = `opened ${s.id.slice(0, 8)}…`;
     })
@@ -633,7 +679,7 @@ async function send() {
     if (data && data.usage && data.usage.total_tokens != null) {
       bits.push(`tokens: ${data.usage.total_tokens}`);
     }
-    addMessage('assistant', text, bits.join(' · ') || undefined);
+    addMessage('assistant', text, bits.join(' · ') || undefined, sessionId);
 
     try {
       await sync.append(sessionId, { role: 'assistant', content: text });

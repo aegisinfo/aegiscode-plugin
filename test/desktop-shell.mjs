@@ -9,6 +9,9 @@
  * real IPC layer will. Nothing here touches the network.
  */
 import { createRequire } from 'node:module';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const require = createRequire(import.meta.url);
 const {
@@ -198,6 +201,38 @@ try {
 
   const models = await dispatch.listModels();
   assert(models.models.length === 2, 'listModels response should pass through');
+
+  // 4b. memorySave offline-queue fallback (plan P3 §7): when the cloud save
+  // fails (no key / offline) and a userData dir is threaded through, the
+  // entry is queued locally instead of the rejection propagating — the
+  // "remember" affordance in the renderer must never surface this as an
+  // error for the no-key case.
+  const memoryQueue = require('../desktop/lib/sync/memory-queue.js');
+  const queueDir = mkdtempSync(join(tmpdir(), 'aegis-shell-memqueue-'));
+  const failingClient = {
+    ...stubClient,
+    async memorySave(entry) {
+      calls.push(['memorySave-fail', entry]);
+      throw new Error('no AEGIS key configured');
+    },
+  };
+  const queueingDispatch = createIpcDispatch(failingClient, queueDir);
+  const queuedResult = await queueingDispatch.memorySave({
+    entry: { text: 'offline note', source: 'aegis-desktop', session: 's1' },
+  });
+  assert(queuedResult.ok === true && queuedResult.queued === true, 'a failed memorySave resolves ok:true with queued:true, never throws');
+  assert(memoryQueue.listQueued(queueDir).length === 1, 'the entry lands in the local memory queue');
+  assert(memoryQueue.listQueued(queueDir)[0].text === 'offline note', 'the queued entry preserves its fields');
+
+  // With no dir supplied (back-compat), the rejection still propagates.
+  const noDirDispatch = createIpcDispatch(failingClient);
+  let threw = false;
+  try {
+    await noDirDispatch.memorySave({ entry: { text: 'no dir' } });
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'without a dir, memorySave failures still reject (no silent queue)');
 
   // 5. IPC registration wires every method under aegis:<name>.
   const fakeIpc = {
