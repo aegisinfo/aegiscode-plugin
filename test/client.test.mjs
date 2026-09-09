@@ -80,6 +80,28 @@ try {
   assert(body.messages.length === 2, 'explicit messages array wins');
   assert(body.messages[0].role === 'system', 'system turn preserved');
 
+  // 6. listModels() passes server model metadata through unmodified — the
+  // desktop output-ceiling picker (plan P2 §6.3) depends on `max_output` and
+  // `context_window` surviving the round trip untouched.
+  const rawModels = {
+    models: [
+      { id: 'deepseek-v4-pro', max_output: 8192, context_window: 128000 },
+      { id: 'legacy-model' },
+    ],
+  };
+  globalThis.fetch = async (url) => {
+    captured.push({ url, opts: {} });
+    return okJson(rawModels);
+  };
+  const listed = await client.listModels();
+  assert(
+    JSON.stringify(listed) === JSON.stringify(rawModels),
+    'listModels() must not strip or reshape model metadata'
+  );
+  assert(listed.models[0].max_output === 8192, 'max_output survives pass-through');
+  assert(listed.models[0].context_window === 128000, 'context_window survives pass-through');
+  assert(!('max_output' in listed.models[1]), 'models without metadata are not backfilled');
+
   console.log('client body-builder tests passed');
 } finally {
   globalThis.fetch = originalFetch;

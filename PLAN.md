@@ -14,7 +14,7 @@ Status:
 - [x] Phase 2 — P1 desktop 4-class engine modules (transport + storage)
 - [x] Phase 3 — P1 IPC + preload + renderer class picker + packaging
 - [x] Phase 4 — §9 tests + thin-shell guard re-wording
-- [ ] Phase 5 — P2 metadata-driven per-model output ceiling
+- [x] Phase 5 — P2 metadata-driven per-model output ceiling
 - [ ] Phase 6 — P3 cloud conversation sync (replace the push stub)
 - [ ] Phase 7 — P3 memory-follows-user from any model class
 
@@ -72,31 +72,37 @@ Done.
 
 ---
 
-## Phase 5 — P2 metadata-driven per-model output ceiling
+## Phase 5 ✅ — P2 metadata-driven per-model output ceiling
 
-Scope (`docs/product-plan.md` §6.3). Consume the server-side `max_output` /
-`context_window` metadata so the desktop output picker reflects each model's real
-ceiling instead of a flat 64k.
+Done. `listModels()` was already pass-through raw (asserted, not assumed); the
+desktop maxTokens picker now clamps to each model's real ceiling.
 
-- `client/aegis.js` `listModels()` already passes model objects through raw — do
-  **not** strip `max_output` / `context_window` (assert this, don't assume).
-- `desktop/renderer/app.js` `loadModels()` (currently reads only `m.id`):
-  - Read `m.max_output` when present and surface the per-model ceiling in the
-    model hint and/or clamp the `max-tokens` picker to it (`min(64000, max_output)`).
-  - Fall back to the existing flat 64k behavior when metadata is absent.
-- Add a unit test with a stub `fetch` asserting `listModels()` pass-through of
-  `max_output`/`context_window`, plus a small pure helper for the ceiling math if
-  it keeps `loadModels` thin.
+- `client/aegis.js` `listModels()` unchanged — `apiGet` returns parsed JSON
+  verbatim, no stripping. Asserted by a new `listModels()` pass-through
+  fetch-stub test in `test/client.test.mjs` (`max_output`/`context_window`
+  survive the round trip; models without metadata aren't backfilled).
+- `desktop/renderer/max-tokens.js` — new standalone pure helper,
+  `maxTokensCeiling(meta) = min(64000, meta.max_output)` when `max_output` is
+  a positive finite number, else the flat 64000 fallback. Dual
+  CommonJS/browser export like `client/aegis.js`, loaded as a sibling classic
+  `<script>` before `app.js` (`index.html`) so it's unit-testable without
+  `window.aegis`/`window.models`.
+- `desktop/renderer/app.js` `loadModels()` now records raw model objects in a
+  `modelMeta` map and calls `applyMaxTokensClamp()`, which disables
+  `max-tokens` `<option>`s above the selected model's ceiling (clamping the
+  current selection down if needed) and appends `· max output: N` to the
+  model hint when the ceiling is below 64k. A `model-select` change listener
+  re-clamps when the user switches models mid-class; custom classes
+  (openai-compat/anthropic, no metadata available) always get the flat
+  fallback.
+- `test/max-tokens.test.mjs` — new unit test for the pure ceiling helper
+  (below/above/absent/non-numeric/zero/negative `max_output`).
 
 Exit criteria:
-- `listModels()` output with `max_output`/`context_window` is returned unmodified.
+- `listModels()` output with `max_output`/`context_window` is returned unmodified. ✅
 - The maxTokens picker reflects a selected model's `max_output` when metadata is
-  present, and 64k otherwise.
-- `cd desktop && npm run check` and `node test/*.mjs` stay green.
-
-Blocked-on: metadata actually delivered by aegis1 (`/api/v1/models` —
-see the aegis1 `PLAN.md`, Phase 1). This phase is the client-side consumption and
-is fully testable against a stub.
+  present, and 64k otherwise. ✅
+- `cd desktop && npm run check` and `node test/*.mjs` stay green. ✅
 
 ## Phase 6 — P3 cloud conversation sync (replace the push stub)
 

@@ -12,6 +12,10 @@
  * No engine/routing logic lives here; the model class is the user's explicit
  * selection, routed in the main process. If this file grows engine logic it is
  * wrong.
+ *
+ * `maxTokensCeiling`/`FLAT_CEILING` come from max-tokens.js, a sibling
+ * classic script loaded before this one (see index.html) so the per-model
+ * ceiling math stays unit-testable without window.aegis/window.models.
  */
 
 const aegis = window.aegis;
@@ -64,6 +68,7 @@ const CUSTOM_CLASSES = new Set(['openai-compat', 'anthropic']);
 let pendingEl = null;
 let pendingSessionId = null;
 let classOptions = [];
+let modelMeta = new Map(); // model id -> raw model object from listModels() (P2 §6.3 ceiling)
 
 // ---------------------------------------------------------------- UI helpers
 
@@ -252,6 +257,26 @@ async function loadClasses() {
   await loadModels(els.classSelect.value);
 }
 
+// Disable max-tokens options above the selected model's ceiling and clamp the
+// current selection down if it no longer fits; falls back to the flat 64k
+// ceiling (all options enabled) when no per-model metadata is known.
+function applyMaxTokensClamp(modelId) {
+  const meta = modelId ? modelMeta.get(modelId) : null;
+  const ceiling = maxTokensCeiling(meta);
+  for (const opt of els.maxTokens.options) {
+    opt.disabled = Number(opt.value) > ceiling;
+  }
+  if (Number(els.maxTokens.value) > ceiling) {
+    const enabled = Array.from(els.maxTokens.options).filter((o) => !o.disabled);
+    const fallback = enabled[enabled.length - 1];
+    if (fallback) {
+      els.maxTokens.value = fallback.value;
+      localStorage.setItem(MAX_TOKENS_KEY, els.maxTokens.value);
+    }
+  }
+  return ceiling;
+}
+
 async function loadModels(cls) {
   const custom = CUSTOM_CLASSES.has(cls);
   els.modelSelect.hidden = custom;
@@ -261,6 +286,8 @@ async function loadModels(cls) {
   els.modelHint.textContent = '';
 
   if (custom) {
+    modelMeta = new Map();
+    applyMaxTokensClamp(null);
     let cfg = { baseURL: '', configured: false, keyMask: null };
     try {
       const settings = (await models.settings.get()) || [];
@@ -275,6 +302,7 @@ async function loadModels(cls) {
   }
 
   els.modelSelect.innerHTML = '';
+  modelMeta = new Map();
   if (cls === 'aegis') {
     const auto = document.createElement('option');
     auto.value = '';
@@ -286,23 +314,29 @@ async function loadModels(cls) {
     const data = await models.listModels(cls);
     const list = Array.isArray(data && data.models) ? data.models : [];
     for (const m of list) {
+      modelMeta.set(m.id, m);
       const opt = document.createElement('option');
       opt.value = m.id;
       opt.textContent = m.id;
       els.modelSelect.appendChild(opt);
     }
+    let hint;
     if (!list.length) {
-      els.modelHint.textContent =
+      hint =
         cls === 'byok'
           ? 'No BYOK provider keys stored — set one via aegis_byok_set first.'
           : cls === 'ollama'
             ? 'Ollama not running or no models pulled.'
             : 'No models listed.';
     } else {
-      els.modelHint.textContent =
-        `${list.length} model${list.length === 1 ? '' : 's'} available.`;
+      hint = `${list.length} model${list.length === 1 ? '' : 's'} available.`;
     }
+    const ceiling = applyMaxTokensClamp(els.modelSelect.value);
+    els.modelHint.textContent =
+      ceiling < FLAT_CEILING ? `${hint} · max output: ${ceiling.toLocaleString()}` : hint;
   } catch (err) {
+    modelMeta = new Map();
+    applyMaxTokensClamp(null);
     els.modelHint.textContent =
       `listModels failed: ${err && err.message ? err.message : err}`;
   }
@@ -591,6 +625,13 @@ async function init() {
   els.classSelect.addEventListener('change', () => {
     localStorage.setItem(CLASS_KEY, els.classSelect.value);
     loadModels(els.classSelect.value);
+  });
+
+  els.modelSelect.addEventListener('change', () => {
+    const ceiling = applyMaxTokensClamp(els.modelSelect.value);
+    const base = els.modelHint.textContent.replace(/ · max output: [\d,]+$/, '');
+    els.modelHint.textContent =
+      ceiling < FLAT_CEILING ? `${base} · max output: ${ceiling.toLocaleString()}` : base;
   });
 
   els.newChat.addEventListener('click', newChat);
