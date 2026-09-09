@@ -23,7 +23,9 @@ jobs:
       - name: Node syntax check
         run: |
           set -euo pipefail
-          files=$(find . -name '*.js' -o -name '*.mjs' | grep -v '^./.git/' || true)
+          files=$(find . \( -name '*.js' -o -name '*.mjs' \) \
+            -not -path './.git/*' -not -path '*/node_modules/*' \
+            -not -path '*/desktop/release/*' || true)
           if [ -z "$files" ]; then
             echo "No JS files found"
             exit 1
@@ -41,7 +43,8 @@ jobs:
       - name: JSON validity
         run: |
           set -euo pipefail
-          for f in $(find . -name '*.json' | grep -v '^./.git/'); do
+          for f in $(find . -name '*.json' -not -path './.git/*' \
+                     -not -path '*/node_modules/*' -not -path '*/desktop/release/*'); do
             node -e "JSON.parse(require('fs').readFileSync('$f','utf8'))" \
               || { echo "Invalid JSON: $f"; exit 1; }
           done
@@ -64,7 +67,8 @@ jobs:
           )
           found=0
           for pat in "${patterns[@]}"; do
-            hits=$(grep -rnE --exclude-dir=.git "$pat" . || true)
+            hits=$(grep -rnE --exclude-dir=.git --exclude-dir=node_modules \
+                    --exclude-dir=release "$pat" . || true)
             if [ -n "$hits" ]; then
               echo "SECRET MATCH ($pat):"
               echo "$hits"
