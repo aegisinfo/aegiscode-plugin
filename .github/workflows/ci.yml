@@ -81,10 +81,34 @@ jobs:
           fi
           echo "Secret scan clean."
 
-      # --- 4. Thin-shell guard: no engine/brain code may enter ---------------
+      # --- 4. Thin-shell guard: transport allowed, brain forbidden ------------
       - name: Thin-shell guard
         run: |
           set -euo pipefail
+          # RULE (plan §1/§9): no cloud routing/tier/brain logic and no server
+          # logic may enter this repo. Direct transport to user-configured model
+          # endpoints is explicitly PERMITTED — pure wire-format clients +
+          # storage only, keys held in main. Keep this as a literal path
+          # allowlist so it does not fight the feature.
+          allowed=(
+            'desktop/lib/local/'
+            'desktop/lib/sync/'
+            'desktop/lib/settings.js'
+          )
+          # Any file under desktop/lib/ that is NOT one of the permitted
+          # transport/storage paths is a thin-shell violation.
+          for f in $(git ls-files 'desktop/lib/**' 2>/dev/null || true); do
+            ok=0
+            for a in "${allowed[@]}"; do
+              case "$f" in
+                "$a"*) ok=1 ;;
+              esac
+            done
+            if [ "$ok" -ne 1 ]; then
+              echo "::error::Unpermitted file under desktop/lib/: $f (transport/storage only)"
+              exit 1
+            fi
+          done
           # These names identify ae-guix brain artifacts; none may ship in the
           # OSS wrapper, anywhere in the tree.
           banned=(
@@ -103,7 +127,16 @@ jobs:
           # main.js: the ONLY legitimate one in the tree is the thin Electron
           # shell desktop/main.js. Any other main.js (e.g. ae-guix's brain)
           # is a leak — and desktop/main.js itself must stay a shell.
-          for f in $(git ls-files | grep -E '(^|/)main\.js$' || true); do
+          for f in $(git ls-files | grep -E '(^|/)main\.js
+
+      # --- 5. Smoke test: boot the MCP server, validate tools/list -----------
+      - name: MCP smoke test
+        run: node test/smoke.mjs
+
+      # --- 6. Desktop host smoke test: IPC surface, no Electron binary -------
+      - name: Desktop shell smoke test
+        run: node test/desktop-shell.mjs
+ || true); do
             if [ "$f" != "desktop/main.js" ]; then
               echo "::error::Unexpected main.js outside desktop/: $f"
               exit 1
