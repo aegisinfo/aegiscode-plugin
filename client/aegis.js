@@ -92,7 +92,7 @@ function randomUUID() {
 }
 
 const DEFAULT_API_BASE = 'https://aegiscloud.org';
-const CLIENT_VERSION = '3.1.0';
+const CLIENT_VERSION = '3.2.0';
 
 /**
  * .mcp.json / Electron pass config as "${VAR}" template refs. When the var is
@@ -482,6 +482,55 @@ function createClient(opts = {}) {
     );
   }
 
+  /** Verify a bearer token (memory or API) against the backend. */
+  async function verifyToken(token) {
+    return apiPost(
+      '/api/verify-token',
+      { token: token || '' },
+      {
+        'Content-Type': 'application/json',
+        'X-AEGIS-Version': clientVersion,
+        Authorization: `Bearer ${token}`,
+      }
+    );
+  }
+
+  /** Activate cloud memory for the authenticated account. */
+  async function memoryActivate(token) {
+    const t = token || (await getMemoryToken());
+    return apiPost('/api/memory/activate', {}, memoryHeaders(t));
+  }
+
+  /** Pull memory entries updated since a timestamp (epoch ms). */
+  async function memoryPull(since) {
+    const token = await getMemoryToken();
+    return apiPost(
+      '/api/memory/pull',
+      { since: since || 0 },
+      memoryHeaders(token)
+    );
+  }
+
+  /** Save a batch of memory entries in one request. */
+  async function memorySaveBatch(entries) {
+    const token = await getMemoryToken();
+    return apiPost(
+      '/api/memory/save',
+      { entries: entries || [] },
+      memoryHeaders(token)
+    );
+  }
+
+  /** Import a conversation transcript for later memory/training use. */
+  async function importConversation({ messages, url, title, source } = {}) {
+    return apiPost('/api/import', {
+      messages: messages || [],
+      url: url || '',
+      title: title || '',
+      source: source || 'aegiscode-plugin',
+    });
+  }
+
   return {
     apiBase,
     apiKey,
@@ -500,6 +549,11 @@ function createClient(opts = {}) {
     memorySearch,
     memorySave,
     memoryList,
+    verifyToken,
+    memoryActivate,
+    memoryPull,
+    memorySaveBatch,
+    importConversation,
     randomUUID,
   };
 }

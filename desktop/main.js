@@ -107,6 +107,17 @@ function createIpcDispatch(aegis) {
       aegis.memorySave(payload && payload.entry),
     memoryList: (payload) =>
       aegis.memoryList(payload && payload.limit),
+
+    verifyToken: (payload) =>
+      aegis.verifyToken(payload && payload.token),
+    memoryActivate: (payload) =>
+      aegis.memoryActivate(payload && payload.token),
+    memoryPull: (payload) =>
+      aegis.memoryPull(payload && payload.since),
+    memorySaveBatch: (payload) =>
+      aegis.memorySaveBatch(payload && payload.entries),
+    importConversation: (payload) =>
+      aegis.importConversation(payload || {}),
   };
   return dispatch;
 }

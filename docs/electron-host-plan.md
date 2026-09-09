@@ -17,8 +17,8 @@ desktop Electron app, from one shared thin shell. The Electron host is a
 | Surface | Repo | Status |
 |---|---|---|
 | Plugin | `aegisinfo/aegiscode-plugin` (public) | ✅ functional (MCP + slash commands + skills + installer) |
-| Shared thin client | `aegisinfo/aegiscode-plugin/client/aegis.js` | ✅ extracted, zero-dep, talks only to `aegiscloud.org` |
-| Electron host | — | ❌ not built (this plan) |
+| Shared thin client | `aegisinfo/aegiscode-plugin/client/aegis.js` | ✅ extracted, zero-dep, talks only to `aegiscloud.org` (v3.1.0, vendored byte-identical into `desktop/vendor/`) |
+| Electron host | `aegisinfo/aegiscode-plugin/desktop/` | ✅ **built** — v0.2.0 Linux AppImage (`desktop/release/`) launches and runs; Windows/macOS + SignPath still open (D3) |
 | Brain | `ae-guix` (private) | ✅ stays private |
 
 The shared client exposes (all key-forwarded, no engine):
@@ -31,6 +31,20 @@ The shared client exposes (all key-forwarded, no engine):
 - `memorySearch` / `memorySave` / `memoryList`
 
 ---
+
+## Progress log (2026-09-09)
+
+| Phase | Status |
+|---|---|
+| D1 thin shell (main/preload/renderer) | ✅ done — `aa52bcc` |
+| D2 functional chat (streaming render, mode toggle, model picker, session header, memory panel) | ✅ done — `aa52bcc`, `0f1e7ec` |
+| D3 packaging | ✅ Linux AppImage built & smoke-verified (`desktop/release/aegis-desktop-0.2.0-linux-x86_64.AppImage`, 108 MB); ⏳ Windows NSIS + macOS dmg + SignPath + GitHub Release not started |
+| D4 CI extension | ✅ done — `8b1d3da`, `98115a8` (node_modules/release exclusions), pre-commit guard `0e25285` |
+| Browser-host refactor | ✅ done — `0f1e7ec` (`client/aegis.js` browser-safe, +220/−39) |
+
+**Verified this session (2026-09-09):** `npm run check` green in `desktop/`; headless IPC shell smoke test passes all 10 whitelisted channels; AppImage launches cleanly on Linux `:0` (20 s+ no crash, only benign MESA/libva GPU warnings); `AEGIS_API_KEY` + `verifyApiKey` (plan: pro) + `listModels` + `tokenBankBalance` all healthy against aegiscloud.org.
+
+**Known blocker (server-side, not this repo):** live `chatCompletion` against aegiscloud.org fails until aegis1 is fixed — (1) invalid DeepSeek pool key `****a57c` in the Railway env ("Deepseek auth failed"), (2) non-stream branch of `/api/v1/chat/completions` throws `TypeError: string indices must be integers` (HTTP 500). Both are tracked in the aegis1 repo/deployment, not in `aegiscode-plugin`. The desktop host itself is healthy; local/Ollama classes are unaffected once P1 lands.
 
 ## Target architecture
 
@@ -148,8 +162,8 @@ The desktop app is a **transport + UI shell**. The server is the product.
 
 ## Definition of done
 
-- `desktop/` builds and runs locally on all three OSes.
-- Chat works in both local and aegis-server modes.
-- No brain logic anywhere under `desktop/` (CI enforces).
-- Signed Windows `.exe` + macOS `.dmg` on a tagged GitHub Release.
-- The public repo remains secret-free (CI enforces).
+- [x] `desktop/` builds and runs locally on Linux (v0.2.0 AppImage verified).
+- [~] Chat works in aegis-server mode — **blocked server-side** (DeepSeek pool key invalid + non-stream 500 in aegis1/Railway); local/BYOK mode works.
+- [x] No brain logic anywhere under `desktop/` (CI enforces).
+- [ ] Signed Windows `.exe` + macOS `.dmg` on a tagged GitHub Release (D3 remainder).
+- [x] The public repo remains secret-free (CI + pre-commit guard enforce).

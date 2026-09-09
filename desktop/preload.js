@@ -59,6 +59,11 @@ const api = {
   memorySearch: (query, limit) => invoke('memorySearch', { query, limit }),
   memorySave: (entry) => invoke('memorySave', { entry }),
   memoryList: (limit) => invoke('memoryList', { limit }),
+  verifyToken: (token) => invoke('verifyToken', { token }),
+  memoryActivate: (token) => invoke('memoryActivate', { token }),
+  memoryPull: (since) => invoke('memoryPull', { since }),
+  memorySaveBatch: (entries) => invoke('memorySaveBatch', { entries }),
+  importConversation: (payload) => invoke('importConversation', payload || {}),
 };
 
 contextBridge.exposeInMainWorld('aegis', Object.freeze(api));
