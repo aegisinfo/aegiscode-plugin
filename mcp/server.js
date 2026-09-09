@@ -18,7 +18,7 @@ const API_KEY = aegis.apiKey;
 const API_BASE = aegis.apiBase;
 const SERVER_NAME = 'aegis';
 // Keep in sync with .claude-plugin/plugin.json "version".
-const SERVER_VERSION = '0.2.0';
+const SERVER_VERSION = '0.3.0';
 
 // ---------------------------------------------------------------------------
 // Tool implementations
@@ -44,7 +44,7 @@ const TOOLS = {
 
   aegis_ask: {
     description:
-      "Send a prompt to AEGIS pooled inference, billed against the account's token bank. Either pick an exact model with `model` (call aegis_list_models to see choices — e.g. 'anthropic', 'deepseek', 'groq'), or leave it unset and let `mode` auto-route to the cheapest capable provider: 'fast' for quick/cheap, 'smart' (default) for balanced, 'neo' for hardest reasoning.",
+      "Send a prompt to AEGIS pooled inference, billed against the account's token bank. List models with aegis_list_models and pass any id as `model`; omit `model` to let the server pick its default. `mode` is a legacy server-side shorthand and is never required.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -52,19 +52,20 @@ const TOOLS = {
         model: {
           type: 'string',
           description:
-            "Exact model id to pin, from aegis_list_models (e.g. 'anthropic', 'deepseek', 'groq'). Takes priority over mode.",
+            'Pin any model id from aegis_list_models — or omit for the server default.',
         },
         mode: {
           type: 'string',
-          enum: ['fast', 'smart', 'neo'],
-          description: "Auto-routing tier, used only when `model` is not set. Default 'smart'.",
+          description:
+            "Legacy server-side shorthand (e.g. 'fast', 'smart', 'neo'). Optional — never defaulted client-side.",
         },
         system: { type: 'string', description: 'Optional system instruction.' },
         max_tokens: {
           type: 'integer',
-          description: 'Max output tokens. Default 1024.',
+          description:
+            'Max output tokens. The server enforces the true ceiling; omit for the server default.',
           minimum: 1,
-          maximum: 8192,
+          maximum: 64000,
         },
       },
       required: ['prompt'],
@@ -74,20 +75,18 @@ const TOOLS = {
       // Use the OpenAI-compatible endpoint (stream:false): it returns structured
       // JSON errors (e.g. 402 insufficient_quota) instead of the opaque 502 that
       // /api/v1/complete emits. An exact `model` id pins that provider directly;
-      // otherwise `nexus-${mode}` selects the auto-routing tier.
-      const mode = args.mode || 'smart';
+      // omitting `model` lets the server route to its default.
       const data = await aegis.chatCompletion({
         prompt: args.prompt,
         system: args.system,
         model: args.model,
-        mode,
-        maxTokens: args.max_tokens || 1024,
+        mode: args.mode,
+        maxTokens: args.max_tokens,
       });
       const choice = (data.choices && data.choices[0]) || {};
       const text = (choice.message && choice.message.content) || '(empty response)';
       const meta = [
         data.model ? `model: ${data.model}` : null,
-        args.model ? null : `mode: ${mode}`,
         data.usage ? `tokens: ${data.usage.total_tokens}` : null,
       ]
         .filter(Boolean)
@@ -98,7 +97,7 @@ const TOOLS = {
 
   aegis_list_models: {
     description:
-      "List the exact models available to pin with aegis_ask's `model` argument, instead of letting `mode` auto-route to the cheapest provider.",
+      "List the exact models available to pin with aegis_ask's `model` argument — the server's model list is the truth, and omitting `model` uses the server default.",
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     async run() {
       const data = await aegis.listModels();
@@ -142,7 +141,7 @@ const TOOLS = {
 
   aegis_byok_status: {
     description:
-      "List which providers (anthropic, groq, openai) have a Bring-Your-Own-Key configured on this AEGIS account. A configured BYOK key is used automatically by aegis_ask instead of the pooled balance for that provider, so calls no longer cost AEGIS token-bank funds.",
+      "List which providers have a Bring-Your-Own-Key configured on this AEGIS account (known ids: openai, anthropic, groq, openrouter, together, deepseek, gemini, …). A configured BYOK key is used automatically by aegis_ask instead of the pooled balance for that provider, so calls no longer cost AEGIS token-bank funds.",
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     async run() {
       const data = await aegis.byokStatus();
@@ -156,11 +155,15 @@ const TOOLS = {
 
   aegis_byok_set: {
     description:
-      "Set or remove a Bring-Your-Own-Key API key for a provider (anthropic, groq, or openai) on this AEGIS account. Once set, aegis_ask uses that key directly for that provider instead of the pooled AEGIS balance — unlimited use at the user's own cost. Omit api_key to remove a previously set key.",
+      "Set or remove a Bring-Your-Own-Key API key for a provider on this AEGIS account (known ids: openai, anthropic, groq, openrouter, together, deepseek, gemini, …; the server validates what it supports). Once set, aegis_ask uses that key directly for that provider instead of the pooled AEGIS balance — unlimited use at the user's own cost. Omit api_key to remove a previously set key.",
     inputSchema: {
       type: 'object',
       properties: {
-        provider: { type: 'string', enum: ['anthropic', 'groq', 'openai'], description: 'Which provider this key is for.' },
+        provider: {
+          type: 'string',
+          description:
+            "Which provider this key is for (known ids: openai, anthropic, groq, openrouter, together, deepseek, gemini, …).",
+        },
         api_key: { type: 'string', description: "The provider's own API key. Omit to delete the stored key instead." },
       },
       required: ['provider'],
