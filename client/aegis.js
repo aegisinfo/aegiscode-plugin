@@ -7,19 +7,89 @@
  * orchestration, routing, or tier logic. All of that lives in the private
  * ae-guix product and behind aegiscloud.org.
  *
- * Shared by both hosts:
- *   - mcp/server.js   (Claude Code MCP plugin)
- *   - desktop/        (thin Electron shell)
+ * Runs unchanged under three hosts:
+ *   - mcp/server.js   (Claude Code MCP plugin)         — CommonJS require
+ *   - desktop/        (thin Electron shell)            — CommonJS require
+ *                     (vendored byte-identical copy at desktop/vendor/aegis.js)
+ *   - aegis-online    (browser SPA, vendored copy)     — <script> tag →
+ *                     window.AegisClient
  *
- * Usage:
+ * Usage (Node):
  *   const { createClient } = require('./client/aegis.js');
  *   const aegis = createClient();            // reads AEGIS_API_KEY from env
  *   const aegis = createClient({ apiBase, apiKey, memoryToken });
+ *
+ * Usage (browser):
+ *   <script src="/static/vendor/aegis.js"></script>
+ *   const aegis = window.AegisClient.createClient({ apiKey });
+ *
+ * BYOK note: byokChatCompletion() takes the provider key per request (or from
+ * opts.providerKey) and sends it as X-Provider-Key — it is relayed to the
+ * provider for that request only and never stored server-side.
  */
 
 'use strict';
 
-const { randomUUID } = require('node:crypto');
+// ---------------------------------------------------------------------------
+// Environment-agnostic preamble. This file must parse in Node AND in a plain
+// browser <script> tag, so no bare require/process/window/module references
+// may appear at load time.
+// ---------------------------------------------------------------------------
+
+/** Read an env var, treating unexpanded "${VAR}" templates as absent. */
+function envVar(name) {
+  if (typeof process === 'undefined' || !process.env) return '';
+  const v = process.env[name];
+  return v && !/^\$\{[A-Z_]+\}$/.test(v) ? v : '';
+}
+
+/**
+ * UUID v4 that works everywhere: Web Crypto first (browsers, Node ≥ 19),
+ * then Node's CJS crypto module (Node < 19), then a Math.random fallback for
+ * sandboxed contexts (e.g. a VM or an opaque browser context) that expose no
+ * crypto API at all. Used by hosts for session/conversation ids only.
+ */
+function randomUUID() {
+  const root =
+    (typeof globalThis !== 'undefined' && globalThis) ||
+    (typeof self !== 'undefined' && self) ||
+    null;
+  const c = root && root.crypto;
+  if (c && typeof c.randomUUID === 'function') {
+    try {
+      return c.randomUUID();
+    } catch (_) {
+      /* fall through */
+    }
+  }
+  if (c && typeof c.getRandomValues === 'function') {
+    try {
+      const b = new Uint8Array(16);
+      c.getRandomValues(b);
+      b[6] = (b[6] & 0x0f) | 0x40; // version 4
+      b[8] = (b[8] & 0x3f) | 0x80; // variant 10
+      const h = Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+      return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+    } catch (_) {
+      /* fall through */
+    }
+  }
+  if (typeof require === 'function') {
+    try {
+      const nodeCrypto = require('crypto');
+      if (nodeCrypto && typeof nodeCrypto.randomUUID === 'function') {
+        return nodeCrypto.randomUUID();
+      }
+    } catch (_) {
+      /* not Node — keep going */
+    }
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (ch) => {
+    const r = (Math.random() * 16) | 0;
+    const v = ch === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
 
 const DEFAULT_API_BASE = 'https://aegiscloud.org';
 const CLIENT_VERSION = '3.1.0';
@@ -31,11 +101,6 @@ const CLIENT_VERSION = '3.1.0';
  * `|| default` fallback since the literal string is truthy. Treat anything
  * shaped like an unexpanded template as absent.
  */
-function envVar(name) {
-  const v = process.env[name];
-  return v && !/^\$\{[A-Z_]+\}$/.test(v) ? v : '';
-}
-
 function createClient(opts = {}) {
   const apiBase = (
     opts.apiBase ||
@@ -54,15 +119,20 @@ function createClient(opts = {}) {
   // HTTP helpers
   // -------------------------------------------------------------------------
 
-  /** Base headers every request carries (version gate + key). */
+  /** Base headers every request carries (version gate + key when present). */
   function authHeaders(extra) {
-    return {
+    const headers = {
       'Content-Type': 'application/json',
       'X-AEGIS-Version': clientVersion,
-      'X-API-Key': apiKey,
-      Authorization: `Bearer ${apiKey}`,
       ...extra,
     };
+    // Keys are optional per-client (a BYOK-only browser page has none); when
+    // absent, omit the auth headers entirely so no empty values are sent.
+    if (apiKey) {
+      headers['X-API-Key'] = apiKey;
+      headers.Authorization = `Bearer ${apiKey}`;
+    }
+    return headers;
   }
 
   async function apiPost(path, body, headers) {
@@ -102,6 +172,29 @@ function createClient(opts = {}) {
     return data;
   }
 
+  /** Extract a human message from a structured backend error body. */
+  function errorMessageOf(data) {
+    if (!data) return '';
+    const e = data.error;
+    if (typeof e === 'string') return e;
+    if (e && typeof e.message === 'string') return e.message;
+    if (e && typeof e.error === 'string') return e.error;
+    if (typeof data.message === 'string') return data.message;
+    if (typeof data.error_message === 'string') return data.error_message;
+    return '';
+  }
+
+  /** Throw an Error carrying status/data from a 2xx body that still has an
+   *  error field (seen on streaming endpoints that answer JSON mid-stream). */
+  function throwErrorFrom(data, status) {
+    const msg = errorMessageOf(data);
+    if (!msg) return;
+    const err = new Error(msg);
+    err.status = status || 500;
+    err.data = data;
+    throw err;
+  }
+
   // Memory endpoints authenticate with a memory_token, not the API key.
   async function getMemoryToken() {
     if (memoryToken) return memoryToken;
@@ -132,39 +225,90 @@ function createClient(opts = {}) {
     return apiPost('/api/verify-api-key', { api_key: apiKey });
   }
 
+  /** Build the OpenAI-style messages array from either a full history or the
+   *  single-shot { system, prompt } shorthand. */
+  function buildMessages(messages, system, prompt) {
+    if (Array.isArray(messages) && messages.length) return messages;
+    const out = [];
+    if (system) out.push({ role: 'system', content: system });
+    out.push({ role: 'user', content: prompt || '' });
+    return out;
+  }
+
   /**
-   * Chat completion. Non-streaming by default (structured JSON error bodies —
-   * this is what the MCP host relies on). When `stream: true` AND `onStream`
-   * is a function, the request is sent with `stream: true` and each SSE delta
-   * is delivered as `onStream({ delta })`. The resolved value is normalised to
-   * the same shape as the non-streaming response either way, so hosts can
-   * reconcile final text after the last chunk.
+   * Chat completion against the AEGIS pool (API key auth). Non-streaming by
+   * default (structured JSON error bodies — this is what the MCP host relies
+   * on). When `stream: true` AND `onStream` is a function, the request is sent
+   * with `stream: true` and each SSE delta is delivered as `onStream({ delta })`.
+   * The resolved value is normalised to the same shape as the non-streaming
+   * response either way, so hosts can reconcile final text after the last chunk.
+   *
+   * Additive options shared with byokChatCompletion():
+   *   - `messages`  full OpenAI-format history (supersedes prompt/system)
+   *   - `extra`     extra body fields merged verbatim (e.g. { aegis_memory,
+   *                 session } for the online host's synced-memory writeback)
    */
   async function chatCompletion({
     prompt,
     system,
+    messages,
     model,
     mode,
     maxTokens,
     stream = false,
     onStream,
     signal,
+    extra,
   } = {}) {
-    const messages = [];
-    if (system) messages.push({ role: 'system', content: system });
-    messages.push({ role: 'user', content: prompt });
     const resolvedMode = mode || 'smart';
     const requestedModel = model || `nexus-${resolvedMode}`;
     const body = {
       model: requestedModel,
-      messages,
+      messages: buildMessages(messages, system, prompt),
       max_tokens: maxTokens || 1024,
+      ...(extra || {}),
     };
-
     if (!stream || typeof onStream !== 'function') {
       return apiPost('/api/v1/chat/completions', { ...body, stream: false });
     }
-    return streamChatCompletion(body, onStream, signal);
+    return postStream('/api/v1/chat/completions', body, authHeaders(), onStream, signal);
+  }
+
+  /**
+   * BYOK chat completion: relay a provider request through
+   * /api/v1/byok/chat/completions using a per-request X-Provider-Key. The
+   * provider key never touches AEGIS storage — it is forwarded straight to the
+   * provider for this request only. Mirrors chatCompletion()'s streaming /
+   * fallback semantics exactly.
+   */
+  async function byokChatCompletion({
+    provider = 'openai',
+    model,
+    messages,
+    prompt,
+    system,
+    maxTokens,
+    stream = false,
+    onStream,
+    signal,
+    providerKey,
+  } = {}) {
+    const key = providerKey !== undefined ? providerKey : opts.providerKey;
+    const body = {
+      provider,
+      messages: buildMessages(messages, system, prompt),
+      max_tokens: maxTokens || 1024,
+    };
+    if (model) body.model = model;
+    const headers = {
+      'Content-Type': 'application/json',
+      'X-AEGIS-Version': clientVersion,
+      'X-Provider-Key': key,
+    };
+    if (!stream || typeof onStream !== 'function') {
+      return apiPost('/api/v1/byok/chat/completions', { ...body, stream: false }, headers);
+    }
+    return postStream('/api/v1/byok/chat/completions', body, headers, onStream, signal);
   }
 
   /** Extract the assistant text from a full (non-streamed) completion JSON. */
@@ -176,6 +320,8 @@ function createClient(opts = {}) {
 
   /**
    * POST body with `stream: true` and forward SSE deltas to onStream.
+   * Shared by the AEGIS pool and the BYOK relay so every host parses exactly
+   * one wire format.
    *
    * Handles two servers gracefully:
    *  - a real SSE endpoint  -> incremental deltas, normalised final result
@@ -184,12 +330,12 @@ function createClient(opts = {}) {
    *    text as a single delta and resolve the parsed JSON, unchanged.
    * This keeps streaming purely additive for hosts that opt in.
    */
-  async function streamChatCompletion(body, onStream, signal) {
+  async function postStream(path, body, headers, onStream, signal) {
     let res;
     try {
-      res = await fetch(`${apiBase}/api/v1/chat/completions`, {
+      res = await fetch(`${apiBase}${path}`, {
         method: 'POST',
-        headers: authHeaders(),
+        headers,
         body: JSON.stringify({ ...body, stream: true }),
         signal,
       });
@@ -200,10 +346,7 @@ function createClient(opts = {}) {
     if (!res.ok) {
       // The endpoint may not accept `stream: true`. Retry once without it so
       // the caller gets the normal structured JSON (result or error).
-      const data = await apiPost('/api/v1/chat/completions', {
-        ...body,
-        stream: false,
-      });
+      const data = await apiPost(path, { ...body, stream: false }, headers);
       const fullText = textOf(data);
       if (fullText) onStream({ delta: fullText });
       return data;
@@ -214,7 +357,11 @@ function createClient(opts = {}) {
       // Server ignored the stream flag and answered with plain JSON.
       const data = await parseResponse(res);
       const fullText = textOf(data);
-      if (fullText) onStream({ delta: fullText });
+      if (fullText) {
+        onStream({ delta: fullText });
+      } else {
+        throwErrorFrom(data, res.status);
+      }
       return data;
     }
 
@@ -225,6 +372,7 @@ function createClient(opts = {}) {
     let fullText = '';
     let resultModel = body.model;
     let usage = null;
+    let sseError = '';
 
     for (;;) {
       const { done, value } = await reader.read();
@@ -245,18 +393,35 @@ function createClient(opts = {}) {
         } catch {
           continue; // partial/keepalive line — ignore
         }
+        if (json.error) {
+          if (!sseError) {
+            const e = json.error;
+            sseError =
+              typeof e === 'string'
+                ? e
+                : errorMessageOf({ error: e }) || 'stream error';
+          }
+          continue;
+        }
         if (json.model) resultModel = json.model;
         if (json.usage) usage = json.usage;
         const choice = json.choices && json.choices[0];
         const delta =
-          choice &&
-          (choice.delta && choice.delta.content) ||
-          (choice.message && choice.message.content);
-        if (typeof delta === 'string' && delta) {
+          (choice &&
+            ((choice.delta && choice.delta.content) ||
+              (choice.message && choice.message.content))) ||
+          '';
+        if (delta) {
           fullText += delta;
           onStream({ delta });
         }
       }
+    }
+
+    if (!fullText && sseError) {
+      const err = new Error(sseError);
+      err.status = res.status;
+      throw err;
     }
 
     const result = {
@@ -273,6 +438,11 @@ function createClient(opts = {}) {
 
   async function tokenBankBalance() {
     return apiGet('/api/token-bank/balance');
+  }
+
+  /** Start a token-bank top-up; resolves to { url } for the payment page. */
+  async function tokenBankTopup(amountEur) {
+    return apiPost('/api/token-bank/topup', { amount_eur: amountEur });
   }
 
   async function byokStatus() {
@@ -320,8 +490,10 @@ function createClient(opts = {}) {
     },
     verifyApiKey,
     chatCompletion,
+    byokChatCompletion,
     listModels,
     tokenBankBalance,
+    tokenBankTopup,
     byokStatus,
     byokSet,
     getMemoryToken,
@@ -332,4 +504,13 @@ function createClient(opts = {}) {
   };
 }
 
-module.exports = { createClient, envVar, DEFAULT_API_BASE, CLIENT_VERSION };
+const api = { createClient, envVar, randomUUID, DEFAULT_API_BASE, CLIENT_VERSION };
+
+// Node / Electron (CommonJS): the MCP plugin and desktop shell require() this.
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = api;
+}
+// Browser <script>: expose a single namespaced global for the aegis-online SPA.
+if (typeof window !== 'undefined') {
+  window.AegisClient = api;
+}
