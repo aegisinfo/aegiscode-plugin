@@ -81,10 +81,9 @@ jobs:
       - name: Thin-shell guard
         run: |
           set -euo pipefail
-          # These are private-side artifacts that must never ship in the OSS
-          # wrapper. If any appear, the PR is leaking brain/IP code.
+          # These names identify ae-guix brain artifacts; none may ship in the
+          # OSS wrapper, anywhere in the tree.
           banned=(
-            'main.js'
             'SaaS.js'
             'chat-engine'
             'chat-service.js'
@@ -97,8 +96,25 @@ jobs:
               exit 1
             fi
           done
+          # main.js: the ONLY legitimate one in the tree is the thin Electron
+          # shell desktop/main.js. Any other main.js (e.g. ae-guix's brain)
+          # is a leak — and desktop/main.js itself must stay a shell.
+          for f in $(git ls-files | grep -E '(^|/)main\.js$' || true); do
+            if [ "$f" != "desktop/main.js" ]; then
+              echo "::error::Unexpected main.js outside desktop/: $f"
+              exit 1
+            fi
+          done
+          if [ -f desktop/main.js ] && grep -qE 'chat-engine|chat-service|lib/memory|SaaS|ae-guix|obfuscate' desktop/main.js; then
+            echo "::error::desktop/main.js carries a brain signature — keep it a thin shell"
+            exit 1
+          fi
           echo "Thin-shell guard clean."
 
       # --- 5. Smoke test: boot the MCP server, validate tools/list -----------
       - name: MCP smoke test
         run: node test/smoke.mjs
+
+      # --- 6. Desktop host smoke test: IPC surface, no Electron binary -------
+      - name: Desktop shell smoke test
+        run: node test/desktop-shell.mjs

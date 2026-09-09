@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:"
+  />
+  <title>AEGIS Desktop</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>AEGIS <span class="accent">Desktop</span></h1>
+    <div class="conn">
+      <span class="dot" id="conn-dot"></span>
+      <span id="conn-text">connecting…</span>
+    </div>
+    <div class="spacer"></div>
+    <div class="toggle-wrap" title="Where compute runs">
+      <span id="mode-label">Aegis server</span>
+      <label class="switch">
+        <input type="checkbox" id="mode-toggle" />
+        <span class="slider"></span>
+      </label>
+    </div>
+  </header>
+
+  <main>
+    <aside class="side">
+      <section class="card">
+        <h2>Status</h2>
+        <dl>
+          <dt>app</dt><dd id="st-app">–</dd>
+          <dt>client</dt><dd id="st-client">–</dd>
+          <dt>endpoint</dt><dd id="st-base">–</dd>
+          <dt>key</dt><dd id="st-key">–</dd>
+          <dt>plan</dt><dd id="st-plan">–</dd>
+          <dt>balance</dt><dd id="st-balance">–</dd>
+        </dl>
+      </section>
+      <section class="card">
+        <h2>Model</h2>
+        <label for="model-select">Provider / pinned model</label>
+        <select id="model-select" disabled>
+          <option value="">auto-routing (server)</option>
+        </select>
+        <p class="hint" id="model-hint"></p>
+      </section>
+      <section class="card">
+        <h2>Memory</h2>
+        <form id="memory-search-form" class="memory-search">
+          <input
+            type="text"
+            id="memory-query"
+            placeholder="Search memory…"
+            autocomplete="off"
+          />
+          <button type="submit" id="memory-search-btn">Search</button>
+        </form>
+        <ul class="memory-results" id="memory-results"></ul>
+        <textarea
+          id="memory-entry"
+          rows="2"
+          placeholder="Save a note to memory…"
+        ></textarea>
+        <button type="button" id="memory-save-btn" class="btn-block">Save to memory</button>
+        <p class="hint" id="memory-hint"></p>
+      </section>
+    </aside>
+
+    <section class="chat">
+      <div class="messages" id="messages" aria-live="polite"></div>
+      <form class="composer" id="composer">
+        <textarea
+          id="prompt"
+          rows="2"
+          placeholder="Message AEGIS… (Enter to send, Shift+Enter for a newline)"
+        ></textarea>
+        <button type="submit" id="send">Send</button>
+      </form>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
