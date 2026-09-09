@@ -13,7 +13,7 @@ key.
 | `/aegis-remember <note>` | Save a decision/fact to ÆGIS memory (`aegis --memory-add-json`) |
 | `/aegis-council <question>` | Put a question to the multi-model ÆGIS council (`aegis --print "/council …"`) |
 | `/aegis-multi <task>` | Prepare ÆGIS `/multi` multi-agent orchestration (or run it, on request) |
-| `/aegis-ask` · `aegis_ask` | Pooled inference. Pin an exact `model` (see `aegis_list_models`), or leave it to `mode` auto-routing (`fast`, `smart`, `neo`) to pick the cheapest capable provider server-side |
+| `/aegis-ask` · `aegis_ask` | Pooled inference. Pin any `model` id from `aegis_list_models`, or omit `model` to let the server pick its default |
 | `aegis_list_models` | List the exact models you can pin with `aegis_ask`'s `model` argument |
 | `aegis_balance` | Check your AEGIS token bank balance and recent spend |
 | `aegis_byok_status` | List which providers have a Bring-Your-Own-Key set |

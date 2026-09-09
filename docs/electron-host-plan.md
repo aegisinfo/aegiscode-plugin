@@ -17,7 +17,7 @@ desktop Electron app, from one shared thin shell. The Electron host is a
 | Surface | Repo | Status |
 |---|---|---|
 | Plugin | `aegisinfo/aegiscode-plugin` (public) | ✅ functional (MCP + slash commands + skills + installer) |
-| Shared thin client | `aegisinfo/aegiscode-plugin/client/aegis.js` | ✅ extracted, zero-dep, talks only to `aegiscloud.org` (v3.1.0, vendored byte-identical into `desktop/vendor/`) |
+| Shared thin client | `aegisinfo/aegiscode-plugin/client/aegis.js` | ✅ extracted, zero-dep, talks only to `aegiscloud.org` (v3.2.0, vendored byte-identical into `desktop/vendor/`) |
 | Electron host | `aegisinfo/aegiscode-plugin/desktop/` | ✅ **built** — v0.2.0 Linux AppImage (`desktop/release/`) launches and runs; Windows/macOS + SignPath still open (D3) |
 | Brain | `ae-guix` (private) | ✅ stays private |
 

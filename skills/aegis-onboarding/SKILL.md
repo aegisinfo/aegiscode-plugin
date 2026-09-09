@@ -35,7 +35,8 @@ plan and whether memory is enabled.
 ## What the tools do
 
 - `aegis_status` — validate key, show plan + memory status.
-- `aegis_ask` — send a prompt to AEGIS pooled inference (`fast`/`smart`/`neo`).
+- `aegis_ask` — send a prompt to AEGIS pooled inference (pin a `model` id from
+  `aegis_list_models`, or omit it for the server default).
 - `aegis_memory_save` / `aegis_memory_search` / `aegis_memory_list` — durable
   cloud memory that persists across machines and sessions (requires a plan with
   memory enabled; free accounts are capped at 3 memory sessions).

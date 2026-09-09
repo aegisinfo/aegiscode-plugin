@@ -8,8 +8,9 @@
  * client/aegis.js; the engine lives behind aegiscloud.org. If this file ever
  * grows routing/engine logic it is wrong.
  *
- * "Aegis server" mode: send a prompt and let the server auto-route through
- * the nexus-<tier> pool (mode: 'smart').
+ * "Aegis server" mode: send a prompt and let the server auto-route — no
+ * model pinned means the server picks its default (no tier ids fabricated
+ * client-side; see client/aegis.js chatCompletion).
  * "Local (BYOK)" mode: pin one of the provider models from listModels so the
  * server uses the user's own provider key.
  */
@@ -189,7 +190,7 @@ function setMode(compute) {
   els.modelSelect.disabled = !local;
   els.modelHint.textContent = local
     ? 'Pin a provider model — the server routes with your BYOK key.'
-    : 'Server auto-routes the prompt (nexus-smart pool).';
+    : 'Server auto-routes the prompt (no model pinned).';
 }
 
 // ------------------------------------------------------------------ actions
@@ -250,7 +251,10 @@ async function send() {
   if (local && model) {
     payload.model = model; // pin provider model (BYOK path)
   } else {
-    payload.mode = 'smart'; // server auto-routing tier
+    // Legacy server shorthand only — no model id is fabricated; with `model`
+    // absent the client omits it entirely and the server picks its default.
+    // (P1 §7.4 removes this branch with the mode-toggle gate.)
+    payload.mode = 'smart';
   }
 
   // D2 item 1 — streaming render: preload forwards SSE deltas into the
