@@ -253,11 +253,30 @@ async function send() {
     payload.mode = 'smart'; // server auto-routing tier
   }
 
+  // D2 item 1 — streaming render: preload forwards SSE deltas into the
+  // callback as they arrive (aegis:chatDelta push channel from main), and the
+  // awaited value resolves with the normalised final result. Chunks paint into
+  // the pending assistant bubble live; the resolved text then replaces it
+  // verbatim (same content) with model/token meta attached.
+  let streamedText = '';
   try {
-    const data = await aegis.chatCompletion(payload);
+    const data = await aegis.chatCompletion(payload, (chunk) => {
+      const delta =
+        chunk && (typeof chunk.delta === 'string' ? chunk.delta : chunk.content);
+      if (!delta) return;
+      streamedText += delta;
+      if (!pendingEl) return;
+      pendingEl.classList.remove('pending');
+      const bodyEl = pendingEl.querySelector('.body');
+      if (bodyEl) bodyEl.textContent = streamedText;
+      els.messages.scrollTop = els.messages.scrollHeight;
+    });
+
     const choice = (data && data.choices && data.choices[0]) || {};
     const text =
-      (choice.message && choice.message.content) || '(empty response)';
+      (choice.message && choice.message.content) ||
+      streamedText ||
+      '(empty response)';
     const bits = [];
     if (data && data.model) bits.push(`model: ${data.model}`);
     if (data && data.usage && data.usage.total_tokens != null) {

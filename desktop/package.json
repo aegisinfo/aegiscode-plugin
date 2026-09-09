@@ -13,7 +13,11 @@
   "homepage": "https://aegiscloud.org",
   "scripts": {
     "start": "electron .",
-    "check": "node --check main.js && node --check preload.js && node --check renderer/app.js",
+    "predist": "node scripts/predist.mjs",
+    "icon": "node scripts/generate-icon.mjs",
+    "dist": "npm run predist && electron-builder",
+    "dist:dir": "npm run predist && electron-builder --dir",
+    "check": "node --check main.js && node --check preload.js && node --check renderer/app.js && node --check scripts/predist.mjs && node --check scripts/generate-icon.mjs",
     "test:shell": "node ../test/desktop-shell.mjs"
   },
   "devDependencies": {

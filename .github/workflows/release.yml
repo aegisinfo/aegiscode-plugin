@@ -1,0 +1,78 @@
+# Phase D3 — packaging + GitHub Release.
+#
+# On every v* tag push: build the thin Electron host for Windows (NSIS .exe),
+# macOS (.dmg) and Linux (AppImage), stage the shared client into the app via
+# predist, then attach all artifacts to a draft GitHub Release.
+#
+# Signing: Windows Authenticode via SignPath Foundation is an external grant —
+# once approved, add the SignPath GitHub Action to the windows job (see
+# desktop/SIGNING.md). Until then artifacts are unsigned and clearly labeled.
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: package (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install electron-builder (dev-only deps)
+        working-directory: desktop
+        run: npm install --no-audit --no-fund
+
+      - name: Stage shared client into the app (predist)
+        working-directory: desktop
+        run: node scripts/predist.mjs
+
+      - name: Package
+        working-directory: desktop
+        run: npx electron-builder --publish never
+        env:
+          # No signing certs yet (SignPath Foundation application pending) —
+          # mac/win builds must not fail on missing identities.
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: aegis-desktop-${{ matrix.os }}
+          path: desktop/release/*
+          if-no-files-found: error
+
+  release:
+    name: attach artifacts to GitHub Release
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: artifacts/**

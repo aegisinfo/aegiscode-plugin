@@ -11,9 +11,13 @@
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { createIpcDispatch, registerIpc, IPC_PREFIX, maskKey } = require(
-  '../desktop/main.js'
-);
+const {
+  createIpcDispatch,
+  registerIpc,
+  IPC_PREFIX,
+  CHAT_DELTA_CHANNEL,
+  maskKey,
+} = require('../desktop/main.js');
 
 function assert(cond, msg) {
   if (!cond) throw new Error(`ASSERT FAILED: ${msg}`);
@@ -43,6 +47,16 @@ const stubClient = {
   },
   async chatCompletion(args) {
     calls.push(['chatCompletion', args]);
+    if (args && typeof args.onStream === 'function') {
+      // Emulate the SSE path: deltas then the normalised full result.
+      args.onStream({ delta: 'Hello' });
+      args.onStream({ delta: ' world' });
+      return {
+        model: 'nexus-smart',
+        choices: [{ message: { content: 'Hello world' } }],
+        usage: { total_tokens: 12 },
+      };
+    }
     return {
       model: 'nexus-smart',
       choices: [{ message: { content: 'hi from stub' } }],
@@ -191,6 +205,42 @@ try {
     undefined
   );
   assert(ipcModels.models.length === 2, 'listModels over IPC should pass through');
+
+  // 6. Streaming render (D2.1): a stream:true chatCompletion over IPC pushes
+  // each delta on CHAT_DELTA_CHANNEL while still resolving with the full
+  // normalised result.
+  const sentDeltas = [];
+  const fakeSender = {
+    isDestroyed: () => false,
+    send(_channel, chunk) {
+      sentDeltas.push(chunk);
+    },
+  };
+  const streamResult = await fakeIpc.handles[`${IPC_PREFIX}chatCompletion`](
+    { sender: fakeSender },
+    { prompt: 'stream me', stream: true }
+  );
+  assert(
+    streamResult.choices[0].message.content === 'Hello world',
+    'streaming chat should resolve with the full normalised text'
+  );
+  assert(
+    sentDeltas.length === 2 &&
+      sentDeltas[0].delta === 'Hello' &&
+      sentDeltas[1].delta === ' world',
+    `deltas should be forwarded over ${CHAT_DELTA_CHANNEL}`
+  );
+
+  // 7. Non-streaming over IPC still works (payload without stream).
+  const plainResult = await fakeIpc.handles[`${IPC_PREFIX}chatCompletion`](
+    { sender: fakeSender },
+    { prompt: 'plain' }
+  );
+  assert(
+    plainResult.choices[0].message.content === 'hi from stub',
+    'non-streaming chat over IPC should pass through unchanged'
+  );
+  assert(sentDeltas.length === 2, 'non-streaming chat must not emit deltas');
 
   console.log(`Desktop shell smoke test passed: ${channels.join(', ')}`);
 } catch (err) {

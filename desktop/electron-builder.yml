@@ -1,0 +1,52 @@
+# electron-builder config for the AEGIS Desktop thin host (plan Phase D3).
+# Targets: Windows NSIS .exe, macOS .dmg, Linux AppImage.
+#
+# Hard boundary: the packaged app contains ONLY the thin shell + the staged
+# copy of the shared transport. electron-builder cannot reach outside the app
+# dir, so scripts/predist.mjs copies ../client/aegis.js -> vendor/aegis.js
+# before every build (main.js falls back to that copy when packaged).
+
+appId: org.aegisinfo.aegiscode
+productName: AEGIS Desktop
+copyright: "Copyright © 2026 AEGIS Code"
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - main.js
+  - preload.js
+  - renderer/**/*
+  - vendor/aegis.js
+  - package.json
+
+asar: true
+npmRebuild: false
+
+# Version-tagged artifact per OS, e.g. aegis-desktop-0.3.0-win-x64.exe
+artifactName: aegis-desktop-${version}-${os}-${arch}.${ext}
+
+mac:
+  category: public.app-category.productivity
+  target: dmg
+  # Signing/notarization is intentionally absent until certificates exist; the
+  # release workflow passes CSC_IDENTITY_AUTO_DISCOVERY=false so CI builds are
+  # unsigned-but-buildable on mac too.
+
+win:
+  target: nsis
+  # Windows Authenticode signing runs via SignPath Foundation once the grant
+  # lands (see SIGNING.md) — wired into .github/workflows/release.yml.
+
+linux:
+  target: AppImage
+  category: Utility
+  synopsis: Thin Electron host for AEGIS Cloud
+  maintainer: AEGIS Code <nborneklint@gmail.com>
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: true

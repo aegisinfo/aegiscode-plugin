@@ -3,3 +3,6 @@ node_modules/
 .DS_Store
 .env
 .env.*
+desktop/node_modules/
+desktop/release/
+desktop/vendor/

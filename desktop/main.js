@@ -20,7 +20,19 @@
 'use strict';
 
 const path = require('node:path');
-const { createClient } = require('../client/aegis.js');
+
+// Dev / CI / smoke-test layout: desktop/ lives inside the repo, so the shared
+// client resolves via ../client/aegis.js. In the packaged app the client is
+// copied to desktop/vendor/aegis.js by the predist step (electron-builder
+// cannot reach outside the app dir), so fall back to that copy. Both files
+// are the same thin transport — never brain logic.
+let sharedClient;
+try {
+  sharedClient = require('../client/aegis.js');
+} catch {
+  sharedClient = require('./vendor/aegis.js');
+}
+const { createClient } = sharedClient;
 
 let electron = null;
 try {
@@ -33,6 +45,14 @@ try {
 }
 
 const IPC_PREFIX = 'aegis:';
+
+/**
+ * Main -> renderer push channel for chat SSE deltas (D2.1 streaming render).
+ * The invoke of aegis:chatCompletion still resolves once with the normalised
+ * final result; live chunks travel on this single dedicated channel.
+ */
+const CHAT_DELTA_CHANNEL = `${IPC_PREFIX}chatDelta`;
+
 const APP_VERSION = require('./package.json').version;
 
 /** Never ship a full key to the renderer — only a masked preview. */
@@ -68,6 +88,10 @@ function createIpcDispatch(aegis) {
         model: payload && payload.model,
         mode: payload && payload.mode,
         maxTokens: payload && payload.maxTokens,
+        // stream/onStream are forwarded when present; registerIpc() injects
+        // the IPC chunk forwarder for the desktop host (see below).
+        stream: payload && payload.stream,
+        onStream: payload && payload.onStream,
       }),
 
     byokStatus: () => aegis.byokStatus(),
@@ -91,6 +115,29 @@ function createIpcDispatch(aegis) {
 function registerIpc(ipcMain, aegis) {
   const dispatch = createIpcDispatch(aegis);
   for (const [name, handler] of Object.entries(dispatch)) {
+    if (name === 'chatCompletion') {
+      // Streaming render (D2.1): when the renderer asks for stream, SSE deltas
+      // are pushed over CHAT_DELTA_CHANNEL as they arrive while the invoke
+      // promise still resolves once with the normalised final result. When the
+      // payload does not request stream, behaviour is the plain non-streaming
+      // dispatch (what the headless shell test drives directly).
+      ipcMain.handle(`${IPC_PREFIX}${name}`, (event, payload) => {
+        const opts = { ...(payload || {}) };
+        if (!opts.stream) return handler(opts);
+        const sender = event && event.sender;
+        const forward = (chunk) => {
+          if (
+            sender &&
+            typeof sender.send === 'function' &&
+            !sender.isDestroyed()
+          ) {
+            sender.send(CHAT_DELTA_CHANNEL, chunk);
+          }
+        };
+        return handler({ ...opts, stream: true, onStream: forward });
+      });
+      continue;
+    }
     ipcMain.handle(`${IPC_PREFIX}${name}`, (_event, payload) => handler(payload));
   }
   return dispatch;
@@ -144,4 +191,10 @@ if (electron && electron.app) {
   bootstrap();
 }
 
-module.exports = { createIpcDispatch, registerIpc, IPC_PREFIX, maskKey };
+module.exports = {
+  createIpcDispatch,
+  registerIpc,
+  IPC_PREFIX,
+  CHAT_DELTA_CHANNEL,
+  maskKey,
+};

@@ -132,18 +132,139 @@ function createClient(opts = {}) {
     return apiPost('/api/verify-api-key', { api_key: apiKey });
   }
 
-  async function chatCompletion({ prompt, system, model, mode, maxTokens }) {
+  /**
+   * Chat completion. Non-streaming by default (structured JSON error bodies —
+   * this is what the MCP host relies on). When `stream: true` AND `onStream`
+   * is a function, the request is sent with `stream: true` and each SSE delta
+   * is delivered as `onStream({ delta })`. The resolved value is normalised to
+   * the same shape as the non-streaming response either way, so hosts can
+   * reconcile final text after the last chunk.
+   */
+  async function chatCompletion({
+    prompt,
+    system,
+    model,
+    mode,
+    maxTokens,
+    stream = false,
+    onStream,
+    signal,
+  } = {}) {
     const messages = [];
     if (system) messages.push({ role: 'system', content: system });
     messages.push({ role: 'user', content: prompt });
     const resolvedMode = mode || 'smart';
     const requestedModel = model || `nexus-${resolvedMode}`;
-    return apiPost('/api/v1/chat/completions', {
+    const body = {
       model: requestedModel,
       messages,
       max_tokens: maxTokens || 1024,
-      stream: false,
-    });
+    };
+
+    if (!stream || typeof onStream !== 'function') {
+      return apiPost('/api/v1/chat/completions', { ...body, stream: false });
+    }
+    return streamChatCompletion(body, onStream, signal);
+  }
+
+  /** Extract the assistant text from a full (non-streamed) completion JSON. */
+  function textOf(data) {
+    const choice = data && data.choices && data.choices[0];
+    const content = choice && (choice.message && choice.message.content);
+    return typeof content === 'string' ? content : '';
+  }
+
+  /**
+   * POST body with `stream: true` and forward SSE deltas to onStream.
+   *
+   * Handles two servers gracefully:
+   *  - a real SSE endpoint  -> incremental deltas, normalised final result
+   *  - an endpoint that ignores `stream` and replies with plain JSON (or
+   *    rejects `stream: true` outright) -> one-shot fallback: deliver the full
+   *    text as a single delta and resolve the parsed JSON, unchanged.
+   * This keeps streaming purely additive for hosts that opt in.
+   */
+  async function streamChatCompletion(body, onStream, signal) {
+    let res;
+    try {
+      res = await fetch(`${apiBase}/api/v1/chat/completions`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ ...body, stream: true }),
+        signal,
+      });
+    } catch (err) {
+      throw err; // network-level failure; nothing to fall back to
+    }
+
+    if (!res.ok) {
+      // The endpoint may not accept `stream: true`. Retry once without it so
+      // the caller gets the normal structured JSON (result or error).
+      const data = await apiPost('/api/v1/chat/completions', {
+        ...body,
+        stream: false,
+      });
+      const fullText = textOf(data);
+      if (fullText) onStream({ delta: fullText });
+      return data;
+    }
+
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('text/event-stream')) {
+      // Server ignored the stream flag and answered with plain JSON.
+      const data = await parseResponse(res);
+      const fullText = textOf(data);
+      if (fullText) onStream({ delta: fullText });
+      return data;
+    }
+
+    // Real SSE: parse `data:` lines incrementally, OpenAI-chunk shape.
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullText = '';
+    let resultModel = body.model;
+    let usage = null;
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // keep the last partial line for the next read
+
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (!payload || payload === '[DONE]') continue;
+        let json;
+        try {
+          json = JSON.parse(payload);
+        } catch {
+          continue; // partial/keepalive line — ignore
+        }
+        if (json.model) resultModel = json.model;
+        if (json.usage) usage = json.usage;
+        const choice = json.choices && json.choices[0];
+        const delta =
+          choice &&
+          (choice.delta && choice.delta.content) ||
+          (choice.message && choice.message.content);
+        if (typeof delta === 'string' && delta) {
+          fullText += delta;
+          onStream({ delta });
+        }
+      }
+    }
+
+    const result = {
+      model: resultModel,
+      choices: [{ message: { content: fullText } }],
+    };
+    if (usage) result.usage = usage;
+    return result;
   }
 
   async function listModels() {
