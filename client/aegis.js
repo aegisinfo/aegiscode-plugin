@@ -260,14 +260,17 @@ function createClient(opts = {}) {
     signal,
     extra,
   } = {}) {
-    const resolvedMode = mode || 'smart';
-    const requestedModel = model || `nexus-${resolvedMode}`;
+    // Model-first: an explicit `model` pins that provider id verbatim; with no
+    // model the server picks its default (no client-invented tier id). `mode`
+    // is a legacy server-side shorthand — forwarded verbatim only when the
+    // caller supplies it, never defaulted, never built into a model id.
     const body = {
-      model: requestedModel,
       messages: buildMessages(messages, system, prompt),
       max_tokens: maxTokens || 4096,
       ...(extra || {}),
     };
+    if (model) body.model = model;
+    else if (mode) body.mode = mode;
     if (!stream || typeof onStream !== 'function') {
       return apiPost('/api/v1/chat/completions', { ...body, stream: false });
     }
