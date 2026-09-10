@@ -59,6 +59,7 @@ const ELEMENT_IDS = {
   apiKeyHint: 'api-key-hint',
   classSelect: 'class-select',
   modelSelect: 'model-select',
+  modelPreset: 'model-preset',
   modelInput: 'model-input',
   maxTokens: 'max-tokens',
   maxTokensAdaptive: 'max-tokens-adaptive',
@@ -125,6 +126,30 @@ const CUSTOM_CLASSES = new Set(['openai-compat', 'anthropic']);
 const MODEL_ID_PLACEHOLDER = {
   'openai-compat': 'type a model id — e.g. gpt-4o-mini',
   anthropic: 'type a model id — e.g. claude-sonnet-4-5',
+};
+// Quick-fill presets for the two custom-endpoint classes — model id + the
+// base URL it actually lives at, since typing the right model string is only
+// half the problem (the wrong base URL 400s just as hard). Base URLs and
+// default model ids match aegis1 services/nexus_provider/catalog.py exactly:
+// DeepSeek is served via Anthropic-Messages transport, Gemini via
+// OpenAI-chat transport — that is why each shows up under the *other*
+// custom class from what its own name suggests.
+const CUSTOM_MODEL_PRESETS = {
+  'openai-compat': [
+    { label: 'OpenAI — gpt-4o-mini', baseURL: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
+    { label: 'OpenAI — gpt-4o', baseURL: 'https://api.openai.com/v1', model: 'gpt-4o' },
+    {
+      label: 'Gemini — 3.5 Flash',
+      baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+      model: 'gemini-3.5-flash',
+    },
+  ],
+  anthropic: [
+    { label: 'Anthropic — Claude Sonnet 5', baseURL: 'https://api.anthropic.com/v1', model: 'claude-sonnet-5' },
+    { label: 'Anthropic — Claude Haiku 4.5', baseURL: 'https://api.anthropic.com/v1', model: 'claude-haiku-4-5' },
+    { label: 'DeepSeek — v4 Flash', baseURL: 'https://api.deepseek.com/anthropic', model: 'deepseek-v4-flash' },
+    { label: 'DeepSeek — v4 Pro', baseURL: 'https://api.deepseek.com/anthropic', model: 'deepseek-v4-pro' },
+  ],
 };
 // The in-app AEGIS key is stored in a reserved namespace the main process
 // already filters out of settings.list(); never render it as a provider row
@@ -1190,6 +1215,7 @@ async function loadModels(cls) {
   els.modelSelect.disabled = custom;
   els.modelInput.hidden = !custom;
   els.modelInput.disabled = !custom;
+  els.modelPreset.hidden = true;
   els.modelHint.textContent = '';
 
   if (custom) {
@@ -1233,6 +1259,27 @@ async function loadModels(cls) {
       }
     } catch {
       /* engine unavailable — fall back to settings + the typed input */
+    }
+    // Quick-fill presets only make sense while the id is still hand-typed —
+    // a class that starts enumerating real models (needsModelId false) gets
+    // a proper picker above instead, so the preset list would be redundant.
+    const presets = needsModelId ? CUSTOM_MODEL_PRESETS[cls] || [] : [];
+    els.modelPreset.hidden = presets.length === 0;
+    if (presets.length) {
+      els.modelPreset.innerHTML = '';
+      const placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = 'quick pick…';
+      placeholder.disabled = true;
+      placeholder.selected = true;
+      els.modelPreset.appendChild(placeholder);
+      for (const preset of presets) {
+        const opt = document.createElement('option');
+        opt.value = preset.model;
+        opt.textContent = preset.label;
+        opt.title = preset.baseURL;
+        els.modelPreset.appendChild(opt);
+      }
     }
     els.modelInput.placeholder = needsModelId
       ? MODEL_ID_PLACEHOLDER[cls] || 'type a model id'
@@ -1293,6 +1340,31 @@ async function loadModels(cls) {
   }
 }
 
+/**
+ * Quick-fill a Model-card preset: sets the typed model id, and fills the
+ * matching Provider-settings base URL field IF it's currently empty. An
+ * already-configured base URL is left alone (never silently overwritten) —
+ * if it doesn't match what the preset expects, the hint says so instead, so
+ * the user's own custom endpoint can't be clobbered by a stray click.
+ */
+function applyCustomPreset(cls, modelId) {
+  const preset = (CUSTOM_MODEL_PRESETS[cls] || []).find((p) => p.model === modelId);
+  if (!preset) return;
+  els.modelInput.value = preset.model;
+
+  const row = els.settingsList.querySelector(`.setting-row[data-provider="${cls}"]`);
+  const baseInput = row && row.querySelector('.setting-base');
+  if (!baseInput) return;
+  const current = baseInput.value.trim();
+  if (!current) {
+    baseInput.value = preset.baseURL;
+    els.modelHint.textContent = `filled in — click Save in Provider settings below to store the ${preset.label} endpoint.`;
+  } else if (current !== preset.baseURL) {
+    els.modelHint.textContent =
+      `${preset.label} needs base URL ${preset.baseURL} — Provider settings below has ${current}. Update it there too.`;
+  }
+}
+
 // -------------------------------------------------------------- settings pane
 
 async function loadSettings() {
@@ -1322,6 +1394,10 @@ async function loadSettings() {
 
     const row = document.createElement('div');
     row.className = 'setting-row';
+    // Targeted by applyCustomPreset() so picking a Model-card preset can
+    // quick-fill the matching base URL here without a full loadSettings()
+    // round trip.
+    row.dataset.provider = provider;
 
     const label = document.createElement('div');
     label.className = 'setting-name';
@@ -1330,7 +1406,7 @@ async function loadSettings() {
 
     const baseInput = document.createElement('input');
     baseInput.type = 'text';
-    baseInput.className = 'setting-input';
+    baseInput.className = 'setting-input setting-base';
     baseInput.placeholder = 'base URL';
     baseInput.value = cfg.baseURL || '';
     row.appendChild(baseInput);
@@ -1777,6 +1853,10 @@ async function init() {
     const base = els.modelHint.textContent.replace(/ · max output: [\d,]+$/, '');
     els.modelHint.textContent =
       ceiling < FLAT_CEILING ? `${base} · max output: ${ceiling.toLocaleString()}` : base;
+  });
+
+  els.modelPreset.addEventListener('change', () => {
+    applyCustomPreset(els.classSelect.value, els.modelPreset.value);
   });
 
   els.newChat.addEventListener('click', newChat);
