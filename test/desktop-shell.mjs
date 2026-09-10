@@ -36,6 +36,10 @@ const stubClient = {
   clientVersion: '3.1.0-smoke',
   apiBase: 'https://aegiscloud.org',
   apiKey: RAW_KEY,
+  setApiKey(key) {
+    this.apiKey = key;
+    return key;
+  },
   async verifyApiKey() {
     return { valid: true, plan: 'smoke' };
   },
@@ -120,6 +124,7 @@ const EXPECTED = [
   'memorySave',
   'memorySaveBatch',
   'memorySearch',
+  'setApiKey',
   'status',
   'tokenBankBalance',
   'verifyApiKey',
@@ -159,6 +164,34 @@ try {
     status.clientVersion === '3.1.0-smoke',
     'clientVersion should pass through'
   );
+
+  // 3b. In-app API key entry (plan rebuild): setApiKey replaces the live key,
+  // persists it via the injected callback, and returns only a masked preview.
+  let persisted = null;
+  const persistApiKey = (key) => {
+    persisted = key;
+  };
+  const keyClient = { ...stubClient };
+  const keyDispatch = createIpcDispatch(keyClient, undefined, persistApiKey);
+  const NEW_KEY = `sk-${'b'.repeat(24)}`;
+  const setResult = await keyDispatch.setApiKey({ key: NEW_KEY });
+  assert(setResult.keyConfigured === true, 'setApiKey marks the key configured');
+  assert(
+    setResult.keyMask === maskKey(NEW_KEY),
+    'setApiKey returns only the masked preview'
+  );
+  assert(
+    !JSON.stringify(setResult).includes(NEW_KEY),
+    'setApiKey must not leak the raw key'
+  );
+  assert(persisted === NEW_KEY, 'setApiKey persists the raw key via the callback');
+
+  const cleared = await keyDispatch.setApiKey({ key: '' });
+  assert(
+    cleared.keyConfigured === false && cleared.keyMask === null,
+    'an empty key clears the configured key'
+  );
+  assert(persisted === '', 'clearing persists an empty key');
 
   // 4. Payload forwarding into the shared-client call shapes.
   const chat = await dispatch.chatCompletion({

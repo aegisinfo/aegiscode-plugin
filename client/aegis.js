@@ -107,7 +107,7 @@ function createClient(opts = {}) {
     envVar('AEGIS_API_BASE') ||
     DEFAULT_API_BASE
   ).replace(/\/+$/, '');
-  const apiKey = opts.apiKey !== undefined ? opts.apiKey : envVar('AEGIS_API_KEY');
+  let apiKey = opts.apiKey !== undefined ? opts.apiKey : envVar('AEGIS_API_KEY');
   // Optional: a memory token supplied directly, bypassing the api_key exchange.
   const memoryToken =
     opts.memoryToken !== undefined ? opts.memoryToken : envVar('AEGIS_MEMORY_TOKEN');
@@ -215,6 +215,18 @@ function createClient(opts = {}) {
       'X-AEGIS-Version': clientVersion,
       Authorization: `Bearer ${token}`,
     };
+  }
+
+  /**
+   * Replace the API key at runtime (desktop in-app key entry). Clears the
+   * cached memory token so the next memory/account call re-exchanges with the
+   * new key. Returns the trimmed raw key — main-process only; hosts must mask
+   * it before returning anything to a renderer.
+   */
+  function setApiKey(key) {
+    apiKey = typeof key === 'string' ? key.trim() : '';
+    memoryTokenCache = null;
+    return apiKey;
   }
 
   // -------------------------------------------------------------------------
@@ -563,7 +575,10 @@ function createClient(opts = {}) {
 
   return {
     apiBase,
-    apiKey,
+    get apiKey() {
+      return apiKey;
+    },
+    setApiKey,
     get clientVersion() {
       return clientVersion;
     },

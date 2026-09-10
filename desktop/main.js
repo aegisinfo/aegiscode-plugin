@@ -96,7 +96,7 @@ async function saveMemoryWithQueue(aegis, dir, entry) {
  * Pure mapping: IPC payload -> shared-client call. No Electron types here, so
  * tests can drive it with a stub client and a fake ipcMain.
  */
-function createIpcDispatch(aegis, dir) {
+function createIpcDispatch(aegis, dir, persistApiKey) {
   const dispatch = {
     status: () => ({
       appVersion: APP_VERSION,
@@ -105,6 +105,16 @@ function createIpcDispatch(aegis, dir) {
       keyConfigured: Boolean(aegis.apiKey),
       keyMask: maskKey(aegis.apiKey),
     }),
+
+    // In-app API key entry (plan rebuild): replace the live client key and
+    // persist it encrypted at rest via the settings store. The renderer only
+    // ever sees the masked preview back — never the raw key.
+    setApiKey: (payload) => {
+      const key = payload && payload.key;
+      aegis.setApiKey(key || '');
+      if (persistApiKey) persistApiKey(aegis.apiKey);
+      return { keyConfigured: Boolean(aegis.apiKey), keyMask: maskKey(aegis.apiKey) };
+    },
 
     verifyApiKey: () => aegis.verifyApiKey(),
     tokenBankBalance: () => aegis.tokenBankBalance(),
@@ -155,8 +165,8 @@ function createIpcDispatch(aegis, dir) {
 /** Register every dispatch method as `aegis:<name>` on ipcMain. `dir` (the
  *  user-data dir) is optional and threaded through only for the memorySave
  *  offline-queue fallback — see saveMemoryWithQueue(). */
-function registerIpc(ipcMain, aegis, dir) {
-  const dispatch = createIpcDispatch(aegis, dir);
+function registerIpc(ipcMain, aegis, dir, persistApiKey) {
+  const dispatch = createIpcDispatch(aegis, dir, persistApiKey);
   for (const [name, handler] of Object.entries(dispatch)) {
     if (name === 'chatCompletion') {
       // Streaming render (D2.1): when the renderer asks for stream, SSE deltas
@@ -210,7 +220,7 @@ function createEngine(aegis, { app, safeStorage, dir: dirOverride } = {}) {
   const dir = dirOverride || resolveUserDataDir(app);
   const settings = createSettingsStore({ dir, safeStorage });
   const engine = createLocalEngine({ aegis, settings, ollama, providers });
-  return { engine, sessionsDir: dir };
+  return { engine, sessionsDir: dir, settings };
 }
 
 /**
@@ -412,8 +422,20 @@ function bootstrap() {
 
   const aegis = createClient();
   const dataDir = resolveUserDataDir(app);
-  registerIpc(ipcMain, aegis, dataDir);
-  const { engine, sessionsDir } = createEngine(aegis, { app, safeStorage, dir: dataDir });
+
+  // One settings store backs both the provider settings surface and the AEGIS
+  // API key entry. It lives only in the main process and encrypts keys at rest
+  // via Electron safeStorage (best-effort base64 when unavailable).
+  const { engine, sessionsDir, settings } = createEngine(aegis, {
+    app,
+    safeStorage,
+    dir: dataDir,
+  });
+
+  // Persist the in-app AEGIS key under settings['aegis'].{ key }, encrypted.
+  const persistApiKey = (key) => settings.set('aegis', { key });
+
+  registerIpc(ipcMain, aegis, dataDir, persistApiKey);
   registerModelIpc(ipcMain, engine, sessionsDir, aegis);
 
   function createWindow() {
@@ -438,7 +460,14 @@ function bootstrap() {
     return win;
   }
 
-  app.whenReady().then(createWindow);
+  app.whenReady().then(() => {
+    // Hydrate the client from the persisted key BEFORE the renderer issues any
+    // status/model call, so class/model dropdowns populate immediately when a
+    // key was saved in-app (safeStorage is usable only after app ready).
+    const persistedKey = settings.rawKey('aegis');
+    if (persistedKey) aegis.setApiKey(persistedKey);
+    createWindow();
+  });
 
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit();

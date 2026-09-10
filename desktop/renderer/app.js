@@ -38,6 +38,10 @@ const els = {
   key: $('st-key'),
   plan: $('st-plan'),
   balance: $('st-balance'),
+  apiKeyInput: $('api-key-input'),
+  apiKeySave: $('api-key-save'),
+  apiKeyVerify: $('api-key-verify'),
+  apiKeyHint: $('api-key-hint'),
   classSelect: $('class-select'),
   modelSelect: $('model-select'),
   modelInput: $('model-input'),
@@ -87,9 +91,7 @@ function renderStatus(s) {
   els.app.textContent = s.appVersion ? `v${s.appVersion}` : '–';
   els.client.textContent = s.clientVersion || '–';
   els.base.textContent = s.apiBase || '–';
-  els.key.textContent = s.keyConfigured
-    ? s.keyMask
-    : 'not set — export AEGIS_API_KEY';
+  els.key.textContent = s.keyConfigured ? s.keyMask : 'not set';
   setConn(s.keyConfigured, s.keyConfigured ? 'key configured' : 'no API key');
 }
 
@@ -110,6 +112,59 @@ async function loadAccountInfo() {
       : '–';
   } catch {
     els.balance.textContent = 'unavailable';
+  }
+}
+
+// Refresh every key-dependent surface after the in-app key changes. The main
+// process already replaced the live client key; this re-reads status (masked
+// preview) and repopulates class/model dropdowns + account plan/balance.
+async function refreshAfterKeyChange() {
+  try {
+    renderStatus(await aegis.status());
+  } catch {
+    renderStatus(null);
+  }
+  // loadClasses() also re-runs loadModels() for the currently selected class.
+  await loadClasses();
+  await loadAccountInfo();
+}
+
+async function saveApiKey() {
+  const key = els.apiKeyInput.value.trim();
+  els.apiKeySave.disabled = true;
+  els.apiKeyVerify.disabled = true;
+  els.apiKeyHint.textContent = 'saving…';
+  try {
+    const res = await aegis.setApiKey(key);
+    // Never retain the raw key in the DOM once saved — show only the masked
+    // preview the main process returned.
+    els.apiKeyInput.value = '';
+    els.apiKeyHint.textContent = key
+      ? `saved (${res && res.keyMask ? res.keyMask : 'configured'})`
+      : 'key cleared';
+    await refreshAfterKeyChange();
+  } catch (err) {
+    els.apiKeyHint.textContent =
+      `save failed: ${err && err.message ? err.message : err}`;
+  } finally {
+    els.apiKeySave.disabled = false;
+    els.apiKeyVerify.disabled = false;
+  }
+}
+
+async function verifyAegisKey() {
+  els.apiKeyVerify.disabled = true;
+  els.apiKeyHint.textContent = 'verifying…';
+  try {
+    const verify = await aegis.verifyApiKey();
+    els.apiKeyHint.textContent = verify && verify.valid
+      ? `valid (${verify.plan || 'active'})`
+      : 'invalid key';
+  } catch (err) {
+    els.apiKeyHint.textContent =
+      `verify failed: ${err && err.message ? err.message : err}`;
+  } finally {
+    els.apiKeyVerify.disabled = false;
   }
 }
 
@@ -731,6 +786,15 @@ async function init() {
   els.newChat.addEventListener('click', newChat);
   els.sessionsRefresh.addEventListener('click', loadSessions);
   els.syncNow.addEventListener('click', syncNow);
+
+  els.apiKeySave.addEventListener('click', saveApiKey);
+  els.apiKeyVerify.addEventListener('click', verifyAegisKey);
+  els.apiKeyInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      saveApiKey();
+    }
+  });
 
   els.composer.addEventListener('submit', (e) => {
     e.preventDefault();

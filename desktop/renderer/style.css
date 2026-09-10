@@ -229,6 +229,30 @@ select:disabled {
   margin: 8px 0 0;
 }
 
+/* --------------------------------------------------------- in-app key entry */
+.api-key-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.api-key-row input {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.api-key-row input:focus {
+  outline: none;
+  border-color: var(--teal);
+}
+
 /* --------------------------------------------------------------- memory */
 .memory-search {
   display: flex;

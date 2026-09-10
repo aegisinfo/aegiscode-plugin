@@ -43,6 +43,9 @@ function invokeSync(name, payload) {
 // here the renderer cannot call it: add surface here AND there deliberately.
 const api = {
   status: () => invoke('status'),
+  // In-app key entry: the raw key flows renderer -> main only (never back).
+  // The main process persists it encrypted and returns a masked preview.
+  setApiKey: (key) => invoke('setApiKey', { key }),
   verifyApiKey: () => invoke('verifyApiKey'),
   tokenBankBalance: () => invoke('tokenBankBalance'),
   listModels: () => invoke('listModels'),
