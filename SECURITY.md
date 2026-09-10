@@ -35,9 +35,12 @@ Out of scope (handled by separate private/service teams):
 ## What this repository does **not** contain
 
 - **No secrets, keys, or credentials** are stored in this repository.
-- Your `AEGIS_API_KEY` (`aegis_...`) and any `AEGIS_MEMORY_TOKEN` live only in
-  your own shell environment, written by `install.sh` to your shell rc file.
-  They are never committed and never shipped in the plugin.
+- Your `AEGIS_API_KEY` (`aegis_...`) lives only in your own shell environment,
+  written by `install.sh` to your shell rc file. It is never committed and
+  never shipped in the plugin.
+- The memory token is **derived from your `AEGIS_API_KEY`** at runtime
+  (`client/aegis.js` exchanges the key via `POST /api/verify-api-key`) and is
+  cached in memory only. It is never a credential you hold, supply, or store.
 - No model weights, no orchestration logic, no server-side code.
 
 If you believe a secret has been committed, report it via the private channel
