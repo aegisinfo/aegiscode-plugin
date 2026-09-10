@@ -105,6 +105,7 @@ const api = {
   memoryActivate: (token) => invoke('memoryActivate', { token }),
   memoryPull: (since) => invoke('memoryPull', { since }),
   memorySaveBatch: (entries) => invoke('memorySaveBatch', { entries }),
+  memoryImport: (payload) => invoke('memoryImport', payload || {}),
   importConversation: (payload) => invoke('importConversation', payload || {}),
 };
 

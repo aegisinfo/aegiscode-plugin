@@ -21,6 +21,7 @@ files:
   - lib/**/*          # local engine modules (P1 §5.5): ollama/providers/
                       # context/settings/sync — pure Node, zero runtime deps
   - vendor/aegis.js
+  - vendor/foreign-memory.js
   - package.json
 
 asar: true

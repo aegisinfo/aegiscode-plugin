@@ -53,6 +53,7 @@ const ollama = require('./lib/local/ollama.js');
 const providers = require('./lib/local/providers.js');
 const sessionStore = require('./lib/sync/sessions.js');
 const memoryQueue = require('./lib/sync/memory-queue.js');
+const foreignMemory = require('./lib/foreign-memory.js');
 
 const IPC_PREFIX = 'aegis:';
 const MODEL_PREFIX = 'model:';
@@ -105,6 +106,75 @@ async function saveMemoryWithQueue(aegis, dir, entry) {
     memoryQueue.enqueue(dir, entry);
     return { ok: true, queued: true, reason: err && err.message ? err.message : String(err) };
   }
+}
+
+/**
+ * `aegis:memoryImport` — scan this machine for other AI tools' memory and,
+ * when confirmed, push it into AEGIS cloud memory.
+ *
+ * Read-only against the foreign stores (client/foreign-memory.js never writes
+ * to them). Two-phase by design: a dry run reports counts so the user can see
+ * what would land before anything leaves the machine. When a confirmed save
+ * can't reach the cloud (no key / offline), entries fall back to the same
+ * local memory-queue the single-entry save path uses, so the import is not
+ * lost — it flushes on the next "Sync now".
+ *
+ * The renderer gets counts and a summary string, never the entry bodies:
+ * 1000 entries x 2 kB over IPC is pure waste, and the bodies are already
+ * either in the cloud or in the queue by the time this resolves.
+ */
+async function importForeignMemory(aegis, dir, payload) {
+  const opts = payload || {};
+  const report = foreignMemory.scan({
+    sources: opts.sources,
+    limit: opts.limit || 1000,
+  });
+  const summary = foreignMemory.describe(report);
+  const sources = report.sources.map((s) => ({
+    id: s.id,
+    label: s.label,
+    verified: s.verified,
+    present: s.present,
+    count: s.count,
+    skipped: s.skipped,
+    files: s.files,
+  }));
+
+  const base = { summary, totals: report.totals, sources };
+
+  if (!opts.confirm || !report.entries.length) {
+    return { ...base, ok: true, dryRun: !opts.confirm, saved: 0, queued: 0 };
+  }
+
+  let saved = 0;
+  let queued = 0;
+  const errors = [];
+  for (const batch of foreignMemory.chunk(report.entries, 200)) {
+    try {
+      const data = await aegis.memorySaveBatch(batch);
+      saved += (data && data.saved) || batch.length;
+    } catch (err) {
+      // Offline-first, exactly like saveMemoryWithQueue(): keep the entries
+      // rather than dropping them. Anything already saved stays saved.
+      if (dir) {
+        for (const entry of batch) {
+          memoryQueue.enqueue(dir, entry);
+          queued += 1;
+        }
+      }
+      errors.push(err && err.message ? err.message : String(err));
+      break;
+    }
+  }
+
+  return {
+    ...base,
+    ok: errors.length === 0,
+    dryRun: false,
+    saved,
+    queued,
+    reason: errors[0] || null,
+  };
 }
 
 /**
@@ -171,6 +241,8 @@ function createIpcDispatch(aegis, dir, persistApiKey) {
       aegis.memoryPull(payload && payload.since),
     memorySaveBatch: (payload) =>
       aegis.memorySaveBatch(payload && payload.entries),
+    memoryImport: (payload) =>
+      importForeignMemory(aegis, dir, payload),
     importConversation: (payload) =>
       aegis.importConversation(payload || {}),
   };
@@ -529,4 +601,5 @@ module.exports = {
   registerModelIpc,
   createEngine,
   resolveUserDataDir,
+  importForeignMemory,
 };

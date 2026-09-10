@@ -12,6 +12,7 @@
 'use strict';
 
 const { createClient } = require('../client/aegis.js');
+const foreignMemory = require('../client/foreign-memory.js');
 
 const aegis = createClient();
 const API_KEY = aegis.apiKey;
@@ -228,6 +229,65 @@ const TOOLS = {
       };
       const data = await aegis.memorySave(entry);
       return `Saved ${data.saved || 1} memory entry (id ${entry.id}).`;
+    },
+  },
+
+  aegis_memory_import: {
+    description:
+      "Import memory and past conversation context from OTHER AI coding tools installed on this machine (Claude Code, Codex, Cursor, Gemini CLI, Continue, Goose, opencode, Windsurf, Zed, and a local AEGIS engine) into the user's AEGIS cloud memory. Scans read-only; nothing in the other tools' directories is modified. Defaults to a DRY RUN that only reports what it found — pass confirm:true to actually save. Entries are content-addressed, so re-running never duplicates.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        confirm: {
+          type: 'boolean',
+          description: 'false (default) = report only. true = actually write the entries to AEGIS memory.',
+        },
+        sources: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Optional subset of source ids to import (e.g. ["claude-code"]). Omit for every source found on this machine.',
+        },
+        limit: { type: 'integer', description: 'Max entries to import (1-5000). Default 1000.', minimum: 1, maximum: 5000 },
+      },
+      additionalProperties: false,
+    },
+    async run(args) {
+      const limit = args.limit || 1000;
+      const report = foreignMemory.scan({ sources: args.sources, limit });
+      const summary = foreignMemory.describe(report);
+
+      if (!report.entries.length) {
+        return `${summary}\n\nNothing to import.`;
+      }
+
+      if (!args.confirm) {
+        return [
+          summary,
+          '',
+          `Dry run — ${report.totals.entries} entries would be saved to AEGIS memory under ${report.totals.sourcesWithEntries} session(s) (${report.totals.skipped} skipped as too short/noise).`,
+          'Call this tool again with confirm:true to save them.',
+        ].join('\n');
+      }
+
+      let saved = 0;
+      const failures = [];
+      for (const batch of foreignMemory.chunk(report.entries, 200)) {
+        try {
+          const data = await aegis.memorySaveBatch(batch);
+          saved += (data && data.saved) || batch.length;
+        } catch (err) {
+          // A 402 here means the free-tier session cap; surface it verbatim
+          // rather than pretending part of the import worked.
+          failures.push(err.message);
+          break;
+        }
+      }
+
+      if (failures.length) {
+        return `${summary}\n\nSaved ${saved} of ${report.totals.entries} entries, then stopped: ${failures[0]}`;
+      }
+      return `${summary}\n\nSaved ${saved} entries to AEGIS memory. They are searchable now with aegis_memory_search.`;
     },
   },
 

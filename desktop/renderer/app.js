@@ -75,6 +75,7 @@ const ELEMENT_IDS = {
   memoryResults: 'memory-results',
   memoryEntry: 'memory-entry',
   memorySaveBtn: 'memory-save-btn',
+  memoryImportBtn: 'memory-import-btn',
   memoryHint: 'memory-hint',
   messages: 'messages',
   composer: 'composer',
@@ -297,6 +298,46 @@ async function searchMemory(query) {
     els.memoryHint.textContent = '';
   } catch (err) {
     els.memoryHint.textContent = `search failed: ${err && err.message ? err.message : err}`;
+  }
+}
+
+async function importMemory() {
+  if (!aegis.memoryImport) return;
+  els.memoryImportBtn.disabled = true;
+  els.memoryHint.textContent = 'scanning for other AI tool memory…';
+  try {
+    // Phase 1 — dry run. Nothing leaves the machine until the user confirms,
+    // so show exactly what was found (and from which tool) first.
+    const preview = await aegis.memoryImport({ confirm: false });
+    if (!preview || !preview.totals || !preview.totals.entries) {
+      els.memoryHint.textContent = preview && preview.summary ? preview.summary : 'nothing found.';
+      return;
+    }
+
+    const detail = (preview.sources || [])
+      .filter((s) => s.present && s.count > 0)
+      .map((s) => `  • ${s.label}: ${s.count}`)
+      .join('\n');
+    const ok = window.confirm(
+      `Found ${preview.totals.entries} memory entries in other AI tools:\n\n${detail}\n\nSave them to AEGIS memory?`
+    );
+    if (!ok) {
+      els.memoryHint.textContent = 'import cancelled — nothing was saved.';
+      return;
+    }
+
+    // Phase 2 — confirmed write.
+    els.memoryHint.textContent = 'importing…';
+    const result = await aegis.memoryImport({ confirm: true, limit: 1000 });
+    const queued = result && result.queued ? ` (${result.queued} queued offline)` : '';
+    els.memoryHint.textContent = result && result.ok
+      ? `imported ${result.saved} entries${queued}.`
+      : `import stopped: ${(result && result.reason) || 'unknown error'}`;
+    await searchMemory(els.memoryQuery.value.trim());
+  } catch (err) {
+    els.memoryHint.textContent = `import failed: ${err && err.message ? err.message : err}`;
+  } finally {
+    els.memoryImportBtn.disabled = false;
   }
 }
 
@@ -1110,6 +1151,7 @@ async function init() {
   });
 
   els.memorySaveBtn.addEventListener('click', saveMemory);
+  els.memoryImportBtn.addEventListener('click', importMemory);
 
   await loadClasses();
   await loadSettings();
