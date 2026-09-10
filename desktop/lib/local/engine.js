@@ -162,6 +162,12 @@ function createLocalEngine({ aegis, settings, ollama, providers }) {
           stream: true,
           onStream: onDelta,
           signal,
+          // aegis_memory: automatic, no button — the server both reads prior
+          // synced memory into context AND writes this turn back to it, the
+          // same flag aegis-online sets. Matches aegiscodex-dev's own
+          // cross-session memory (auto-indexed, no manual tagging); pooled
+          // AEGIS-class chat only — BYOK's relay is stateless by contract.
+          extra: { aegis_memory: true, session: sessionId },
         });
       }
 
