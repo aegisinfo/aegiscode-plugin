@@ -7,7 +7,8 @@
  * both to the shared `{ delta }` chunk shape plus a final result.
  *
  *   - OpenAI-compatible: POST {baseURL}/v1/chat/completions (Bearer or keyless)
- *   - Anthropic Messages: POST {baseURL}/v1/messages (x-api-key + version)
+ *   - Anthropic Messages: POST {baseURL}/v1/messages (x-api-key when a key is
+ *     set + version header; the credential header is omitted, never blanked)
  *
  * Every function returns the same normalised result the renderer already
  * paints: { model, choices: [{ message: { content } }], usage? }.
@@ -173,9 +174,12 @@ async function anthropicMessages({
   const url = `${String(baseURL).replace(/\/+$/, '')}/v1/messages`;
   const headers = {
     'Content-Type': 'application/json',
-    'x-api-key': apiKey || '',
     'anthropic-version': '2023-06-01',
   };
+  // Omit the credential header entirely when no key is configured: an empty
+  // `x-api-key: ''` is still a credential attempt and turns a proxied/keyless
+  // endpoint into a 401 (defect #3).
+  if (apiKey) headers['x-api-key'] = apiKey;
 
   const body = {
     model,

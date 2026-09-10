@@ -21,7 +21,6 @@
 const aegis = window.aegis;
 const models = window.models;
 const sync = window.sync;
-const $ = (id) => document.getElementById(id);
 
 if (!aegis || !models) {
   document.body.textContent =
@@ -29,47 +28,66 @@ if (!aegis || !models) {
   throw new Error('window.aegis/window.models unavailable — not running under Electron');
 }
 
-const els = {
-  connDot: $('conn-dot'),
-  connText: $('conn-text'),
-  app: $('st-app'),
-  client: $('st-client'),
-  base: $('st-base'),
-  key: $('st-key'),
-  plan: $('st-plan'),
-  balance: $('st-balance'),
-  apiKeyInput: $('api-key-input'),
-  apiKeySave: $('api-key-save'),
-  apiKeyVerify: $('api-key-verify'),
-  apiKeyHint: $('api-key-hint'),
-  classSelect: $('class-select'),
-  modelSelect: $('model-select'),
-  modelInput: $('model-input'),
-  maxTokens: $('max-tokens'),
-  modelHint: $('model-hint'),
-  settingsList: $('settings-list'),
-  settingsHint: $('settings-hint'),
-  sessionsRefresh: $('sessions-refresh'),
-  sessionsList: $('sessions-list'),
-  sessionsHint: $('sessions-hint'),
-  syncNow: $('sync-now'),
-  syncStatus: $('sync-status'),
-  newChat: $('new-chat'),
-  memorySearchForm: $('memory-search-form'),
-  memoryQuery: $('memory-query'),
-  memoryResults: $('memory-results'),
-  memoryEntry: $('memory-entry'),
-  memorySaveBtn: $('memory-save-btn'),
-  memoryHint: $('memory-hint'),
-  messages: $('messages'),
-  composer: $('composer'),
-  prompt: $('prompt'),
-  send: $('send'),
+// Element handles are resolved lazily instead of eagerly at script parse time.
+// If this script is loaded in <head> before the body exists, an eager
+// document.getElementById() would capture null for every control and leave the
+// whole UI dead (Save/Verify never bound, class/model dropdowns empty). Lazy
+// getters re-read the live DOM on each access, so boot order can never cause
+// that failure mode.
+const ELEMENT_IDS = {
+  connDot: 'conn-dot',
+  connText: 'conn-text',
+  app: 'st-app',
+  client: 'st-client',
+  base: 'st-base',
+  key: 'st-key',
+  plan: 'st-plan',
+  balance: 'st-balance',
+  apiKeyInput: 'api-key-input',
+  apiKeySave: 'api-key-save',
+  apiKeyVerify: 'api-key-verify',
+  apiKeyHint: 'api-key-hint',
+  classSelect: 'class-select',
+  modelSelect: 'model-select',
+  modelInput: 'model-input',
+  maxTokens: 'max-tokens',
+  modelHint: 'model-hint',
+  settingsList: 'settings-list',
+  settingsHint: 'settings-hint',
+  sessionsRefresh: 'sessions-refresh',
+  sessionsList: 'sessions-list',
+  sessionsHint: 'sessions-hint',
+  syncNow: 'sync-now',
+  syncStatus: 'sync-status',
+  newChat: 'new-chat',
+  memorySearchForm: 'memory-search-form',
+  memoryQuery: 'memory-query',
+  memoryResults: 'memory-results',
+  memoryEntry: 'memory-entry',
+  memorySaveBtn: 'memory-save-btn',
+  memoryHint: 'memory-hint',
+  messages: 'messages',
+  composer: 'composer',
+  prompt: 'prompt',
+  send: 'send',
 };
+
+const els = {};
+for (const [prop, id] of Object.entries(ELEMENT_IDS)) {
+  Object.defineProperty(els, prop, {
+    get: () => document.getElementById(id),
+    enumerable: true,
+    configurable: true,
+  });
+}
 
 const CLASS_KEY = 'aegis.class';
 const MAX_TOKENS_KEY = 'aegis.maxTokens';
 const CUSTOM_CLASSES = new Set(['openai-compat', 'anthropic']);
+// The in-app AEGIS key is stored in a reserved namespace the main process
+// already filters out of settings.list(); never render it as a provider row
+// even if a stale store still surfaces it (defect #1).
+const RESERVED_PROVIDERS = new Set(['__aegis', 'aegis']);
 
 let pendingEl = null;
 let pendingSessionId = null;
@@ -416,23 +434,31 @@ async function loadModels(cls) {
   try {
     const data = await models.listModels(cls);
     const list = Array.isArray(data && data.models) ? data.models : [];
+    // Keyed provider names travel alongside the BYOK model list for labelling
+    // only — they are never options (defect #4).
+    const providers =
+      cls === 'byok' && Array.isArray(data && data.providers) ? data.providers : [];
     for (const m of list) {
       modelMeta.set(m.id, m);
       const opt = document.createElement('option');
       opt.value = m.id;
-      opt.textContent = m.id;
+      opt.textContent = m.label || m.id;
       els.modelSelect.appendChild(opt);
     }
     let hint;
     if (!list.length) {
-      hint =
-        cls === 'byok'
-          ? 'No BYOK provider keys stored — set one via aegis_byok_set first.'
-          : cls === 'ollama'
-            ? 'Ollama not running or no models pulled.'
-            : 'No models listed.';
+      if (cls === 'byok') {
+        hint = providers.length
+          ? `No models listed for BYOK key${providers.length === 1 ? '' : 's'}: ${providers.join(', ')}.`
+          : 'No BYOK provider keys stored — set one via aegis_byok_set first.';
+      } else if (cls === 'ollama') {
+        hint = 'Ollama not running or no models pulled.';
+      } else {
+        hint = 'No models listed.';
+      }
     } else {
       hint = `${list.length} model${list.length === 1 ? '' : 's'} available.`;
+      if (providers.length) hint += ` · BYOK keys: ${providers.join(', ')}`;
     }
     const ceiling = applyMaxTokensClamp(els.modelSelect.value);
     els.modelHint.textContent =
@@ -454,6 +480,9 @@ async function loadSettings() {
     settings = (await models.settings.get()) || [];
   } catch {
     /* leave empty */
+  }
+  if (Array.isArray(settings)) {
+    settings = settings.filter((s) => s && !RESERVED_PROVIDERS.has(s.provider));
   }
 
   const providers = [
@@ -823,4 +852,12 @@ async function init() {
   searchMemory('');
 }
 
-init();
+// Boot only after the DOM is parsed so every control this script queries
+// actually exists. If the script is already running post-DOM this is a no-op;
+// if it was loaded early (e.g. <head> without defer) this prevents the
+// null-element boot crash that left Save/Verify unbound and dropdowns empty.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
+}

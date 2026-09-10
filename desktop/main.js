@@ -48,7 +48,7 @@ try {
 // backed by transport-only modules in desktop/lib/. No brain logic enters here.
 const os = require('node:os');
 const { createLocalEngine } = require('./lib/local/engine.js');
-const { createSettingsStore } = require('./lib/settings.js');
+const { createSettingsStore, isReservedNamespace } = require('./lib/settings.js');
 const ollama = require('./lib/local/ollama.js');
 const providers = require('./lib/local/providers.js');
 const sessionStore = require('./lib/sync/sessions.js');
@@ -219,6 +219,9 @@ function resolveUserDataDir(app) {
 function createEngine(aegis, { app, safeStorage, dir: dirOverride } = {}) {
   const dir = dirOverride || resolveUserDataDir(app);
   const settings = createSettingsStore({ dir, safeStorage });
+  // Relocate a pre-fix `settings['aegis']` key into the reserved namespace so
+  // it stops showing up as a provider. Ciphertext-level, so safe pre-'ready'.
+  settings.migrateLegacyAegisKey();
   const engine = createLocalEngine({ aegis, settings, ollama, providers });
   return { engine, sessionsDir: dir, settings };
 }
@@ -231,7 +234,11 @@ function createModelDispatch(engine) {
     listClasses: () => engine.listClasses(),
     listModels: (payload) => engine.listModels(payload && payload.class),
     chat: (payload) => engine.chat(payload, payload && payload.onStream),
-    'settings.get': () => engine.settings.list(),
+    // The AEGIS key lives in a reserved namespace the store refuses to expose
+    // or delete through this surface; the filter is belt-and-braces so a
+    // mis-wired store can never hand the renderer a removable AEGIS entry.
+    'settings.get': () =>
+      engine.settings.list().filter((s) => !(s && isReservedNamespace(s.provider))),
     'settings.set': (payload) =>
       engine.settings.set(payload && payload.provider, {
         baseURL: payload && payload.baseURL,
@@ -432,8 +439,10 @@ function bootstrap() {
     dir: dataDir,
   });
 
-  // Persist the in-app AEGIS key under settings['aegis'].{ key }, encrypted.
-  const persistApiKey = (key) => settings.set('aegis', { key });
+  // Persist the in-app AEGIS key in its own reserved namespace, encrypted —
+  // never as a provider named 'aegis' (that coupling let the Settings pane's
+  // "Remove" delete the AEGIS key; defect #1).
+  const persistApiKey = (key) => settings.setAegisKey(key);
 
   registerIpc(ipcMain, aegis, dataDir, persistApiKey);
   registerModelIpc(ipcMain, engine, sessionsDir, aegis);
@@ -464,7 +473,7 @@ function bootstrap() {
     // Hydrate the client from the persisted key BEFORE the renderer issues any
     // status/model call, so class/model dropdowns populate immediately when a
     // key was saved in-app (safeStorage is usable only after app ready).
-    const persistedKey = settings.rawKey('aegis');
+    const persistedKey = settings.aegisRawKey();
     if (persistedKey) aegis.setApiKey(persistedKey);
     createWindow();
   });
