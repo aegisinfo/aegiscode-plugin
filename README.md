@@ -1,11 +1,30 @@
-# AEGIS for Claude Code
+# AEGIS Code
+
+One repo, three surfaces for the same AEGIS service — a shared thin client, a
+Claude Code plugin, and a standalone Electron desktop app. All of them talk to
+a single AEGIS API key: pooled multi-provider inference, cross-machine cloud
+memory, and account tools, plus (in the desktop app) direct local /
+OpenAI-compatible / Anthropic-compatible endpoints.
+
+| Surface | Where it lives | What it is |
+|---|---|---|
+| **Shared thin client** | `client/aegis.js` | Zero-dependency transport to `aegiscloud.org`. The only code in this repo that talks to the backend; runs unchanged under Node (MCP + Electron) and in a browser. |
+| **Claude Code plugin** | `mcp/`, `commands/`, `skills/`, `install.sh`, `.claude-plugin/` | Slash commands + MCP tools inside Claude Code. **Cloud-only** — Claude Code already runs inside a host with its own models. |
+| **AEGIS Desktop** | `desktop/` | Standalone Electron chat app with a model-class picker covering all four sources, streaming, and cloud sync. |
+
+**The boundary stays the same everywhere:** this repo ships transport + UI
+only. No engine, no orchestration, no routing/tier/brain logic — that lives
+server-side on `aegiscloud.org` (and in the private `ae-guix` product).
+
+---
+
+## Claude Code plugin
 
 Bring AEGIS tooling into your own Claude Code: pooled multi-provider inference,
-cross-machine cloud memory, and account tools — all driven by a single AEGIS API
-key. This repo also ships **AEGIS Desktop**, a standalone Electron chat app —
-see [AEGIS Desktop (Electron)](#aegis-desktop-electron) below.
+cross-machine cloud memory, and account tools — all driven by a single AEGIS
+API key.
 
-## What you get
+### What you get
 
 | Tool / command | What it does |
 |---|---|
@@ -40,9 +59,9 @@ your own Anthropic, Groq, or OpenAI key at your own cost, set it once with
 pooled balance — no more running out of AEGIS credit. Remove it any time by
 calling `aegis_byok_set` again with no key.
 
-## Setup
+### Setup
 
-### Quick install
+#### Quick install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/aegisinfo/aegiscode-plugin/main/install.sh | bash
@@ -59,7 +78,7 @@ export AEGIS_API_KEY="aegis_..."   # your real key from https://aegiscloud.org
 curl -fsSL https://raw.githubusercontent.com/aegisinfo/aegiscode-plugin/main/install.sh | bash
 ```
 
-### Manual install
+#### Manual install
 
 1. Get an API key at **https://aegiscloud.org** (looks like `aegis_...`).
 2. Export it so Claude Code inherits it:
@@ -77,33 +96,43 @@ curl -fsSL https://raw.githubusercontent.com/aegisinfo/aegiscode-plugin/main/ins
 
 4. **Restart Claude Code**, then run `/aegis-status` to confirm.
 
-### Optional
+#### Optional
 
 - `AEGIS_API_BASE` — override the backend base URL (default
   `https://aegiscloud.org`); handy for self-hosted or staging.
 
-## Requirements
+#### Requirements
 
 - Node.js 18+ (uses global `fetch`; the MCP server has **zero npm dependencies**).
 - An AEGIS account. Cloud memory requires a plan with memory enabled; free
   accounts are capped at 3 memory sessions.
 
-## How it works
+---
 
-The plugin ships a small stdio MCP server (`mcp/server.js`) that calls the
-aegiscloud REST API with your key. Inference goes through the
-OpenAI-compatible `POST /api/v1/chat/completions`; balance and BYOK tools use
-the same key against `/api/token-bank/*` and `/api/user/api-keys`; memory
-endpoints exchange your API key for a memory token, then sync via
-`/api/memory/*`. No key or data is stored locally by the plugin — it only
-forwards to aegiscloud.org over HTTPS. BYOK keys you set are encrypted at
-rest server-side and never returned in full (only a masked preview).
+## Shared thin client
+
+`client/aegis.js` is the single public surface that talks to `aegiscloud.org`.
+It forwards requests and normalises responses, and deliberately contains **no**
+engine, brain, orchestration, routing, or tier logic. It runs unchanged under
+three hosts:
+
+- `mcp/server.js` — the Claude Code MCP plugin (CommonJS `require`)
+- `desktop/` — the Electron shell (CommonJS `require`, via a byte-identical
+  vendored copy at `desktop/vendor/aegis.js`)
+- `aegis-online` — a browser SPA (`<script>` tag → `window.AegisClient`)
+
+It exposes `verifyApiKey`, `chatCompletion`, `listModels`, `tokenBankBalance`,
+`byokStatus` / `byokSet`, `memorySearch` / `memorySave` / `memoryList`, and
+`conversationSyncPush` / `conversationSyncPull` — all key-forwarded, no local
+storage of secrets.
+
+---
 
 ## AEGIS Desktop (Electron)
 
-This repo also ships **AEGIS Desktop** (`desktop/`), a thin Electron chat UI
-over the same `client/aegis.js` transport, with a model-class picker covering
-four sources instead of just the pooled cloud:
+`desktop/` is a thin Electron chat UI over the same `client/aegis.js`
+transport, with a model-class picker covering four sources instead of just the
+pooled cloud:
 
 | Class | Transport | Key held in |
 |---|---|---|
@@ -132,3 +161,30 @@ cd desktop
 npm run dist        # packaged app
 npm run dist:dir    # unpacked dir, for quick testing
 ```
+
+---
+
+## Repository layout
+
+```
+client/aegis.js      shared thin transport (MCP + Electron + browser)
+mcp/server.js        zero-dependency MCP server (Claude Code tools)
+commands/            Claude Code slash commands
+skills/              Claude Code skills
+install.sh           one-line Claude Code installer
+.claude-plugin/      plugin + marketplace metadata
+desktop/             AEGIS Desktop (Electron host + lib + renderer)
+docs/                product plan and Electron host plan
+test/                plain-Node unit + smoke tests (no Electron required)
+```
+
+## How it works
+
+The plugin ships a small stdio MCP server (`mcp/server.js`) that calls the
+aegiscloud REST API with your key. Inference goes through the
+OpenAI-compatible `POST /api/v1/chat/completions`; balance and BYOK tools use
+the same key against `/api/token-bank/*` and `/api/user/api-keys`; memory
+endpoints exchange your API key for a memory token, then sync via
+`/api/memory/*`. No key or data is stored locally by the plugin — it only
+forwards to aegiscloud.org over HTTPS. BYOK keys you set are encrypted at
+rest server-side and never returned in full (only a masked preview).

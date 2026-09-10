@@ -1,16 +1,21 @@
 # Contributing
 
-Thanks for helping improve AEGIS for Claude Code.
+Thanks for helping improve AEGIS Code.
 
 ## What this repo is
 
-This is the **thin client wrapper** for AEGIS. It deliberately contains no
-engine, orchestration, or server-side logic — only the surface that connects
-your Claude Code to the AEGIS service:
+This is the **thin client wrapper** for AEGIS: one repo, three surfaces — the
+shared thin client, the Claude Code plugin, and the AEGIS Desktop app. It
+deliberately contains no engine, orchestration, routing, or server-side logic —
+only the surface that connects your tools to the AEGIS service:
 
+- `client/aegis.js` — shared zero-dependency transport to `aegiscloud.org`
+  (used by the MCP server, the Electron app, and the `aegis-online` browser SPA)
 - `mcp/server.js` — a zero-dependency MCP server (JSON-RPC over stdio)
 - `commands/*` — Claude Code slash commands
 - `skills/*` — Claude Code skills
+- `desktop/` — AEGIS Desktop, a thin Electron host with direct local /
+  OpenAI-compatible / Anthropic-compatible transport
 - `install.sh` — the one-line installer
 
 ## Ground rules
