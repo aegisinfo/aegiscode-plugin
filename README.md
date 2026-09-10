@@ -2,7 +2,8 @@
 
 Bring AEGIS tooling into your own Claude Code: pooled multi-provider inference,
 cross-machine cloud memory, and account tools — all driven by a single AEGIS API
-key.
+key. This repo also ships **AEGIS Desktop**, a standalone Electron chat app —
+see [AEGIS Desktop (Electron)](#aegis-desktop-electron) below.
 
 ## What you get
 
@@ -97,3 +98,37 @@ endpoints exchange your API key for a memory token, then sync via
 `/api/memory/*`. No key or data is stored locally by the plugin — it only
 forwards to aegiscloud.org over HTTPS. BYOK keys you set are encrypted at
 rest server-side and never returned in full (only a masked preview).
+
+## AEGIS Desktop (Electron)
+
+This repo also ships **AEGIS Desktop** (`desktop/`), a thin Electron chat UI
+over the same `client/aegis.js` transport, with a model-class picker covering
+four sources instead of just the pooled cloud:
+
+| Class | Transport | Key held in |
+|---|---|---|
+| Aegis Cloud (pooled or pinned model) | `aegiscloud.org` | main process |
+| BYOK relay | `aegiscloud.org` relay | main process |
+| OpenAI-compatible (Ollama, LM Studio, OpenRouter, vLLM, ...) | direct from desktop | main process — never sent to the renderer |
+| Anthropic-compatible (Claude, or any Messages-format gateway) | direct from desktop | main process |
+
+Conversations persist locally (`sessions.json`) and sync to AEGIS cloud memory
+via a pending-queue that flushes on each "Sync now" / heartbeat retry; a
+"remember" button on any assistant reply — from any of the four classes —
+pins that message to cross-machine memory (queued locally if offline).
+
+Run it from source:
+
+```bash
+cd desktop
+npm install
+npm start
+```
+
+Build a distributable (AppImage/deb/... via `electron-builder`):
+
+```bash
+cd desktop
+npm run dist        # packaged app
+npm run dist:dir    # unpacked dir, for quick testing
+```
