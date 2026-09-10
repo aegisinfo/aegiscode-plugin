@@ -1,0 +1,17 @@
+{
+  "name": "aegis-online",
+  "version": "0.1.0",
+  "description": "First-class browser host for AEGIS — a static, zero-dependency SPA over the shared client/aegis.js transport. Cloud-only; ships transport + UI, no brain.",
+  "author": {
+    "name": "AEGIS Code",
+    "email": "nborneklint@gmail.com"
+  },
+  "license": "MIT",
+  "private": true,
+  "homepage": "https://aegiscloud.org",
+  "scripts": {
+    "predist": "node scripts/predist.mjs",
+    "check": "node --check app.js && node --check scripts/predist.mjs && node --check scripts/serve.mjs && node --check vendor/aegis.js",
+    "serve": "node scripts/serve.mjs"
+  }
+}

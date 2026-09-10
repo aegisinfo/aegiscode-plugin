@@ -174,4 +174,107 @@ try {
 }
 assert(aborted, 'cancel aborts the in-flight stream');
 
+// ---- defect B: custom endpoints offer no base-URL-as-model-id -------------
+//
+// listModels used to return [{ id: cfg.baseURL }] for openai-compat/anthropic.
+// Leaving that default selected POSTed `model: "https://api.openai.com/v1"`,
+// an upstream 400 invalid-model on every call.
+for (const cls of ['openai-compat', 'anthropic']) {
+  const listed = await engine.listModels(cls);
+  assert(
+    Array.isArray(listed.models) && listed.models.length === 0,
+    `${cls} lists no models, got ${JSON.stringify(listed.models)}`
+  );
+  assert(listed.needsModelId === true, `${cls} sets needsModelId`);
+  assert(
+    !listed.models.some((m) => m && m.id === 'http://local'),
+    `${cls} never offers the base URL as a model id`
+  );
+  assert(
+    !listed.models.some((m) => m && typeof m.id === 'string' && /^https?:/.test(m.id)),
+    `${cls} never offers a URL as a model id`
+  );
+  assert(listed.baseURL === 'http://local', `${cls} reports its base URL for display`);
+}
+
+// A blank/absent model id for a custom class is rejected in-process: the
+// provider transport is never reached, so nothing is fetched upstream.
+for (const cls of ['openai-compat', 'anthropic']) {
+  const seen = [];
+  const guardEngine = createLocalEngine({
+    aegis,
+    settings,
+    ollama,
+    providers: {
+      async openaiCompatible(args) { seen.push(args); return {}; },
+      async anthropicMessages(args) { seen.push(args); return {}; },
+    },
+  });
+  for (const blank of [undefined, null, '', '   ']) {
+    let threw = null;
+    try {
+      await guardEngine.chat({ class: cls, prompt: 'hi', model: blank }, () => {});
+    } catch (err) {
+      threw = err;
+    }
+    assert(threw, `${cls} chat rejects model=${JSON.stringify(blank)}`);
+    assert(
+      /model id is required/.test(threw.message),
+      `${cls} blank-model error is actionable, got "${threw && threw.message}"`
+    );
+  }
+  assert(seen.length === 0, `${cls} blank model never reaches the transport (${seen.length} calls)`);
+}
+
+// ---- defect A through the engine: real transport, one /v1 ------------------
+//
+// End-to-end with the actual providers module and a fetch spy: the configured
+// base URL (which the settings field invites users to paste *with* /v1) must
+// produce exactly one version segment.
+{
+  const req = createRequire(import.meta.url);
+  const realProviders = req('../desktop/lib/local/providers.js');
+
+  const fetched = [];
+  globalThis.fetch = async (url) => {
+    fetched.push(url);
+    return new Response(JSON.stringify({ model: 'gpt-4o-mini', choices: [{ message: { content: 'ok' } }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+
+  const cases = [
+    ['openai-compat', 'https://api.openai.com', 'https://api.openai.com/v1/chat/completions'],
+    ['openai-compat', 'https://api.openai.com/v1', 'https://api.openai.com/v1/chat/completions'],
+    ['openai-compat', 'https://api.openai.com/v1/', 'https://api.openai.com/v1/chat/completions'],
+    ['anthropic', 'https://api.anthropic.com', 'https://api.anthropic.com/v1/messages'],
+    ['anthropic', 'https://api.anthropic.com/v1', 'https://api.anthropic.com/v1/messages'],
+    ['anthropic', 'https://api.anthropic.com/v1/', 'https://api.anthropic.com/v1/messages'],
+  ];
+  for (const [cls, baseURL, expected] of cases) {
+    const eng = createLocalEngine({
+      aegis,
+      settings: { get: () => ({ baseURL, configured: true }), rawKey: () => 'k' },
+      ollama,
+      providers: realProviders,
+    });
+    await eng.chat({ class: cls, prompt: 'hi', model: 'gpt-4o-mini' }, () => {});
+    assert(
+      fetched[fetched.length - 1] === expected,
+      `${cls} base "${baseURL}" fetched "${fetched[fetched.length - 1]}", expected "${expected}"`
+    );
+  }
+  const before = fetched.length;
+  const eng = createLocalEngine({
+    aegis,
+    settings: { get: () => ({ baseURL: 'https://api.openai.com/v1', configured: true }), rawKey: () => 'k' },
+    ollama,
+    providers: realProviders,
+  });
+  await eng.chat({ class: 'openai-compat', prompt: 'hi', model: '   ' }, () => {}).catch(() => {});
+  assert(fetched.length === before, 'blank model id never reaches fetch()');
+  delete globalThis.fetch;
+}
+
 console.log('engine tests passed');

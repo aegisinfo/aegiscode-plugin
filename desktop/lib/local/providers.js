@@ -14,6 +14,61 @@
  * paints: { model, choices: [{ message: { content } }], usage? }.
  */
 
+/**
+ * Version/endpoint segments a user may already have typed into "base URL".
+ * Both OpenAI's and Anthropic's docs hand out base URLs that end in `/v1`, and
+ * the settings field invites pasting exactly that — so blindly appending
+ * `/v1/<endpoint>` produced `.../v1/v1/chat/completions`, a 404/400 on every
+ * call (defect A). A base URL that already names the endpoint
+ * (`…/v1/messages`) or carries a longer prefix (`…/openai/v1`) must normalise
+ * to the same single `/v1` too.
+ */
+const TRAILING_ENDPOINT = /\/(?:chat\/completions|completions|messages|models)$/;
+const TRAILING_VERSION = /\/v\d+(?:\.\d+)?$/;
+
+/** Drop a trailing version and/or endpoint segment, keeping any prefix. */
+function stripEndpointSuffix(path) {
+  let out = path;
+  for (;;) {
+    const trimmed = out.replace(/\/+$/, '');
+    if (TRAILING_ENDPOINT.test(trimmed)) {
+      out = trimmed.replace(TRAILING_ENDPOINT, '');
+      continue;
+    }
+    if (TRAILING_VERSION.test(trimmed)) {
+      out = trimmed.replace(TRAILING_VERSION, '');
+      continue;
+    }
+    return trimmed;
+  }
+}
+
+/**
+ * Build the absolute request URL for a wire-format endpoint. `baseURL` may be
+ * bare (`https://api.openai.com`), versioned (`…/v1`), versioned with a
+ * trailing slash, or already name the endpoint — all of them resolve to
+ * exactly one version segment. Any other path prefix survives, as does a
+ * query string or fragment. The endpoint path is supplied by the caller so
+ * this stays the single shared path builder for both transports.
+ */
+function endpointURL(baseURL, endpointPath) {
+  const raw = String(baseURL == null ? '' : baseURL).trim();
+  const cut = raw.search(/[?#]/);
+  const base = cut === -1 ? raw : raw.slice(0, cut);
+  const tail = cut === -1 ? '' : raw.slice(cut);
+  return `${stripEndpointSuffix(base)}${endpointPath}${tail}`;
+}
+
+/** A model id is mandatory over both wire formats; a URL is never one. */
+function requireModel(model) {
+  if (typeof model === 'string' && model.trim()) return model.trim();
+  const err = new Error(
+    'a model id is required — type the provider\'s model name (a base URL is not a model)'
+  );
+  err.status = 400;
+  throw err;
+}
+
 /** Normalise arbitrary message entries to { role, content } (no system). */
 function normalizeMessages(messages) {
   const out = [];
@@ -115,12 +170,13 @@ async function openaiCompatible({
   signal,
   onDelta,
 } = {}) {
-  const url = `${String(baseURL).replace(/\/+$/, '')}/v1/chat/completions`;
+  const url = endpointURL(baseURL, '/v1/chat/completions');
+  const modelId = requireModel(model);
   const headers = { 'Content-Type': 'application/json' };
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
 
   const body = {
-    model,
+    model: modelId,
     messages: openAIMessages(messages, system, prompt),
     max_tokens: maxTokens || 4096,
     stream: true,
@@ -128,7 +184,7 @@ async function openaiCompatible({
   if (temperature != null) body.temperature = temperature;
 
   let fullText = '';
-  let resultModel = model;
+  let resultModel = modelId;
   let usage = null;
 
   await requestStream({
@@ -171,7 +227,8 @@ async function anthropicMessages({
   signal,
   onDelta,
 } = {}) {
-  const url = `${String(baseURL).replace(/\/+$/, '')}/v1/messages`;
+  const url = endpointURL(baseURL, '/v1/messages');
+  const modelId = requireModel(model);
   const headers = {
     'Content-Type': 'application/json',
     'anthropic-version': '2023-06-01',
@@ -182,7 +239,7 @@ async function anthropicMessages({
   if (apiKey) headers['x-api-key'] = apiKey;
 
   const body = {
-    model,
+    model: modelId,
     max_tokens: maxTokens || 4096,
     stream: true,
     messages: buildAnthropicMessages(messages, prompt),
@@ -191,7 +248,7 @@ async function anthropicMessages({
   if (temperature != null) body.temperature = temperature;
 
   let fullText = '';
-  let resultModel = model;
+  let resultModel = modelId;
   let usage = null;
 
   await requestStream({
@@ -241,4 +298,8 @@ module.exports = {
   requestStream,
   openaiCompatible,
   anthropicMessages,
+  // shared path builder + model-id guard (unit-tested directly)
+  endpointURL,
+  stripEndpointSuffix,
+  requireModel,
 };

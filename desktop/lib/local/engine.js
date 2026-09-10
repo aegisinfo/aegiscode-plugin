@@ -140,12 +140,16 @@ function createLocalEngine({ aegis, settings, ollama, providers }) {
       });
       return { class: cls, models, providers: providers || [] };
     }
-    // Custom endpoints: models are user-typed; surface the configured base URL.
-    const cfg = settings.get(cls);
-    return {
-      class: cls,
-      models: cfg.baseURL ? [{ id: cfg.baseURL, baseURL: cfg.baseURL }] : [],
-    };
+    // Custom endpoints: the model id is the *user's* choice — a provider model
+    // name, never a URL. Offering the configured base URL as an `id` meant that
+    // leaving the default selection POSTed `model: "https://api.openai.com/v1"`,
+    // an upstream 400 invalid-model on every call (defect B). There is nothing
+    // to enumerate, so the list stays empty and `needsModelId` tells the
+    // renderer to prompt for a typed id instead. The base URL still travels
+    // along for display only.
+    const cfg = settings.get(cls) || {};
+    const baseURL = typeof cfg.baseURL === 'string' ? cfg.baseURL.trim() : '';
+    return { class: cls, models: [], needsModelId: true, baseURL };
   }
 
   async function chat(payload, onDelta) {
@@ -203,8 +207,19 @@ function createLocalEngine({ aegis, settings, ollama, providers }) {
         });
       }
 
-      const cfg = settings.get(cls);
+      const cfg = settings.get(cls) || {};
       const apiKey = settings.rawKey(cls);
+      // Custom classes carry no enumerable model list (see listModels), so a
+      // blank id here means the user never typed one. Fail loudly in-process
+      // instead of shipping `model: undefined` upstream (defect B).
+      if (typeof model !== 'string' || !model.trim()) {
+        const err = new Error(
+          `${cls}: a model id is required — type the provider's model name ` +
+            '(the base URL is not a model).'
+        );
+        err.status = 400;
+        throw err;
+      }
       const common = {
         baseURL: cfg.baseURL,
         apiKey,

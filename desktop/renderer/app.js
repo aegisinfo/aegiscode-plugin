@@ -97,6 +97,12 @@ const CLASS_KEY = 'aegis.class';
 const MAX_TOKENS_KEY = 'aegis.maxTokens';
 const EXPLORE_KEY = 'aegis.explore';
 const CUSTOM_CLASSES = new Set(['openai-compat', 'anthropic']);
+// Placeholders for the typed model-id field: custom endpoints enumerate
+// nothing, so the field has to say what a valid id looks like.
+const MODEL_ID_PLACEHOLDER = {
+  'openai-compat': 'type a model id — e.g. gpt-4o-mini',
+  anthropic: 'type a model id — e.g. claude-sonnet-4-5',
+};
 // The in-app AEGIS key is stored in a reserved namespace the main process
 // already filters out of settings.list(); never render it as a provider row
 // even if a stale store still surfaces it (defect #1).
@@ -708,8 +714,44 @@ async function loadModels(cls) {
     } catch {
       /* settings unavailable — leave hint below */
     }
+    // The engine lists no models for a custom endpoint: the only usable id is
+    // one the user types (it used to offer the base URL as an id, which POSTed
+    // `model: "<url>"` and 400'd upstream). `needsModelId` is what turns this
+    // into an explicit "type a model id" prompt rather than an empty picker.
+    let needsModelId = true;
+    try {
+      const data = await models.listModels(cls);
+      if (data && typeof data.needsModelId === 'boolean') needsModelId = data.needsModelId;
+      if (data && typeof data.baseURL === 'string' && data.baseURL) {
+        cfg = { ...cfg, baseURL: data.baseURL };
+      }
+      const list = Array.isArray(data && data.models) ? data.models : [];
+      if (list.length) {
+        // A custom class that does enumerate models (a future provider) still
+        // gets a picker; the typed input is only for the unlistable case.
+        needsModelId = false;
+        els.modelSelect.hidden = false;
+        els.modelSelect.disabled = false;
+        els.modelInput.hidden = true;
+        els.modelInput.disabled = true;
+        els.modelSelect.innerHTML = '';
+        for (const m of list) {
+          modelMeta.set(m.id, m);
+          const opt = document.createElement('option');
+          opt.value = m.id;
+          opt.textContent = m.label || m.id;
+          els.modelSelect.appendChild(opt);
+        }
+      }
+    } catch {
+      /* engine unavailable — fall back to settings + the typed input */
+    }
+    els.modelInput.placeholder = needsModelId
+      ? MODEL_ID_PLACEHOLDER[cls] || 'type a model id'
+      : 'model id';
     els.modelHint.textContent = cfg.baseURL
-      ? `endpoint: ${cfg.baseURL} · key: ${cfg.configured ? cfg.keyMask : 'not set'}`
+      ? `endpoint: ${cfg.baseURL} · key: ${cfg.configured ? cfg.keyMask : 'not set'}` +
+        (needsModelId ? ' · type a model id above' : '')
       : 'Set base URL + key in Provider settings, then type a model id.';
     return;
   }
@@ -1004,13 +1046,22 @@ async function send() {
   const prompt = els.prompt.value.trim();
   if (!prompt || els.send.disabled) return;
 
-  els.prompt.value = '';
-  addMessage('user', prompt);
-
   const cls = els.classSelect.value;
   const model = CUSTOM_CLASSES.has(cls)
     ? els.modelInput.value.trim()
     : els.modelSelect.value;
+  // A custom endpoint has no default model, and a blank id reaches the
+  // provider as `model: undefined` (defect B). Ask for it instead of sending.
+  if (CUSTOM_CLASSES.has(cls) && !model) {
+    els.modelHint.textContent =
+      MODEL_ID_PLACEHOLDER[cls] || 'type a model id before sending.';
+    els.modelInput.focus();
+    return;
+  }
+
+  els.prompt.value = '';
+  addMessage('user', prompt);
+
   const maxTokens = parseInt(els.maxTokens.value, 10) || 4096;
   const sessionId = newSessionId();
   pendingSessionId = sessionId;
