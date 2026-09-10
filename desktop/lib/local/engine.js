@@ -158,8 +158,10 @@ function createLocalEngine({ aegis, settings, ollama, providers }) {
     const maxTokens = payload && payload.maxTokens;
     // "Work autonomously" — routes this call through aegis1's pool_brain
     // worker fan-out (services/pool_brain.py: N reasoning workers + a
-    // synthesis pass) instead of a single provider call. Pooled AEGIS Cloud
-    // only: BYOK bills on the relay's own key and has no brain route.
+    // synthesis pass) instead of a single provider call. UI-gated to the
+    // 'aegis' class only (see AUTONOMOUS_CLASS in app.js); pool_brain does
+    // support BYOK key sourcing server-side, so widening this to 'byok' is a
+    // UI-only change if ever wanted, not a backend one.
     const autonomous = cls === 'aegis' && Boolean(payload && payload.autonomous);
     const sessionId = (payload && payload.sessionId) || randomUUID();
 
@@ -169,18 +171,19 @@ function createLocalEngine({ aegis, settings, ollama, providers }) {
 
     try {
       if (cls === 'aegis' || cls === 'byok') {
-        if (cls === 'byok') {
-          return await aegis.byokChatCompletion({
-            prompt: payload.prompt,
-            system: payload.system,
-            messages: payload.messages,
-            model,
-            maxTokens,
-            stream: true,
-            onStream: onDelta,
-            signal,
-          });
-        }
+        // Both classes hit the SAME pooled endpoint. aegis1's
+        // /api/v1/chat/completions already folds in the user's own saved BYOK
+        // provider key (services/byok_service.get_user_key_map ->
+        // nexus.resolve_key(), which prefers it over the pool's key when both
+        // exist) and skips token_bank billing for that request when it does.
+        // 'byok' only narrows the model picker (see listModels above) to
+        // providers the user has personally keyed via aegis_byok_set — it is
+        // not a separate transport. Posting to the *stateless*, unauthenticated
+        // /api/v1/byok/chat/completions relay via byokChatCompletion() (the
+        // old code path) never supplied a providerKey, so every BYOK chat sent
+        // the literal string "undefined" as the upstream credential — that
+        // relay is for the unauthenticated /online browser BYOK toggle, not
+        // this already-authenticated desktop session.
         return await aegis.chatCompletion({
           prompt: payload.prompt,
           system: payload.system,
@@ -194,8 +197,8 @@ function createLocalEngine({ aegis, settings, ollama, providers }) {
           // aegis_memory: automatic, no button — the server both reads prior
           // synced memory into context AND writes this turn back to it, the
           // same flag aegis-online sets. Matches aegiscodex-dev's own
-          // cross-session memory (auto-indexed, no manual tagging); pooled
-          // AEGIS-class chat only — BYOK's relay is stateless by contract.
+          // cross-session memory (auto-indexed, no manual tagging); applies to
+          // both classes now that byok shares this same authenticated call.
           extra: {
             aegis_memory: true,
             session: sessionId,

@@ -133,8 +133,11 @@ assert(
 await engine.chat({ class: 'aegis', prompt: 'hi', model: 'm1' }, () => {});
 assert(calls[calls.length - 1][0] === 'chatCompletion', 'aegis routes to chatCompletion');
 
+// byok shares the pooled chatCompletion transport (the server folds in the
+// user's own saved key via get_user_key_map/resolve_key) — it must NOT hit
+// the stateless byokChatCompletion relay, which has no providerKey to send.
 await engine.chat({ class: 'byok', prompt: 'hi', model: 'openai' }, () => {});
-assert(calls[calls.length - 1][0] === 'byok', 'byok routes to byokChatCompletion');
+assert(calls[calls.length - 1][0] === 'chatCompletion', 'byok routes to the pooled chatCompletion, not the stateless relay');
 
 await engine.chat({ class: 'ollama', prompt: 'hi', model: 'llama3' }, () => {});
 assert(calls[calls.length - 1][0] === 'ollama', 'ollama routes to ollama.chat');

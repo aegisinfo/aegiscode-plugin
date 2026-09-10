@@ -294,11 +294,16 @@ const tmp = (n) => mkdtempSync(join(tmpdir(), `aegis-key-${n}-`));
         return {};
       },
       async chatCompletion(args) {
-        seen.push(['aegis', args]);
+        seen.push(['chatCompletion', args]);
         return { model: args.model, choices: [{ message: { content: '' } }] };
       },
+      // 'byok' must never reach this: it is the stateless, unauthenticated
+      // /api/v1/byok/chat/completions relay, which needs a per-request
+      // providerKey the desktop never has — the desktop's 'byok' class shares
+      // aegis.chatCompletion() instead, relying on the server folding in the
+      // user's own saved key (services/byok_service.get_user_key_map).
       async byokChatCompletion(args) {
-        seen.push(['byok', args]);
+        seen.push(['byokChatCompletion-stateless-relay', args]);
         return { model: args.model, choices: [{ message: { content: '' } }] };
       },
     },
@@ -331,8 +336,16 @@ const tmp = (n) => mkdtempSync(join(tmpdir(), `aegis-key-${n}-`));
   await engine.chat({ class: 'byok', prompt: 'hi', model: 'gpt-4o' }, () => {});
   await engine.chat({ class: 'ollama', prompt: 'hi', model: 'llama3' }, () => {});
 
+  const chatCompletionCalls = seen.filter(([k]) => k === 'chatCompletion');
+  assert(
+    chatCompletionCalls.length === 2,
+    `both 'aegis' and 'byok' route through the shared AEGIS-authenticated chatCompletion, got ${chatCompletionCalls.length}`
+  );
+  assert(
+    !seen.some(([k]) => k === 'byokChatCompletion-stateless-relay'),
+    'byok must never hit the stateless unauthenticated relay (it has no providerKey to send)'
+  );
   const byName = Object.fromEntries(seen);
-  assert(byName.aegis && byName.byok, 'cloud classes route to the shared client (AEGIS key)');
   assert(byName.ollama && !('apiKey' in byName.ollama), 'ollama is keyless');
   assert(
     !JSON.stringify([byName.ollama]).includes(AEGIS_KEY),
