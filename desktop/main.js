@@ -65,6 +65,21 @@ const SYNC_PREFIX = 'sync:';
  */
 const CHAT_DELTA_CHANNEL = `${IPC_PREFIX}chatDelta`;
 
+/**
+ * Address one SSE delta to the stream that produced it (D2.2 multi-stream).
+ *
+ * The renderer's chat flow runs a *set* of concurrent streams — the primary
+ * answer plus the horizontal discovery lane — so every chunk must say which
+ * sessionId it belongs to. `id` is added last so the routing tag stays
+ * authoritative, while `delta` (and any future field the client sends) is
+ * copied through untouched: existing single-stream callers that never set a
+ * sessionId simply receive `id: undefined`, exactly the shape they see today.
+ */
+function taggedChunk(chunk, sessionId) {
+  const base = chunk && typeof chunk === 'object' ? chunk : { delta: chunk };
+  return { ...base, id: sessionId };
+}
+
 const APP_VERSION = require('./package.json').version;
 
 /** Never ship a full key to the renderer — only a masked preview. */
@@ -184,7 +199,13 @@ function registerIpc(ipcMain, aegis, dir, persistApiKey) {
             typeof sender.send === 'function' &&
             !sender.isDestroyed()
           ) {
-            sender.send(CHAT_DELTA_CHANNEL, chunk);
+            // Address every delta with the request's sessionId (D2.2): the
+            // chat flow can run more than one stream at a time (the primary
+            // answer plus the horizontal discovery lane), so an unaddressed
+            // broadcast would interleave both replies into one bubble. The
+            // renderer's preload filters on `id`; chunks stay shape-compatible
+            // ({ delta }) for callers that never set a sessionId.
+            sender.send(CHAT_DELTA_CHANNEL, taggedChunk(chunk, opts.sessionId));
           }
         };
         return handler({ ...opts, stream: true, onStream: forward });
@@ -387,7 +408,10 @@ function registerModelIpc(ipcMain, engine, sessionsDir, aegis) {
             typeof sender.send === 'function' &&
             !sender.isDestroyed()
           ) {
-            sender.send(CHAT_DELTA_CHANNEL, chunk);
+            // Two streams can be live at once (main answer + discovery lane),
+            // so each delta carries the sessionId it belongs to. See the
+            // matching note on the aegis:chatCompletion forwarder.
+            sender.send(CHAT_DELTA_CHANNEL, taggedChunk(chunk, opts.sessionId));
           }
         };
         return handler({ ...opts, onStream: forward });
@@ -498,6 +522,7 @@ module.exports = {
   MODEL_PREFIX,
   SYNC_PREFIX,
   CHAT_DELTA_CHANNEL,
+  taggedChunk,
   maskKey,
   createModelDispatch,
   createSyncDispatch,

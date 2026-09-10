@@ -39,6 +39,29 @@ function invokeSync(name, payload) {
   );
 }
 
+/**
+ * Build the chatDelta listener for one streaming request.
+ *
+ * Chunks arrive on a single shared channel, tagged by the main process with
+ * the sessionId of the request they came from (see `taggedChunk` in main.js).
+ * Filtering here is what makes concurrent streams safe: the primary answer and
+ * each card of the horizontal discovery lane subscribe with their own
+ * sessionId, so one reply can never bleed into another card's body.
+ *
+ * The normalisation is deliberately loose-strict: `undefined`/`''` ids
+ * (legacy single-stream callers that pass no sessionId) are treated as one
+ * bucket, so the old behaviour — receive every untagged chunk — is preserved
+ * byte for byte.
+ */
+function deltaListener(sessionId, onDelta) {
+  const want = sessionId || null;
+  return (_event, chunk) => {
+    const id = chunk && chunk.id ? chunk.id : null;
+    if (id !== want) return;
+    onDelta(chunk);
+  };
+}
+
 // Whitelist — mirrors the dispatch map in main.js. If a method is not listed
 // here the renderer cannot call it: add surface here AND there deliberately.
 const api = {
@@ -58,7 +81,7 @@ const api = {
     if (typeof onDelta !== 'function') {
       return invoke('chatCompletion', { ...opts, stream: false });
     }
-    const listener = (_event, chunk) => onDelta(chunk);
+    const listener = deltaListener(opts.sessionId, onDelta);
     const cleanup = () =>
       ipcRenderer.removeListener(CHAT_DELTA_CHANNEL, listener);
     ipcRenderer.on(CHAT_DELTA_CHANNEL, listener);
@@ -98,7 +121,7 @@ const models = {
     if (typeof onDelta !== 'function') {
       return invokeModel('chat', opts);
     }
-    const listener = (_event, chunk) => onDelta(chunk);
+    const listener = deltaListener(opts.sessionId, onDelta);
     const cleanup = () =>
       ipcRenderer.removeListener(CHAT_DELTA_CHANNEL, listener);
     ipcRenderer.on(CHAT_DELTA_CHANNEL, listener);

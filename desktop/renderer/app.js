@@ -18,6 +18,16 @@
  * ceiling math stays unit-testable without window.aegis/window.models.
  */
 
+// Everything below runs inside an IIFE. preload.js's contextBridge.exposeInMainWorld
+// calls define window.aegis/models/sync as non-configurable globals; a
+// top-level `const aegis = …` in a classic script binds into that *same*
+// global lexical environment, and V8 refuses to shadow a non-configurable
+// global property that way ("Identifier 'aegis' has already been declared").
+// That SyntaxError kills the whole script before a single line runs — the UI
+// is left stuck on "connecting…" with every button unbound. A function scope
+// sidesteps the global environment entirely, so the same names are fine here.
+(function () {
+
 const aegis = window.aegis;
 const models = window.models;
 const sync = window.sync;
@@ -70,6 +80,7 @@ const ELEMENT_IDS = {
   composer: 'composer',
   prompt: 'prompt',
   send: 'send',
+  exploreToggle: 'explore-toggle',
 };
 
 const els = {};
@@ -83,6 +94,7 @@ for (const [prop, id] of Object.entries(ELEMENT_IDS)) {
 
 const CLASS_KEY = 'aegis.class';
 const MAX_TOKENS_KEY = 'aegis.maxTokens';
+const EXPLORE_KEY = 'aegis.explore';
 const CUSTOM_CLASSES = new Set(['openai-compat', 'anthropic']);
 // The in-app AEGIS key is stored in a reserved namespace the main process
 // already filters out of settings.list(); never render it as a provider row
@@ -93,6 +105,77 @@ let pendingEl = null;
 let pendingSessionId = null;
 let classOptions = [];
 let modelMeta = new Map(); // model id -> raw model object from listModels() (P2 §6.3 ceiling)
+
+// ---------------------------------------------------------- discovery lane
+//
+// The chat flow reads vertically: one prompt, one answer, forever. That makes
+// the AI's *alternatives* a cost the user has to pay for manually ("ask again,
+// differently"). The discovery lane turns that into a first-class part of the
+// flow: after every answer the AI is sent down extra paths in parallel, and
+// each path streams into its own card on a horizontal track beside the thread
+// — the 2nd path, the new genre, the unexpected discovery, read left→right.
+//
+// Concurrency is what makes this non-trivial: several `models.chat` calls are
+// live at once, so every stream owns a derived sessionId and the preload
+// listener only accepts chunks tagged with it (main.js `taggedChunk`). Without
+// that tag the replies would interleave into a single bubble.
+const FLOW_SYSTEM =
+  'You are the exploratory half of a chat assistant. The user is reading the ' +
+  'main answer elsewhere, so never restate it. Be concrete and brief: one ' +
+  'lead line naming the path, then 3-5 tight bullets. Never pad.';
+
+/** The paths the lane offers. `hint` is the whole instruction for that card. */
+const FLOW_PATHS = [
+  {
+    key: 'alternate',
+    badge: 'A',
+    title: 'Alternative angle',
+    hint:
+      'Answer the request from a genuinely different angle: another method, ' +
+      'school of thought or genre. Name the angle in one line, then 3-5 ' +
+      'bullets of how it actually plays out. Do not restate the main answer.',
+  },
+  {
+    key: 'discovery',
+    badge: 'B',
+    title: 'Unexpected discovery',
+    hint:
+      'Act as a scout, not an assistant. Surface ONE non-obvious connection, ' +
+      'adjacent field or surprise finding the user did not ask for but which ' +
+      'reframes the request. One line naming the discovery, then 2-4 bullets ' +
+      'on why it matters and how to test it. Flag uncertainty honestly.',
+  },
+  {
+    key: 'genre',
+    badge: 'C',
+    title: 'New genre',
+    hint:
+      'Recast the request in an unfamiliar genre or discipline — pick one that ' +
+      'fits oddly well (e.g. field biology, contract law, ecology, jazz, ' +
+      'logistics, restoration). Name the genre in one line, then 3-5 bullets ' +
+      'of what that discipline would do first.',
+  },
+];
+
+let flowCount = 0;
+const activeBranches = new Set();
+
+/** Every in-flight path for the current thread, so New chat can stop them. */
+function abortBranches() {
+  for (const id of activeBranches) {
+    try {
+      models.cancel(id);
+    } catch {
+      /* a dead controller is not an error */
+    }
+  }
+  activeBranches.clear();
+}
+
+function exploreEnabled() {
+  const box = els.exploreToggle;
+  return Boolean(box && box.checked);
+}
 
 // ---------------------------------------------------------------- UI helpers
 
@@ -125,8 +208,8 @@ async function loadAccountInfo() {
 
   try {
     const bank = await aegis.tokenBankBalance();
-    els.balance.textContent = bank && bank.balance != null
-      ? String(bank.balance)
+    els.balance.textContent = bank && bank.balance_eur != null
+      ? `€${bank.balance_eur}`
       : '–';
   } catch {
     els.balance.textContent = 'unavailable';
@@ -234,9 +317,8 @@ async function saveMemory() {
   }
 }
 
-// `sessionId`, when given for an assistant message, renders a "remember"
-// button (plan P3 §7 memory-follows-user from any model class — Ollama,
-// custom OpenAI/Anthropic included, not just Aegis Cloud).
+// `sessionId`, when given for an assistant message, renders a "copy" button
+// that puts the message text on the clipboard.
 function addMessage(role, text, meta, sessionId) {
   const row = document.createElement('div');
   row.className = `msg ${role}`;
@@ -261,14 +343,12 @@ function addMessage(role, text, meta, sessionId) {
   }
 
   if (role === 'assistant' && sessionId) {
-    const rememberBtn = document.createElement('button');
-    rememberBtn.type = 'button';
-    rememberBtn.className = 'remember-btn';
-    rememberBtn.textContent = 'remember';
-    rememberBtn.addEventListener('click', () =>
-      rememberMessage(text, sessionId, rememberBtn)
-    );
-    row.appendChild(rememberBtn);
+    const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.className = 'copy-btn';
+    copyBtn.textContent = 'copy';
+    copyBtn.addEventListener('click', () => copyMessage(text, copyBtn));
+    row.appendChild(copyBtn);
   }
 
   els.messages.appendChild(row);
@@ -276,36 +356,207 @@ function addMessage(role, text, meta, sessionId) {
   return row;
 }
 
-/**
- * "Remember" affordance: pins one assistant message to AEGIS cloud memory
- * from *any* model class, mirroring the MCP saver shape (source + session)
- * so it's found by `memorySearch` from another machine. `aegis:memorySave`
- * (desktop/main.js) queues the entry locally instead of throwing when no key
- * is configured, so the no-key path here just reports "queued" — it never
- * surfaces as an error.
- */
-async function rememberMessage(text, sessionId, btn) {
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = 'remembering…';
-  }
+/** Copy one message's text to the clipboard, with brief button feedback. */
+async function copyMessage(text, btn) {
   try {
-    const result = await aegis.memorySave({
-      text,
-      source: 'aegis-desktop',
-      session: sessionId,
-    });
-    if (btn) {
-      btn.textContent = result && result.queued ? 'queued (offline)' : 'remembered';
-    }
+    await navigator.clipboard.writeText(text);
+    if (btn) btn.textContent = 'copied!';
   } catch (err) {
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = 'remember';
-    }
-    els.memoryHint.textContent =
-      `remember failed: ${err && err.message ? err.message : err}`;
+    if (btn) btn.textContent = 'copy failed';
+  } finally {
+    if (btn) setTimeout(() => { btn.textContent = 'copy'; }, 1500);
   }
+}
+
+/**
+ * Build one card of the lane. Each card is a self-contained stream slot: its
+ * own `.flow-body`, its own state chip and its own cancel button. The card is
+ * inserted into the track *before* the trailing "+ another path" button so the
+ * track always ends with the affordance that extends it.
+ */
+function flowCard(path, track, spec) {
+  const card = document.createElement('article');
+  card.className = 'flow-card pending';
+  card.dataset.path = path.key;
+
+  const head = document.createElement('div');
+  head.className = 'flow-head';
+
+  const badge = document.createElement('span');
+  badge.className = 'flow-badge';
+  badge.textContent = path.badge;
+
+  const title = document.createElement('span');
+  title.className = 'flow-title';
+  title.textContent = path.title;
+
+  const state = document.createElement('span');
+  state.className = 'flow-state';
+  state.textContent = 'queued';
+
+  head.appendChild(badge);
+  head.appendChild(title);
+  head.appendChild(state);
+
+  const body = document.createElement('div');
+  body.className = 'flow-body';
+  body.textContent = '…';
+
+  const meta = document.createElement('div');
+  meta.className = 'flow-meta';
+
+  const abort = document.createElement('button');
+  abort.type = 'button';
+  abort.className = 'ghost-btn flow-abort';
+  abort.textContent = 'stop';
+  abort.addEventListener('click', () => {
+    if (card.dataset.session) models.cancel(card.dataset.session);
+    state.textContent = 'stopped';
+    card.classList.remove('pending');
+    card.classList.add('stopped');
+    abort.remove();
+  });
+
+  card.appendChild(head);
+  card.appendChild(body);
+  card.appendChild(meta);
+  card.appendChild(abort);
+
+  const addBtn = track.querySelector('.flow-add');
+  if (addBtn) track.insertBefore(card, addBtn);
+  else track.appendChild(card);
+
+  spawnPath(card, { ...spec, path });
+  return card;
+}
+
+/**
+ * Run one path: a streaming `models.chat` on a derived sessionId, rendered
+ * into the card it owns. Fire-and-forget — the caller never awaits, so N paths
+ * stream simultaneously while the vertical thread stays responsive.
+ */
+async function spawnPath(card, spec) {
+  const id = `${spec.parentSessionId}::flow${++flowCount}`;
+  card.dataset.session = id;
+  activeBranches.add(id);
+
+  const body = card.querySelector('.flow-body');
+  const state = card.querySelector('.flow-state');
+  const meta = card.querySelector('.flow-meta');
+
+  let streamed = '';
+  const onDelta = (chunk) => {
+    const delta =
+      chunk && (typeof chunk.delta === 'string' ? chunk.delta : chunk.content);
+    if (!delta) return;
+    if (card.classList.contains('pending')) {
+      card.classList.remove('pending');
+      state.textContent = 'streaming…';
+    }
+    streamed += delta;
+    body.textContent = streamed;
+    // Follow the newest text sideways only while this card is the one being
+    // read — horizontal auto-scroll that fights the user is worse than none.
+    if (trackOf(card) && isTrailing(card)) {
+      card.scrollIntoView({ block: 'nearest', inline: 'end' });
+    }
+  };
+
+  try {
+    const data = await models.chat(
+      {
+        class: spec.cls,
+        // The path instruction rides in the system prompt so the transcript
+        // stays the user's own words; the echoed request follows it because
+        // not every provider honours `system` (Ollama, some compat gateways).
+        system: `${FLOW_SYSTEM}\n\n${spec.path.hint}`,
+        prompt: `Original request:\n${spec.prompt}\n\n${spec.path.hint}`,
+        model: spec.model,
+        maxTokens: Math.min(spec.maxTokens || 1024, 1024),
+        sessionId: id,
+      },
+      onDelta
+    );
+
+    const choice = (data && data.choices && data.choices[0]) || {};
+    const text =
+      (choice.message && choice.message.content) || streamed || '(no path found)';
+    body.textContent = text;
+    card.classList.remove('pending');
+    card.classList.add('done');
+    state.textContent = 'done';
+
+    const bits = [spec.path.title];
+    if (data && data.model) bits.push(data.model);
+    else if (spec.model) bits.push(spec.model);
+    if (data && data.usage && data.usage.total_tokens != null) {
+      bits.push(`${data.usage.total_tokens} tokens`);
+    }
+    meta.textContent = bits.join(' · ');
+  } catch (err) {
+    const message = err && err.message ? err.message : String(err);
+    card.classList.remove('pending');
+    card.classList.add('stopped');
+    state.textContent = 'stopped';
+    body.textContent = streamed || `Path unavailable: ${message}`;
+    meta.textContent = spec.path.title;
+  } finally {
+    activeBranches.delete(id);
+    const abort = card.querySelector('.flow-abort');
+    if (abort) abort.remove();
+  }
+}
+
+function trackOf(card) {
+  return card.parentElement;
+}
+
+/** True when nothing but the "+ another path" button follows this card. */
+function isTrailing(card) {
+  const next = card.nextElementSibling;
+  return !next || next.classList.contains('flow-add');
+}
+
+/**
+ * The lane itself: a horizontal track appended under the vertical thread.
+ * `spec` carries the class/model/budget the user already chose, so a path is
+ * generated by the same provider as the answer it sits beside.
+ */
+function addFlowLane(spec) {
+  const lane = document.createElement('div');
+  lane.className = 'chatflow';
+
+  const rail = document.createElement('div');
+  rail.className = 'flow-rail';
+  const label = document.createElement('span');
+  label.className = 'flow-rail-label';
+  label.textContent = 'discovery lane';
+  const hint = document.createElement('span');
+  hint.className = 'flow-rail-hint';
+  hint.textContent = 'alternatives from the AI — scroll →';
+  rail.appendChild(label);
+  rail.appendChild(hint);
+
+  const track = document.createElement('div');
+  track.className = 'flow-track';
+
+  const addBtn = document.createElement('button');
+  addBtn.type = 'button';
+  addBtn.className = 'ghost-btn flow-add';
+  addBtn.textContent = '+ another path';
+  addBtn.addEventListener('click', () => {
+    // Cycle the presets so repeated clicks keep discovering new genres.
+    const path = FLOW_PATHS[flowCount % FLOW_PATHS.length];
+    flowCard(path, track, spec);
+  });
+  track.appendChild(addBtn);
+
+  lane.appendChild(rail);
+  lane.appendChild(track);
+  els.messages.appendChild(lane);
+
+  for (const path of FLOW_PATHS.slice(0, 2)) flowCard(path, track, spec);
+  return lane;
 }
 
 function setBusy(busy, { cancellable } = {}) {
@@ -698,10 +949,12 @@ function openSession(id) {
 }
 
 function newChat() {
+  abortBranches();
   els.messages.innerHTML = '';
   els.sessionsHint.textContent = '';
   pendingEl = null;
   pendingSessionId = null;
+  flowCount = 0;
 }
 
 // ------------------------------------------------------------------ actions
@@ -771,6 +1024,12 @@ async function send() {
     } catch {
       /* persistence is non-fatal */
     }
+
+    // The AI's second path: not awaited — the lane streams beside the thread
+    // while the composer goes straight back to the user (chat flow D2.2).
+    if (exploreEnabled() && text !== '(empty response)') {
+      addFlowLane({ prompt, cls, model, maxTokens, parentSessionId: sessionId });
+    }
   } catch (err) {
     addMessage(
       'assistant',
@@ -798,6 +1057,14 @@ async function init() {
 
   els.maxTokens.addEventListener('change', () => {
     localStorage.setItem(MAX_TOKENS_KEY, els.maxTokens.value);
+  });
+
+  // The discovery lane is opt-in per machine, remembered across restarts.
+  const savedExplore = localStorage.getItem(EXPLORE_KEY);
+  if (savedExplore === 'off') els.exploreToggle.checked = false;
+  els.exploreToggle.addEventListener('change', () => {
+    localStorage.setItem(EXPLORE_KEY, els.exploreToggle.checked ? 'on' : 'off');
+    if (!els.exploreToggle.checked) abortBranches();
   });
 
   els.classSelect.addEventListener('change', () => {
@@ -861,3 +1128,5 @@ if (document.readyState === 'loading') {
 } else {
   init();
 }
+
+})();

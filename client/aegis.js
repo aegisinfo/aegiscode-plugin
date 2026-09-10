@@ -389,8 +389,34 @@ function createClient(opts = {}) {
     let usage = null;
     let sseError = '';
 
+    // Idle watchdog: if the server holds the connection open without ever
+    // sending another byte (a stuck upstream call, a proxy that swallows the
+    // close), reader.read() below waits forever and the whole desktop host
+    // hangs with no way out but force-quit. Cap the gap between chunks —
+    // not the whole response — so a slow-but-alive generation is untouched.
+    const SSE_IDLE_TIMEOUT_MS = 60_000;
+    async function readWithIdleTimeout() {
+      let timer;
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`stream stalled - no data for ${SSE_IDLE_TIMEOUT_MS / 1000}s`));
+        }, SSE_IDLE_TIMEOUT_MS);
+      });
+      try {
+        return await Promise.race([reader.read(), timeout]);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
     for (;;) {
-      const { done, value } = await reader.read();
+      let done, value;
+      try {
+        ({ done, value } = await readWithIdleTimeout());
+      } catch (err) {
+        reader.cancel().catch(() => {});
+        throw err;
+      }
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 

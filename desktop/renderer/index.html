@@ -121,7 +121,17 @@
           rows="2"
           placeholder="Message AEGIS… (Enter to send, Shift+Enter for a newline)"
         ></textarea>
-        <button type="submit" id="send">Send</button>
+        <div class="composer-side">
+          <label
+            class="flow-toggle"
+            for="explore-toggle"
+            title="After every answer, send the AI down two extra paths — an alternative angle and an unexpected discovery — shown as a horizontal discovery lane."
+          >
+            <input type="checkbox" id="explore-toggle" checked />
+            <span>discovery lane</span>
+          </label>
+          <button type="submit" id="send">Send</button>
+        </div>
       </form>
     </section>
   </main>

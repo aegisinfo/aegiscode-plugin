@@ -17,6 +17,7 @@ const {
   MODEL_PREFIX,
   SYNC_PREFIX,
   CHAT_DELTA_CHANNEL,
+  taggedChunk,
 } = require('../desktop/main.js');
 
 function assert(cond, msg) {
@@ -39,7 +40,10 @@ const engine = {
     return { model: payload && payload.model, choices: [{ message: { content: 'hi' } }] };
   },
   settings: {
-    async list() {
+    // The real store's list() is synchronous (it returns an array directly);
+    // the dispatch's `settings.get` chains `.filter()` on the return value, so
+    // an async stub would hand it a Promise and throw `filter is not a function`.
+    list() {
       calls.push(['settings.list']);
       return [{ provider: 'openai-compat', keyMask: 'sk-…' }];
     },
@@ -199,6 +203,22 @@ try {
   assert(
     sentDeltas.length === 1 && sentDeltas[0].delta === 'hi',
     `model:chat deltas forwarded over ${CHAT_DELTA_CHANNEL}`
+  );
+  // D2.2: every delta is addressed with the request's sessionId so the
+  // renderer can run the main answer and the discovery lane as concurrent
+  // streams without interleaving them (`{ delta }` must stay intact).
+  assert(
+    sentDeltas[0].id === 's2',
+    'model:chat tags each delta with the request sessionId'
+  );
+  assert(
+    taggedChunk({ delta: 'x' }, 'abc').id === 'abc' &&
+      taggedChunk({ delta: 'x' }, 'abc').delta === 'x',
+    'taggedChunk adds the routing id and preserves the delta field'
+  );
+  assert(
+    taggedChunk({ delta: 'x' }, undefined).id === undefined,
+    'an untagged request keeps the legacy chunk shape (id: undefined)'
   );
 
   await fakeIpc.handles[`${MODEL_PREFIX}cancel`]({}, { sessionId: 's2' });

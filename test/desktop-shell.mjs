@@ -9,9 +9,12 @@
  * real IPC layer will. Nothing here touches the network.
  */
 import { createRequire } from 'node:module';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const require = createRequire(import.meta.url);
 const {
@@ -323,6 +326,24 @@ try {
       sentDeltas[1].delta === ' world',
     `deltas should be forwarded over ${CHAT_DELTA_CHANNEL}`
   );
+  // D2.2 multi-stream: a stream with no sessionId is one bucket, so the
+  // legacy shape is unchanged; a stream WITH a sessionId is addressed.
+  assert(
+    sentDeltas.every((c) => c.id === undefined),
+    'a sessionId-less stream emits untagged deltas (legacy shape)'
+  );
+  sentDeltas.length = 0;
+  const taggedResult = await fakeIpc.handles[`${IPC_PREFIX}chatCompletion`](
+    { sender: fakeSender },
+    { prompt: 'stream me', stream: true, sessionId: 'flow-1' }
+  );
+  assert(
+    taggedResult.choices[0].message.content === 'Hello world' &&
+      sentDeltas.length === 2 &&
+      sentDeltas[0].id === 'flow-1' &&
+      sentDeltas[1].id === 'flow-1',
+    'a streaming request tags every delta with its sessionId'
+  );
 
   // 7. Non-streaming over IPC still works (payload without stream).
   const plainResult = await fakeIpc.handles[`${IPC_PREFIX}chatCompletion`](
@@ -334,6 +355,41 @@ try {
     'non-streaming chat over IPC should pass through unchanged'
   );
   assert(sentDeltas.length === 2, 'non-streaming chat must not emit deltas');
+
+  // 8. Discovery lane (D2.2): the horizontal chat-flow track. The lane is
+  //    built in the renderer, so assert the wiring that makes it possible —
+  //    the composer toggle, the lane primitives, and the id-filtered preload
+  //    listener that keeps concurrent streams from bleeding into each other.
+  const rendererDir = join(__dirname, '..', 'desktop', 'renderer');
+  const html = readFileSync(join(rendererDir, 'index.html'), 'utf8');
+  const css = readFileSync(join(rendererDir, 'style.css'), 'utf8');
+  const rendererJs = readFileSync(join(rendererDir, 'app.js'), 'utf8');
+  const preloadJs = readFileSync(
+    join(__dirname, '..', 'desktop', 'preload.js'),
+    'utf8'
+  );
+  assert(
+    /id="explore-toggle"/.test(html) && /class="flow-toggle"/.test(html),
+    'the composer exposes the discovery-lane toggle'
+  );
+  assert(
+    /\.chatflow\b/.test(css) &&
+      /\.flow-track\b/.test(css) &&
+      /overflow-x:\s*auto/.test(css) &&
+      /\.flow-card\b/.test(css),
+    'the lane renders as a horizontally scrolling card track'
+  );
+  assert(
+    /function addFlowLane\b/.test(rendererJs) &&
+      /function spawnPath\b/.test(rendererJs) &&
+      /`\$\{spec\.parentSessionId\}::flow\$\{\+\+flowCount\}`/.test(rendererJs),
+    'each path streams on its own derived sessionId'
+  );
+  assert(
+    /function deltaListener\b/.test(preloadJs) &&
+      /if \(id !== want\) return;/.test(preloadJs),
+    'preload drops chunks addressed to another stream'
+  );
 
   console.log(`Desktop shell smoke test passed: ${channels.join(', ')}`);
 } catch (err) {

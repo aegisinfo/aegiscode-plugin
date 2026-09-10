@@ -429,6 +429,213 @@ select:disabled {
   text-align: right;
 }
 
+/* --------------------------------------------------- discovery lane (D2.2)
+   The vertical thread stays one column of .msg rows; the lane drops a
+   horizontal track underneath it so the AI's *other* paths read left→right
+   beside the answer instead of being buried under it. */
+.chatflow {
+  align-self: stretch;
+  max-width: 100%;
+  margin: 2px 0 6px;
+  padding: 8px 10px 10px;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--teal);
+  border-radius: 10px;
+  background: linear-gradient(
+    90deg,
+    rgba(0, 229, 192, 0.05),
+    rgba(107, 143, 212, 0.05)
+  );
+}
+
+.flow-rail {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.flow-rail-label {
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--teal);
+}
+
+.flow-rail-hint {
+  font-size: 11px;
+  color: var(--text2);
+}
+
+/* Horizontal scroller: the lane's whole point. Snap stops keep a card
+   legible instead of leaving the track parked mid-card. */
+.flow-track {
+  position: relative; /* containing block for the between-card connectors */
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 6px;
+  scroll-snap-type: x proximity;
+  scrollbar-width: thin;
+}
+
+.flow-card {
+  flex: 0 0 clamp(230px, 42%, 340px);
+  scroll-snap-align: start;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 11px;
+  border: 1px solid var(--border2);
+  border-radius: 10px;
+  background: var(--surface2);
+  min-height: 92px;
+}
+
+/* Connector between adjacent cards — the visual "2nd path" arrow. */
+.flow-card + .flow-card::before {
+  content: '→';
+  position: absolute;
+  margin-left: -13px;
+  margin-top: 34px;
+  color: var(--border2);
+  font-size: 12px;
+}
+
+.flow-card.pending {
+  opacity: 0.72;
+  border-style: dashed;
+}
+
+.flow-card.done {
+  border-color: rgba(0, 229, 192, 0.45);
+}
+
+.flow-card.stopped {
+  opacity: 0.7;
+}
+
+.flow-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-display);
+}
+
+.flow-badge {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: #04140f;
+  background: var(--teal);
+}
+
+.flow-card[data-path='discovery'] .flow-badge {
+  background: var(--purple);
+  color: #fff;
+}
+
+.flow-card[data-path='genre'] .flow-badge {
+  background: var(--amber);
+}
+
+.flow-title {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--text);
+}
+
+.flow-state {
+  flex: 0 0 auto;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text2);
+}
+
+.flow-card.done .flow-state {
+  color: var(--teal);
+}
+
+.flow-body {
+  flex: 1;
+  font-family: var(--font-chat);
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.flow-meta {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text2);
+}
+
+.flow-abort {
+  align-self: flex-start;
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+.flow-add {
+  flex: 0 0 auto;
+  align-self: center;
+  border-style: dashed;
+  scroll-snap-align: end;
+}
+
+/* Composer side rail: the lane toggle sits above Send so it is visible
+   without stealing composer width. */
+.composer-side {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.composer-side button[type='submit'] {
+  flex: 1;
+  min-height: 34px;
+}
+
+.flow-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 0;
+  font-size: 11px;
+  color: var(--text2);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.flow-toggle input {
+  accent-color: var(--teal);
+  margin: 0;
+  cursor: pointer;
+}
+
+.flow-toggle:hover {
+  color: var(--teal);
+}
+
 /* ------------------------------------------------------------- composer */
 .composer {
   display: flex;
@@ -549,7 +756,7 @@ label {
   cursor: pointer;
 }
 
-.remember-btn {
+.copy-btn {
   margin-top: 8px;
   border: 1px solid var(--teal);
   border-radius: 6px;
@@ -561,7 +768,7 @@ label {
   cursor: pointer;
 }
 
-.remember-btn:disabled {
+.copy-btn:disabled {
   opacity: 0.6;
   cursor: default;
 }
