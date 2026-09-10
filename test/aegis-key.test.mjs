@@ -1,17 +1,15 @@
 #!/usr/bin/env node
 /**
- * Regression tests for the AEGIS-key wiring review (4 defects):
+ * Regression tests for the AEGIS-key wiring review (3 defects):
  *
  *   1. the in-app AEGIS key must live in a reserved namespace, never as a
  *      provider entry the Settings pane can list or remove;
  *   2. engine listClasses() must report custom endpoints as configured:false
  *      until they actually have a base URL (and, for anthropic, a key);
- *   3. providers.anthropicMessages() must omit x-api-key when no key is set;
- *   4. listModels('byok') must return relay model ids, never keyed *provider*
- *      names masquerading as model ids.
+ *   3. providers.anthropicMessages() must omit x-api-key when no key is set.
  *
- * Also asserts the AEGIS key auth path by class: 'aegis'/'byok' use
- * aegis.apiKey, 'ollama' is keyless, and the direct BYOK classes use their own
+ * Also asserts the AEGIS key auth path by class: 'aegis' uses aegis.apiKey,
+ * 'ollama' is keyless, and the direct custom classes use their own
  * settings-stored key + base URL — the AEGIS key never leaks into them.
  */
 import { createRequire } from 'node:module';
@@ -93,7 +91,7 @@ const tmp = (n) => mkdtempSync(join(tmpdir(), `aegis-key-${n}-`));
 
   const stub = () => ({ model: 'm', choices: [{ message: { content: '' } }] });
   const engine = createLocalEngine({
-    aegis: { apiKey: AEGIS_KEY, listModels: async () => ({ models: [] }), byokStatus: async () => ({}), chatCompletion: stub },
+    aegis: { apiKey: AEGIS_KEY, listModels: async () => ({ models: [] }), chatCompletion: stub },
     settings: store,
     ollama: { probe: async () => ({ running: false }), listTags: async () => [], chat: stub },
     providers: { openaiCompatible: stub, anthropicMessages: stub },
@@ -147,7 +145,7 @@ const tmp = (n) => mkdtempSync(join(tmpdir(), `aegis-key-${n}-`));
   const settings = createSettingsStore({ dir });
   const makeEngine = () =>
     createLocalEngine({
-      aegis: { apiKey: '', listModels: async () => ({ models: [] }), byokStatus: async () => ({}) },
+      aegis: { apiKey: '', listModels: async () => ({ models: [] }) },
       settings,
       ollama: { probe: async () => ({ running: false }), listTags: async () => [] },
       providers: {},
@@ -164,7 +162,6 @@ const tmp = (n) => mkdtempSync(join(tmpdir(), `aegis-key-${n}-`));
   assert(cls['openai-compat'].configured === false, 'unset openai-compat is not configured');
   assert(cls.anthropic.configured === false, 'unset anthropic is not configured');
   assert(cls.aegis.configured === false, 'aegis without a key is not configured');
-  assert(cls.byok.configured === false, 'byok without a key is not configured');
   assert(cls.ollama.configured === false, 'ollama reports the probe result');
 
   // A base URL alone makes an OpenAI-compatible endpoint usable…
@@ -223,59 +220,6 @@ const tmp = (n) => mkdtempSync(join(tmpdir(), `aegis-key-${n}-`));
   assert(lastFetch.opts.headers['x-api-key'] === PROVIDER_KEY, 'x-api-key sent when set');
 }
 
-// ---------------------------------------------------------------- defect #4
-{
-  const settings = createSettingsStore({ dir: tmp('byok') });
-  const aegisCalls = [];
-  const engine = createLocalEngine({
-    aegis: {
-      apiKey: AEGIS_KEY,
-      async byokStatus() {
-        return { keys: { openai: { set: true, masked: 'sk-…abcd' }, anthropic: { set: false } } };
-      },
-      async listModels() {
-        aegisCalls.push('listModels');
-        return {
-          models: [
-            { id: 'gpt-4o', provider: 'openai' },
-            { id: 'claude-3-5-sonnet', provider: 'anthropic' },
-            { id: 'deepseek-v4-pro' },
-          ],
-        };
-      },
-    },
-    settings,
-    ollama: { probe: async () => ({ running: false }), listTags: async () => [] },
-    providers: {},
-  });
-
-  const data = await engine.listModels('byok');
-  assert(aegisCalls.length === 1, 'BYOK models come from the relay model list');
-  const ids = data.models.map((m) => m.id);
-  assert(ids.includes('gpt-4o'), 'keyed provider models are listed by model id');
-  assert(ids.includes('deepseek-v4-pro'), 'untagged relay models are kept');
-  assert(!ids.includes('anthropic'), 'an *unkeyed* provider is never offered as a model');
-  assert(!ids.includes('openai'), 'a keyed provider name is never offered as a model id');
-  assert(
-    JSON.stringify(data.providers) === JSON.stringify(['openai']),
-    'keyed provider names are reported separately, for labelling'
-  );
-
-  // No stored keys → nothing usable, and the names still are not models.
-  const noKeys = createLocalEngine({
-    aegis: {
-      apiKey: AEGIS_KEY,
-      byokStatus: async () => ({ keys: {} }),
-      listModels: async () => ({ models: [{ id: 'gpt-4o', provider: 'openai' }] }),
-    },
-    settings,
-    ollama: { probe: async () => ({ running: false }), listTags: async () => [] },
-    providers: {},
-  });
-  const empty = await noKeys.listModels('byok');
-  assert(empty.models.length === 0 && empty.providers.length === 0, 'no BYOK keys → no models');
-}
-
 // ------------------------------------------- AEGIS key auth path by class
 {
   const settings = createSettingsStore({ dir: tmp('auth') });
@@ -290,20 +234,8 @@ const tmp = (n) => mkdtempSync(join(tmpdir(), `aegis-key-${n}-`));
       async listModels() {
         return { models: [] };
       },
-      async byokStatus() {
-        return {};
-      },
       async chatCompletion(args) {
         seen.push(['chatCompletion', args]);
-        return { model: args.model, choices: [{ message: { content: '' } }] };
-      },
-      // 'byok' must never reach this: it is the stateless, unauthenticated
-      // /api/v1/byok/chat/completions relay, which needs a per-request
-      // providerKey the desktop never has — the desktop's 'byok' class shares
-      // aegis.chatCompletion() instead, relying on the server folding in the
-      // user's own saved key (services/byok_service.get_user_key_map).
-      async byokChatCompletion(args) {
-        seen.push(['byokChatCompletion-stateless-relay', args]);
         return { model: args.model, choices: [{ message: { content: '' } }] };
       },
     },
@@ -333,19 +265,10 @@ const tmp = (n) => mkdtempSync(join(tmpdir(), `aegis-key-${n}-`));
   });
 
   await engine.chat({ class: 'aegis', prompt: 'hi', model: 'm' }, () => {});
-  await engine.chat({ class: 'byok', prompt: 'hi', model: 'gpt-4o' }, () => {});
   await engine.chat({ class: 'ollama', prompt: 'hi', model: 'llama3' }, () => {});
 
-  const chatCompletionCalls = seen.filter(([k]) => k === 'chatCompletion');
-  assert(
-    chatCompletionCalls.length === 2,
-    `both 'aegis' and 'byok' route through the shared AEGIS-authenticated chatCompletion, got ${chatCompletionCalls.length}`
-  );
-  assert(
-    !seen.some(([k]) => k === 'byokChatCompletion-stateless-relay'),
-    'byok must never hit the stateless unauthenticated relay (it has no providerKey to send)'
-  );
   const byName = Object.fromEntries(seen);
+  assert(byName.chatCompletion, 'aegis routes to the AEGIS-authenticated chatCompletion');
   assert(byName.ollama && !('apiKey' in byName.ollama), 'ollama is keyless');
   assert(
     !JSON.stringify([byName.ollama]).includes(AEGIS_KEY),

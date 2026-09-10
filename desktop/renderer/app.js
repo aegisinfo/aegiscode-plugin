@@ -5,7 +5,7 @@
  *
  * Talks exclusively to the surfaces exposed by preload.js (contextBridge):
  *   - window.aegis.*   cloud status / memory / account (back-compat surface)
- *   - window.models.*  4-class provider layer (Aegis Cloud, BYOK, Ollama,
+ *   - window.models.*  3-class provider layer (Aegis Cloud, Ollama,
  *                      custom OpenAI-/Anthropic-compatible) — the chat path
  *   - window.sync.*    local session persistence + cloud push/pull (P3 §7)
  *
@@ -68,8 +68,6 @@ const ELEMENT_IDS = {
   modelHint: 'model-hint',
   settingsList: 'settings-list',
   settingsHint: 'settings-hint',
-  byokList: 'byok-list',
-  byokHint: 'byok-hint',
   sessionsRefresh: 'sessions-refresh',
   sessionsList: 'sessions-list',
   sessionsHint: 'sessions-hint',
@@ -117,8 +115,7 @@ const MAX_TOKENS_ADAPTIVE_KEY = 'aegis.maxTokensAdaptive';
 const AUTONOMOUS_KEY = 'aegis.autonomous';
 const EXPLORE_KEY = 'aegis.explore';
 // "Work autonomously" (pool_brain worker fan-out, aegis1 services/pool_brain.py)
-// is only billable/routable through the pooled AEGIS Cloud class — BYOK bills
-// through the relay's own key and has no brain route.
+// is only billable/routable through the pooled AEGIS Cloud class.
 const AUTONOMOUS_CLASS = 'aegis';
 const CUSTOM_CLASSES = new Set(['openai-compat', 'anthropic']);
 // Placeholders for the typed model-id field: custom endpoints enumerate
@@ -155,16 +152,6 @@ const CUSTOM_MODEL_PRESETS = {
 // already filters out of settings.list(); never render it as a provider row
 // even if a stale store still surfaces it (defect #1).
 const RESERVED_PROVIDERS = new Set(['__aegis', 'aegis']);
-// BYOK providers offered in the sidebar (aegis1 services/byok_service.py
-// VALID_PROVIDERS has more — openrouter, mistral, cerebras, fireworks,
-// nvidia_nim, together, sakana, groq — trimmed here to the ones users
-// actually ask for; the server accepts the rest too if ever needed).
-const BYOK_PROVIDERS = [
-  { provider: 'openai', name: 'OpenAI' },
-  { provider: 'anthropic', name: 'Anthropic' },
-  { provider: 'deepseek', name: 'DeepSeek' },
-  { provider: 'gemini', name: 'Gemini' },
-];
 
 let pendingEl = null;
 let pendingSessionId = null;
@@ -303,7 +290,6 @@ async function refreshAfterKeyChange() {
   // loadClasses() also re-runs loadModels() for the currently selected class.
   await loadClasses();
   await loadAccountInfo();
-  await loadByokKeys();
 }
 
 async function saveApiKey() {
@@ -1204,8 +1190,8 @@ function applyMaxTokensClamp(modelId) {
 
 async function loadModels(cls) {
   // "Work autonomously" only makes sense for the pooled AEGIS Cloud class —
-  // hide it for BYOK/Ollama/custom endpoints rather than showing a checkbox
-  // that would silently do nothing.
+  // hide it for Ollama/custom endpoints rather than showing a checkbox that
+  // would silently do nothing.
   if (els.autonomousToggleWrap) {
     els.autonomousToggleWrap.hidden = cls !== AUTONOMOUS_CLASS;
   }
@@ -1303,10 +1289,6 @@ async function loadModels(cls) {
   try {
     const data = await models.listModels(cls);
     const list = Array.isArray(data && data.models) ? data.models : [];
-    // Keyed provider names travel alongside the BYOK model list for labelling
-    // only — they are never options (defect #4).
-    const providers =
-      cls === 'byok' && Array.isArray(data && data.providers) ? data.providers : [];
     for (const m of list) {
       modelMeta.set(m.id, m);
       const opt = document.createElement('option');
@@ -1316,18 +1298,9 @@ async function loadModels(cls) {
     }
     let hint;
     if (!list.length) {
-      if (cls === 'byok') {
-        hint = providers.length
-          ? `No models listed for BYOK key${providers.length === 1 ? '' : 's'}: ${providers.join(', ')}.`
-          : 'No BYOK provider keys stored — set one via aegis_byok_set first.';
-      } else if (cls === 'ollama') {
-        hint = 'Ollama not running or no models pulled.';
-      } else {
-        hint = 'No models listed.';
-      }
+      hint = cls === 'ollama' ? 'Ollama not running or no models pulled.' : 'No models listed.';
     } else {
       hint = `${list.length} model${list.length === 1 ? '' : 's'} available.`;
-      if (providers.length) hint += ` · BYOK keys: ${providers.join(', ')}`;
     }
     const ceiling = applyMaxTokensClamp(els.modelSelect.value);
     els.modelHint.textContent =
@@ -1474,104 +1447,6 @@ async function removeSetting(provider) {
   } catch (err) {
     els.settingsHint.textContent =
       `remove failed: ${err && err.message ? err.message : err}`;
-  }
-}
-
-// ------------------------------------------------------------------ BYOK pane
-//
-// Separate from the openai-compat/anthropic custom-endpoint rows above: these
-// keys are stored server-side (aegis1 services/byok_service.py) and consumed
-// automatically by the pooled endpoint (see engine.js chat()'s 'byok' class) —
-// no base URL to enter, just a key per provider.
-
-async function loadByokKeys() {
-  els.byokList.innerHTML = '';
-  let status = {};
-  try {
-    status = (await aegis.byokStatus()) || {};
-  } catch {
-    /* relay unreachable — rows still render, all showing "no key" */
-  }
-
-  for (const { provider, name } of BYOK_PROVIDERS) {
-    const info = (status && status[provider]) || {};
-    const set = Boolean(info.set);
-
-    const row = document.createElement('div');
-    row.className = 'setting-row';
-
-    const label = document.createElement('div');
-    label.className = 'setting-name';
-    label.textContent = name;
-    row.appendChild(label);
-
-    const keyInput = document.createElement('input');
-    keyInput.type = 'password';
-    keyInput.className = 'setting-input';
-    keyInput.placeholder = set ? `key ${info.masked} (blank = keep)` : 'API key';
-    row.appendChild(keyInput);
-
-    const statusEl = document.createElement('div');
-    statusEl.className = 'setting-status';
-    statusEl.textContent = set ? `configured (${info.masked})` : 'no key';
-    row.appendChild(statusEl);
-
-    const actions = document.createElement('div');
-    actions.className = 'setting-actions';
-
-    const saveBtn = document.createElement('button');
-    saveBtn.type = 'button';
-    saveBtn.className = 'ghost-btn';
-    saveBtn.textContent = 'Save';
-    saveBtn.addEventListener('click', () => saveByokKey(provider, keyInput.value));
-    actions.appendChild(saveBtn);
-
-    const removeBtn = document.createElement('button');
-    removeBtn.type = 'button';
-    removeBtn.className = 'ghost-btn danger';
-    removeBtn.textContent = 'Remove';
-    removeBtn.disabled = !set;
-    removeBtn.addEventListener('click', () => removeByokKey(provider));
-    actions.appendChild(removeBtn);
-
-    row.appendChild(actions);
-    els.byokList.appendChild(row);
-  }
-}
-
-// Refreshing the model picker after a save/remove is what turns "saved." into
-// visible models without the user having to flip the class dropdown away and
-// back — the exact confusion behind "byok shows no models, is this intended".
-async function refreshByokModelsIfActive() {
-  if (els.classSelect.value === 'byok') await loadModels('byok');
-}
-
-async function saveByokKey(provider, key) {
-  const trimmed = key.trim();
-  if (!trimmed) {
-    els.byokHint.textContent = 'type a key first (blank would remove it — use Remove for that).';
-    return;
-  }
-  els.byokHint.textContent = 'saving…';
-  try {
-    await aegis.byokSet(provider, trimmed);
-    els.byokHint.textContent = 'saved.';
-    await loadByokKeys();
-    await refreshByokModelsIfActive();
-  } catch (err) {
-    els.byokHint.textContent = `save failed: ${err && err.message ? err.message : err}`;
-  }
-}
-
-async function removeByokKey(provider) {
-  els.byokHint.textContent = 'removing…';
-  try {
-    await aegis.byokSet(provider, '');
-    els.byokHint.textContent = 'removed.';
-    await loadByokKeys();
-    await refreshByokModelsIfActive();
-  } catch (err) {
-    els.byokHint.textContent = `remove failed: ${err && err.message ? err.message : err}`;
   }
 }
 
@@ -1923,7 +1798,6 @@ async function init() {
 
   await loadClasses();
   await loadSettings();
-  await loadByokKeys();
   await loadSessions();
   await refreshSyncStatus();
   loadAccountInfo();

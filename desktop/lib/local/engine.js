@@ -18,7 +18,6 @@ const CUSTOM_CLASSES = Object.freeze(['openai-compat', 'anthropic']);
 
 const CLASSES = [
   { class: 'aegis', label: 'Aegis Cloud', kind: 'cloud' },
-  { class: 'byok', label: 'BYOK relay', kind: 'cloud' },
   { class: 'ollama', label: 'Ollama (local)', kind: 'local' },
   { class: 'openai-compat', label: 'Custom OpenAI-compatible', kind: 'custom' },
   { class: 'anthropic', label: 'Anthropic-compatible', kind: 'custom' },
@@ -52,31 +51,6 @@ function filterAegisCatalog(models) {
   return nexus ? [...platform, { ...nexus, label: NEXUS_LABEL }] : platform;
 }
 
-/** True when a BYOK-status entry says "a key is stored for this provider". */
-function keyedEntry(info) {
-  if (info == null) return false;
-  if (typeof info === 'boolean') return info;
-  if (typeof info === 'string') return Boolean(info);
-  if (info.set !== undefined) return Boolean(info.set);
-  if (info.configured !== undefined) return Boolean(info.configured);
-  return true; // an object entry without an explicit flag means "set"
-}
-
-/**
- * Provider names that have a stored BYOK key. The relay has shipped both
- * `{ keys: { openai: { set: true } } }` and the bare map, so accept either.
- */
-function keyedProviders(status) {
-  const raw = (status && (status.keys || status.providers || status)) || {};
-  if (Array.isArray(raw)) {
-    return raw
-      .map((p) => (typeof p === 'string' ? p : p && p.provider))
-      .filter(Boolean);
-  }
-  if (typeof raw !== 'object') return [];
-  return Object.keys(raw).filter((p) => keyedEntry(raw[p]));
-}
-
 function createLocalEngine({ aegis, settings, ollama, providers }) {
   const controllers = new Map(); // sessionId -> AbortController
 
@@ -102,7 +76,7 @@ function createLocalEngine({ aegis, settings, ollama, providers }) {
     const status = await ollama.probe().catch(() => ({ running: false }));
     return CLASSES.map((c) => {
       if (c.class === 'ollama') return { ...c, configured: Boolean(status.running) };
-      if (c.class === 'aegis' || c.class === 'byok') {
+      if (c.class === 'aegis') {
         return { ...c, configured: Boolean(aegis.apiKey) };
       }
       return { ...c, ...customStatus(c.class) };
@@ -117,28 +91,6 @@ function createLocalEngine({ aegis, settings, ollama, providers }) {
     if (cls === 'ollama') {
       const tags = await ollama.listTags();
       return { class: cls, models: tags.map((t) => ({ id: t.id })) };
-    }
-    if (cls === 'byok') {
-      // The relay's /api/user/api-keys payload lists *keyed providers*, not
-      // models — surfacing those as model ids put provider names in the BYOK
-      // model picker (defect #4). Models now come from the relay's model list
-      // (the same ids byokChatCompletion's `model` accepts); the keyed provider
-      // names are reported separately, as `providers`, for labelling only.
-      let status = null;
-      try {
-        status = await aegis.byokStatus();
-      } catch {
-        status = null; // relay unreachable — fall back to the plain catalog
-      }
-      const providers = status ? keyedProviders(status) : null;
-      const catalog = await aegis.listModels().catch(() => null);
-      const models = normalizeCatalog(catalog && catalog.models).filter((m) => {
-        if (providers === null) return true; // key state unknown
-        if (!providers.length) return false; // no BYOK key → nothing usable
-        if (!m.provider) return true; // relay did not tag a provider
-        return providers.includes(m.provider);
-      });
-      return { class: cls, models, providers: providers || [] };
     }
     // Custom endpoints: the model id is the *user's* choice — a provider model
     // name, never a URL. Offering the configured base URL as an `id` meant that
@@ -159,9 +111,7 @@ function createLocalEngine({ aegis, settings, ollama, providers }) {
     // "Work autonomously" — routes this call through aegis1's pool_brain
     // worker fan-out (services/pool_brain.py: N reasoning workers + a
     // synthesis pass) instead of a single provider call. UI-gated to the
-    // 'aegis' class only (see AUTONOMOUS_CLASS in app.js); pool_brain does
-    // support BYOK key sourcing server-side, so widening this to 'byok' is a
-    // UI-only change if ever wanted, not a backend one.
+    // 'aegis' class only (see AUTONOMOUS_CLASS in app.js).
     const autonomous = cls === 'aegis' && Boolean(payload && payload.autonomous);
     const sessionId = (payload && payload.sessionId) || randomUUID();
 
@@ -170,20 +120,7 @@ function createLocalEngine({ aegis, settings, ollama, providers }) {
     const signal = controller.signal;
 
     try {
-      if (cls === 'aegis' || cls === 'byok') {
-        // Both classes hit the SAME pooled endpoint. aegis1's
-        // /api/v1/chat/completions already folds in the user's own saved BYOK
-        // provider key (services/byok_service.get_user_key_map ->
-        // nexus.resolve_key(), which prefers it over the pool's key when both
-        // exist) and skips token_bank billing for that request when it does.
-        // 'byok' only narrows the model picker (see listModels above) to
-        // providers the user has personally keyed via aegis_byok_set — it is
-        // not a separate transport. Posting to the *stateless*, unauthenticated
-        // /api/v1/byok/chat/completions relay via byokChatCompletion() (the
-        // old code path) never supplied a providerKey, so every BYOK chat sent
-        // the literal string "undefined" as the upstream credential — that
-        // relay is for the unauthenticated /online browser BYOK toggle, not
-        // this already-authenticated desktop session.
+      if (cls === 'aegis') {
         return await aegis.chatCompletion({
           prompt: payload.prompt,
           system: payload.system,
@@ -197,8 +134,7 @@ function createLocalEngine({ aegis, settings, ollama, providers }) {
           // aegis_memory: automatic, no button — the server both reads prior
           // synced memory into context AND writes this turn back to it, the
           // same flag aegis-online sets. Matches aegiscodex-dev's own
-          // cross-session memory (auto-indexed, no manual tagging); applies to
-          // both classes now that byok shares this same authenticated call.
+          // cross-session memory (auto-indexed, no manual tagging).
           extra: {
             aegis_memory: true,
             session: sessionId,
