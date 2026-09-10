@@ -61,6 +61,9 @@ const ELEMENT_IDS = {
   modelSelect: 'model-select',
   modelInput: 'model-input',
   maxTokens: 'max-tokens',
+  maxTokensAdaptive: 'max-tokens-adaptive',
+  autonomousToggle: 'autonomous-toggle',
+  autonomousToggleWrap: 'autonomous-toggle-wrap',
   modelHint: 'model-hint',
   settingsList: 'settings-list',
   settingsHint: 'settings-hint',
@@ -77,6 +80,18 @@ const ELEMENT_IDS = {
   memorySaveBtn: 'memory-save-btn',
   memoryImportBtn: 'memory-import-btn',
   memoryHint: 'memory-hint',
+  memoryOpen: 'memory-open',
+  memoryOverlay: 'memory-overlay',
+  memoryBackdrop: 'memory-backdrop',
+  memoryClose: 'memory-close',
+  memoryFilters: 'memory-filters',
+  memoryOverlayQuery: 'memory-overlay-query',
+  memoryFiltersClear: 'memory-filters-clear',
+  memoryChips: 'memory-chips',
+  memoryList: 'memory-list',
+  memoryCount: 'memory-count',
+  memoryOverlayEntry: 'memory-overlay-entry',
+  memoryOverlaySave: 'memory-overlay-save',
   messages: 'messages',
   composer: 'composer',
   prompt: 'prompt',
@@ -95,7 +110,13 @@ for (const [prop, id] of Object.entries(ELEMENT_IDS)) {
 
 const CLASS_KEY = 'aegis.class';
 const MAX_TOKENS_KEY = 'aegis.maxTokens';
+const MAX_TOKENS_ADAPTIVE_KEY = 'aegis.maxTokensAdaptive';
+const AUTONOMOUS_KEY = 'aegis.autonomous';
 const EXPLORE_KEY = 'aegis.explore';
+// "Work autonomously" (pool_brain worker fan-out, aegis1 services/pool_brain.py)
+// is only billable/routable through the pooled AEGIS Cloud class — BYOK bills
+// through the relay's own key and has no brain route.
+const AUTONOMOUS_CLASS = 'aegis';
 const CUSTOM_CLASSES = new Set(['openai-compat', 'anthropic']);
 // Placeholders for the typed model-id field: custom endpoints enumerate
 // nothing, so the field has to say what a valid id looks like.
@@ -181,6 +202,16 @@ function abortBranches() {
 
 function exploreEnabled() {
   const box = els.exploreToggle;
+  return Boolean(box && box.checked);
+}
+
+function maxTokensAdaptive() {
+  const box = els.maxTokensAdaptive;
+  return Boolean(box && box.checked);
+}
+
+function autonomousEnabled() {
+  const box = els.autonomousToggle;
   return Boolean(box && box.checked);
 }
 
@@ -276,9 +307,138 @@ async function verifyAegisKey() {
   }
 }
 
-function renderMemoryResults(results) {
+// ----------------------------------------------------------------- memory
+//
+// Two surfaces read the same endpoint:
+//   - the sidebar card (last 10, one line each) — the quick peek;
+//   - the full inspector overlay (up to 50, every field) — "all memories and
+//     their sources" behind a translucent backdrop.
+//
+// Backend contract (aegis1/app.py:9214 `memory_search`): the response key is
+// `entries`, NOT `results` — reading `results` is what kept this card empty
+// for every account. `limit` is clamped server-side to 50 with no offset
+// (app.py:9243), so the inspector is honestly "the 50 most recent", not an
+// unbounded list. The endpoint also runs `_memory_sync_access` and can answer
+// HTTP 402 `free_session_limit_reached`, which must render as an upgrade
+// prompt — never as an empty list.
+//
+// Field set per entry (aegis1/app.py:9349 `_memory_row_to_dict`): id,
+// timestamp, createdAt (epoch ms), source, role, tags[], content, session,
+// importance, summary(bool), topics[], entities[], sentiment, tokenCount,
+// embedding[]. There is no `tier` — L0–L3 is the local CLI engine's concept
+// (aegiscodex-dev/src/memory.js) and does not exist on the cloud rows, so
+// source/role are the real provenance axes here.
+//
+// `embedding` is dropped on ingest: it is a raw float vector, sometimes
+// thousands of numbers, and nothing in this view renders or needs it.
+
+const MEMORY_SIDEBAR_LIMIT = 10;
+const MEMORY_INSPECTOR_LIMIT = 50; // server clamp — app.py:9243
+
+/** Inspector state. `entries` is the fetched page; chips filter it in place. */
+const memoryView = {
+  entries: [],
+  query: '',
+  source: '',
+  role: '',
+  error: '',
+  upgrade: null,
+  loading: false,
+};
+
+function overlayOpen() {
+  return !!els.memoryOverlay && !els.memoryOverlay.hidden;
+}
+
+/** "3m ago" / "2d ago" from epoch ms. Empty string when unknown. */
+function relTime(ms) {
+  if (!Number.isFinite(ms)) return '';
+  const secs = Math.round((Date.now() - ms) / 1000);
+  if (secs < 45) return 'just now';
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.round(hrs / 24);
+  if (days < 30) return `${days}d ago`;
+  const mos = Math.round(days / 30);
+  if (mos < 12) return `${mos}mo ago`;
+  return `${Math.round(mos / 12)}y ago`;
+}
+
+/** Coerce one raw row into the shape the renderers expect. Never trusts the
+ *  payload: every field is type-checked so a malformed row degrades to a
+ *  readable card instead of throwing mid-render. */
+function normalizeMemoryEntry(raw) {
+  const r = raw && typeof raw === 'object' ? raw : {};
+  const asArray = (v) => (Array.isArray(v) ? v.filter((x) => x != null && x !== '') : []);
+  const asString = (v) => (typeof v === 'string' ? v : '');
+  const asNumber = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+  const content = asString(r.content) || asString(r.text) || asString(r.entry);
+  return {
+    id: r.id != null ? String(r.id) : '',
+    content,
+    source: asString(r.source) || '(unknown source)',
+    role: asString(r.role),
+    tags: asArray(r.tags),
+    topics: asArray(r.topics),
+    entities: asArray(r.entities),
+    session: asString(r.session),
+    sentiment: asString(r.sentiment),
+    importance: asNumber(r.importance),
+    tokenCount: asNumber(r.tokenCount),
+    summary: r.summary === true,
+    createdAt: asNumber(r.createdAt),
+    timestamp: asString(r.timestamp),
+  };
+}
+
+/** Fetch one page of memory. Returns a discriminated result rather than
+ *  throwing, because "needs upgrade" and "failed" render very differently
+ *  from "empty" and conflating them is the bug this view exists to fix. */
+async function fetchMemory(query, limit) {
+  try {
+    const data = query
+      ? await aegis.memorySearch(query, limit)
+      : await aegis.memoryList(limit);
+    // `entries` is the real key. Keep the `results` fallback only so an older
+    // backend that still sends it degrades to a working list, not an empty one.
+    const raw = data && (data.entries || data.results);
+    const entries = Array.isArray(raw) ? raw.map(normalizeMemoryEntry) : [];
+    return { entries, error: '', upgrade: null };
+  } catch (err) {
+    const status = err && err.status;
+    const code = err && err.data && err.data.error;
+    if (status === 402 || code === 'free_session_limit_reached') {
+      return {
+        entries: [],
+        error: '',
+        upgrade: {
+          url: (err.data && err.data.upgradeUrl) || 'https://aegiscloud.org/subscribe',
+          used: err.data && err.data.sessionsUsed,
+          limit: err.data && err.data.freeSessionLimit,
+        },
+      };
+    }
+    return {
+      entries: [],
+      error: `search failed: ${err && err.message ? err.message : err}`,
+      upgrade: null,
+    };
+  }
+}
+
+/** Compact sidebar row: content only, with the source as a quiet prefix. */
+function renderMemoryResults(entries, error) {
   els.memoryResults.innerHTML = '';
-  const list = Array.isArray(results) ? results : [];
+  if (error) {
+    const li = document.createElement('li');
+    li.className = 'empty';
+    li.textContent = error;
+    els.memoryResults.appendChild(li);
+    return;
+  }
+  const list = Array.isArray(entries) ? entries : [];
   if (!list.length) {
     const li = document.createElement('li');
     li.className = 'empty';
@@ -286,25 +446,259 @@ function renderMemoryResults(results) {
     els.memoryResults.appendChild(li);
     return;
   }
-  for (const r of list) {
+  for (const e of list) {
     const li = document.createElement('li');
-    li.textContent =
-      (r && (r.text || r.entry || r.content)) || JSON.stringify(r);
+    const src = document.createElement('span');
+    src.className = 'mem-side-src';
+    src.textContent = e.source;
+    const body = document.createElement('span');
+    body.className = 'mem-side-body';
+    body.textContent = e.content || '(empty)';
+    li.appendChild(src);
+    li.appendChild(body);
     els.memoryResults.appendChild(li);
   }
 }
 
 async function searchMemory(query) {
   els.memoryHint.textContent = 'searching…';
-  try {
-    const data = query
-      ? await aegis.memorySearch(query, 10)
-      : await aegis.memoryList(10);
-    renderMemoryResults(data && data.results);
-    els.memoryHint.textContent = '';
-  } catch (err) {
-    els.memoryHint.textContent = `search failed: ${err && err.message ? err.message : err}`;
+  const res = await fetchMemory(query, MEMORY_SIDEBAR_LIMIT);
+  renderMemoryResults(res.entries, res.error);
+  els.memoryHint.textContent = res.upgrade
+    ? 'cloud memory needs an active plan — see the inspector for details.'
+    : res.error || '';
+}
+
+// ------------------------------------------------- memory inspector overlay
+
+/** Small coloured label used for source / role / tag / topic / entity. */
+function memoryChip(text, cls) {
+  const span = document.createElement('span');
+  span.className = `mem-chip${cls ? ` ${cls}` : ''}`;
+  span.textContent = text;
+  return span;
+}
+
+/** One expandable card: content plus every provenance field the row carries. */
+function memoryCard(e) {
+  const li = document.createElement('li');
+  li.className = 'mem-card';
+
+  const head = document.createElement('div');
+  head.className = 'mem-card-head';
+  head.appendChild(memoryChip(e.source, 'src'));
+  if (e.role) head.appendChild(memoryChip(e.role, 'role'));
+  if (e.importance != null) head.appendChild(memoryChip(`imp ${e.importance}`, 'imp'));
+  if (e.sentiment) head.appendChild(memoryChip(e.sentiment, 'sent'));
+  if (e.summary) head.appendChild(memoryChip('summary', 'flag'));
+
+  const meta = document.createElement('span');
+  meta.className = 'mem-card-meta';
+  const bits = [];
+  const rel = relTime(e.createdAt);
+  if (rel) bits.push(rel);
+  else if (e.timestamp) bits.push(e.timestamp);
+  if (e.session) bits.push(`session ${e.session}`);
+  if (e.tokenCount != null) bits.push(`${e.tokenCount} tok`);
+  meta.textContent = bits.join(' · ');
+  head.appendChild(meta);
+  li.appendChild(head);
+
+  const body = document.createElement('p');
+  body.className = 'mem-card-body';
+  body.textContent = e.content || '(empty)';
+  li.appendChild(body);
+
+  const pills = [...e.tags, ...e.topics, ...e.entities];
+  if (pills.length) {
+    const row = document.createElement('div');
+    row.className = 'mem-card-pills';
+    for (const p of pills) row.appendChild(memoryChip(p, 'pill'));
+    li.appendChild(row);
   }
+
+  // Expand on click, but never while the user is selecting text to copy.
+  body.addEventListener('click', () => {
+    if (window.getSelection && String(window.getSelection())) return;
+    li.classList.toggle('expanded');
+  });
+  return li;
+}
+
+/** Distinct values of `key` across the fetched page, with counts. */
+function memoryFacets(key) {
+  const counts = new Map();
+  for (const e of memoryView.entries) {
+    const v = e[key];
+    if (!v) continue;
+    counts.set(v, (counts.get(v) || 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+}
+
+/** Case-insensitive match over content plus every metadata field. */
+function memoryMatches(e, q) {
+  const hay = [
+    e.content,
+    e.source,
+    e.role,
+    e.session,
+    e.sentiment,
+    ...e.tags,
+    ...e.topics,
+    ...e.entities,
+  ].join('\n').toLowerCase();
+  return hay.includes(String(q == null ? '' : q).toLowerCase());
+}
+
+/** Chip filters (source / role) — click a chip to narrow, again to clear. */
+function renderMemoryChips() {
+  els.memoryChips.innerHTML = '';
+  if (memoryView.upgrade || memoryView.error) return;
+  const groups = [
+    ['source', 'source', memoryFacets('source')],
+    ['role', 'role', memoryFacets('role')],
+  ];
+  for (const [key, label, facets] of groups) {
+    if (facets.length < 2) continue; // a single value is not a useful filter
+    const group = document.createElement('div');
+    group.className = 'mem-chip-group';
+    const lab = document.createElement('span');
+    lab.className = 'mem-chip-label';
+    lab.textContent = label;
+    group.appendChild(lab);
+    for (const [value, count] of facets) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = `mem-chip btn${memoryView[key] === value ? ' on' : ''}`;
+      b.textContent = `${value} ${count}`;
+      b.addEventListener('click', () => {
+        memoryView[key] = memoryView[key] === value ? '' : value;
+        renderMemoryOverlay();
+      });
+      group.appendChild(b);
+    }
+    els.memoryChips.appendChild(group);
+  }
+}
+
+/** Repaint the inspector from `memoryView`. Pure — makes no network calls. */
+function renderMemoryOverlay() {
+  if (!overlayOpen()) return;
+  const total = memoryView.entries.length;
+  els.memoryList.innerHTML = '';
+  renderMemoryChips();
+
+  if (memoryView.loading) {
+    els.memoryCount.textContent = 'loading…';
+    return;
+  }
+
+  if (memoryView.upgrade) {
+    els.memoryCount.textContent = '';
+    const li = document.createElement('li');
+    li.className = 'mem-empty mem-upgrade';
+    const h = document.createElement('strong');
+    h.textContent = 'Cloud memory is paused on the free plan';
+    const p = document.createElement('span');
+    const used = memoryView.upgrade.used != null ? memoryView.upgrade.used : '?';
+    const cap = memoryView.upgrade.limit != null ? memoryView.upgrade.limit : '?';
+    p.textContent =
+      `This account has used ${used} of ${cap} sync sessions. Saved memory is ` +
+      'not lost — it becomes readable again once the plan is active.';
+    const a = document.createElement('a');
+    a.href = memoryView.upgrade.url;
+    a.target = '_blank';
+    a.rel = 'noreferrer noopener';
+    a.textContent = 'Open subscribe page ↗';
+    li.appendChild(h);
+    li.appendChild(p);
+    li.appendChild(a);
+    els.memoryList.appendChild(li);
+    return;
+  }
+
+  if (memoryView.error) {
+    els.memoryCount.textContent = '';
+    const li = document.createElement('li');
+    li.className = 'mem-empty';
+    li.textContent = memoryView.error;
+    els.memoryList.appendChild(li);
+    return;
+  }
+
+  if (!total) {
+    els.memoryCount.textContent = '0 entries';
+    const li = document.createElement('li');
+    li.className = 'mem-empty';
+    li.textContent = 'No memory entries yet — save a note below, or import from other AI tools.';
+    els.memoryList.appendChild(li);
+    return;
+  }
+
+  const q = memoryView.query.trim().toLowerCase();
+  const shown = memoryView.entries.filter(
+    (e) =>
+      (!memoryView.source || e.source === memoryView.source) &&
+      (!memoryView.role || e.role === memoryView.role) &&
+      (!q || memoryMatches(e, q))
+  );
+
+  const sources = new Set(memoryView.entries.map((e) => e.source)).size;
+  els.memoryCount.textContent =
+    `${shown.length} of ${total} shown · ${sources} source${sources === 1 ? '' : 's'}` +
+    (total >= MEMORY_INSPECTOR_LIMIT ? ` · newest ${MEMORY_INSPECTOR_LIMIT}` : '');
+
+  if (!shown.length) {
+    const li = document.createElement('li');
+    li.className = 'mem-empty';
+    li.textContent = 'Nothing matches those filters.';
+    els.memoryList.appendChild(li);
+    return;
+  }
+  for (const e of shown) els.memoryList.appendChild(memoryCard(e));
+}
+
+/** Fetch a fresh page into the inspector and repaint. Preserves the filter
+ *  text so typing a query does not reset the chips you just clicked. */
+async function loadMemoryOverlay(query) {
+  memoryView.loading = true;
+  memoryView.error = '';
+  memoryView.upgrade = null;
+  renderMemoryOverlay();
+  const res = await fetchMemory(query, MEMORY_INSPECTOR_LIMIT);
+  memoryView.entries = res.entries;
+  memoryView.error = res.error;
+  memoryView.upgrade = res.upgrade;
+  memoryView.loading = false;
+  renderMemoryOverlay();
+}
+
+function openMemoryOverlay() {
+  if (!els.memoryOverlay) return;
+  els.memoryOverlay.hidden = false;
+  document.body.classList.add('memory-open');
+  // Start from whatever the sidebar is showing so the two never disagree.
+  els.memoryOverlayQuery.value = els.memoryQuery ? els.memoryQuery.value.trim() : '';
+  memoryView.query = els.memoryOverlayQuery.value;
+  memoryView.source = '';
+  memoryView.role = '';
+  renderMemoryOverlay();
+  loadMemoryOverlay(memoryView.query);
+  if (els.memoryOverlayQuery) els.memoryOverlayQuery.focus();
+}
+
+function closeMemoryOverlay() {
+  if (!els.memoryOverlay) return;
+  els.memoryOverlay.hidden = true;
+  document.body.classList.remove('memory-open');
+  if (els.memoryOpen) els.memoryOpen.focus();
+}
+
+/** Textarea the save button should read from — the inspector's when it is up,
+ *  otherwise the sidebar's. Keeps both save paths on one code path. */
+function activeMemoryEntry() {
+  return overlayOpen() && els.memoryOverlayEntry ? els.memoryOverlayEntry : els.memoryEntry;
 }
 
 async function importMemory() {
@@ -339,7 +733,7 @@ async function importMemory() {
     els.memoryHint.textContent = result && result.ok
       ? `imported ${result.saved} entries${queued}.`
       : `import stopped: ${(result && result.reason) || 'unknown error'}`;
-    await searchMemory(els.memoryQuery.value.trim());
+    await refreshMemoryViews();
   } catch (err) {
     els.memoryHint.textContent = `import failed: ${err && err.message ? err.message : err}`;
   } finally {
@@ -348,25 +742,94 @@ async function importMemory() {
 }
 
 async function saveMemory() {
-  const text = els.memoryEntry.value.trim();
+  const box = activeMemoryEntry();
+  if (!box) return;
+  const text = box.value.trim();
   if (!text) return;
   els.memorySaveBtn.disabled = true;
+  if (els.memoryOverlaySave) els.memoryOverlaySave.disabled = true;
   els.memoryHint.textContent = 'saving…';
   try {
     await aegis.memorySave({ text, source: 'aegis-desktop' });
-    els.memoryEntry.value = '';
+    box.value = '';
     els.memoryHint.textContent = 'saved.';
-    await searchMemory(els.memoryQuery.value.trim());
+    await refreshMemoryViews();
   } catch (err) {
     els.memoryHint.textContent = `save failed: ${err && err.message ? err.message : err}`;
   } finally {
     els.memorySaveBtn.disabled = false;
+    if (els.memoryOverlaySave) els.memoryOverlaySave.disabled = false;
   }
+}
+
+/** Re-read both surfaces after a write. The inspector only refetches when it
+ *  is actually on screen — a hidden overlay should not spend a request. */
+async function refreshMemoryViews() {
+  const q = els.memoryQuery ? els.memoryQuery.value.trim() : '';
+  await searchMemory(q);
+  if (overlayOpen()) await loadMemoryOverlay(memoryView.query);
+}
+
+// ------------------------------------------------------------ chat welcome
+// The welcome panel is cloned from #welcome-template in index.html rather than
+// built with createElement, so its markup lives in exactly one place and
+// survives the innerHTML clears in newChat()/openSession().
+//
+// Pills PREFILL the composer (matching ae-guix native-chat); they never
+// auto-send, so a mis-click costs nothing. Wiring is addEventListener rather
+// than inline onclick because this renderer runs under CSP `script-src 'self'`,
+// which would silently drop inline handlers.
+
+/** Time-aware greeting, recomputed each time the panel is rendered. */
+function applyGreeting() {
+  const el = document.getElementById('chat-greeting');
+  if (!el) return;
+  const h = new Date().getHours();
+  el.textContent =
+    h >= 5 && h < 12
+      ? 'Good morning'
+      : h >= 12 && h < 17
+        ? 'Good afternoon'
+        : h >= 17 && h < 22
+          ? 'Good evening'
+          : 'Working late?';
+}
+
+/** Prefill the composer with a starter question, caret at the end. */
+function quickAction(text) {
+  const inp = els.prompt;
+  if (!inp) return;
+  inp.value = text;
+  inp.focus();
+  try {
+    inp.setSelectionRange(text.length, text.length);
+  } catch (err) {
+    /* not supported on every input type; focus alone is enough */
+  }
+}
+
+/** Clear the transcript and render the welcome panel. */
+function renderWelcome() {
+  const tpl = document.getElementById('welcome-template');
+  if (!tpl) return;
+  els.messages.innerHTML = '';
+  els.messages.appendChild(tpl.content.cloneNode(true));
+  applyGreeting();
+  for (const btn of els.messages.querySelectorAll('.chat-quick-pill')) {
+    btn.addEventListener('click', () => quickAction(btn.dataset.quick || ''));
+  }
+}
+
+/** Drop the welcome panel once real transcript content exists. */
+function hideWelcome() {
+  const w = document.getElementById('chat-welcome');
+  if (w) w.remove();
 }
 
 // `sessionId`, when given for an assistant message, renders a "copy" button
 // that puts the message text on the clipboard.
 function addMessage(role, text, meta, sessionId) {
+  hideWelcome();
   const row = document.createElement('div');
   row.className = `msg ${role}`;
 
@@ -677,15 +1140,20 @@ async function loadClasses() {
 }
 
 // Disable max-tokens options above the selected model's ceiling and clamp the
-// current selection down if it no longer fits; falls back to the flat 64k
-// ceiling (all options enabled) when no per-model metadata is known.
+// current selection down if it no longer fits; falls back to the flat 300k
+// ceiling (all options enabled) when no per-model metadata is known. When
+// "adaptive" is on, the manual select is irrelevant — the effective value
+// (returned here, read by send()) is always the model's own ceiling — so the
+// select is disabled rather than clamped.
 function applyMaxTokensClamp(modelId) {
   const meta = modelId ? modelMeta.get(modelId) : null;
   const ceiling = maxTokensCeiling(meta);
+  const adaptive = maxTokensAdaptive();
+  els.maxTokens.disabled = adaptive;
   for (const opt of els.maxTokens.options) {
     opt.disabled = Number(opt.value) > ceiling;
   }
-  if (Number(els.maxTokens.value) > ceiling) {
+  if (!adaptive && Number(els.maxTokens.value) > ceiling) {
     const enabled = Array.from(els.maxTokens.options).filter((o) => !o.disabled);
     const fallback = enabled[enabled.length - 1];
     if (fallback) {
@@ -697,6 +1165,13 @@ function applyMaxTokensClamp(modelId) {
 }
 
 async function loadModels(cls) {
+  // "Work autonomously" only makes sense for the pooled AEGIS Cloud class —
+  // hide it for BYOK/Ollama/custom endpoints rather than showing a checkbox
+  // that would silently do nothing.
+  if (els.autonomousToggleWrap) {
+    els.autonomousToggleWrap.hidden = cls !== AUTONOMOUS_CLASS;
+  }
+
   const custom = CUSTOM_CLASSES.has(cls);
   els.modelSelect.hidden = custom;
   els.modelSelect.disabled = custom;
@@ -1016,6 +1491,7 @@ function openSession(id) {
       }
       els.messages.innerHTML = '';
       const msgs = Array.isArray(s.messages) ? s.messages : [];
+      if (!msgs.length) renderWelcome();
       for (const m of msgs) {
         const role =
           m.role === 'assistant' ? 'assistant'
@@ -1033,7 +1509,7 @@ function openSession(id) {
 
 function newChat() {
   abortBranches();
-  els.messages.innerHTML = '';
+  renderWelcome();
   els.sessionsHint.textContent = '';
   pendingEl = null;
   pendingSessionId = null;
@@ -1062,7 +1538,9 @@ async function send() {
   els.prompt.value = '';
   addMessage('user', prompt);
 
-  const maxTokens = parseInt(els.maxTokens.value, 10) || 4096;
+  const ceiling = applyMaxTokensClamp(model);
+  const maxTokens = maxTokensAdaptive() ? ceiling : parseInt(els.maxTokens.value, 10) || 4096;
+  const autonomous = cls === AUTONOMOUS_CLASS && autonomousEnabled();
   const sessionId = newSessionId();
   pendingSessionId = sessionId;
 
@@ -1092,7 +1570,7 @@ async function send() {
     // All four classes route through the model: surface (the main process
     // decides transport — cloud client, ollama, or a direct provider).
     const data = await models.chat(
-      { class: cls, prompt, model, maxTokens, sessionId },
+      { class: cls, prompt, model, maxTokens, sessionId, autonomous },
       onDelta
     );
 
@@ -1105,6 +1583,7 @@ async function send() {
     if (data && data.model) bits.push(`model: ${data.model}`);
     else if (model) bits.push(`model: ${model}`);
     bits.push(classLabel(cls));
+    if (autonomous) bits.push('autonomous');
     if (data && data.usage && data.usage.total_tokens != null) {
       bits.push(`tokens: ${data.usage.total_tokens}`);
     }
@@ -1149,6 +1628,24 @@ async function init() {
 
   els.maxTokens.addEventListener('change', () => {
     localStorage.setItem(MAX_TOKENS_KEY, els.maxTokens.value);
+  });
+
+  // Adaptive max tokens is opt-in per machine, remembered across restarts.
+  const savedAdaptive = localStorage.getItem(MAX_TOKENS_ADAPTIVE_KEY);
+  if (savedAdaptive === 'on') els.maxTokensAdaptive.checked = true;
+  els.maxTokensAdaptive.addEventListener('change', () => {
+    localStorage.setItem(MAX_TOKENS_ADAPTIVE_KEY, els.maxTokensAdaptive.checked ? 'on' : 'off');
+    const cls = els.classSelect.value;
+    const modelId = CUSTOM_CLASSES.has(cls) ? els.modelInput.value.trim() : els.modelSelect.value;
+    applyMaxTokensClamp(modelId);
+  });
+
+  // Work-autonomously is opt-in per machine, remembered across restarts;
+  // only ever sent when the active class is AEGIS Cloud (see AUTONOMOUS_CLASS).
+  const savedAutonomous = localStorage.getItem(AUTONOMOUS_KEY);
+  if (savedAutonomous === 'on') els.autonomousToggle.checked = true;
+  els.autonomousToggle.addEventListener('change', () => {
+    localStorage.setItem(AUTONOMOUS_KEY, els.autonomousToggle.checked ? 'on' : 'off');
   });
 
   // The discovery lane is opt-in per machine, remembered across restarts.
@@ -1203,6 +1700,35 @@ async function init() {
 
   els.memorySaveBtn.addEventListener('click', saveMemory);
   els.memoryImportBtn.addEventListener('click', importMemory);
+
+  // Memory inspector. `?`-guarded: the overlay markup is optional, and a
+  // missing node must degrade to the plain sidebar card, not a boot crash.
+  if (els.memoryOpen) els.memoryOpen.addEventListener('click', openMemoryOverlay);
+  if (els.memoryClose) els.memoryClose.addEventListener('click', closeMemoryOverlay);
+  if (els.memoryBackdrop) els.memoryBackdrop.addEventListener('click', closeMemoryOverlay);
+  if (els.memoryOverlaySave) els.memoryOverlaySave.addEventListener('click', saveMemory);
+  if (els.memoryFilters) {
+    els.memoryFilters.addEventListener('submit', (e) => {
+      e.preventDefault();
+      memoryView.query = els.memoryOverlayQuery.value.trim();
+      loadMemoryOverlay(memoryView.query);
+    });
+  }
+  if (els.memoryFiltersClear) {
+    els.memoryFiltersClear.addEventListener('click', () => {
+      els.memoryOverlayQuery.value = '';
+      memoryView.query = '';
+      memoryView.source = '';
+      memoryView.role = '';
+      renderMemoryOverlay();
+    });
+  }
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && overlayOpen()) closeMemoryOverlay();
+  });
+
+  // First paint: show the welcome panel unless a session already rendered rows.
+  if (!els.messages.querySelector('.msg, .chatflow')) renderWelcome();
 
   await loadClasses();
   await loadSettings();

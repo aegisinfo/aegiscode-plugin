@@ -9,7 +9,7 @@ function assert(cond, msg) {
   if (!cond) throw new Error(`ASSERT FAILED: ${msg}`);
 }
 
-assert(FLAT_CEILING === 64000, `expected flat ceiling 64000, got ${FLAT_CEILING}`);
+assert(FLAT_CEILING === 300000, `expected flat ceiling 300000, got ${FLAT_CEILING}`);
 
 // No metadata at all -> flat fallback.
 assert(maxTokensCeiling(null) === FLAT_CEILING, 'null meta falls back to flat ceiling');

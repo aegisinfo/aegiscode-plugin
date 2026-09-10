@@ -67,12 +67,34 @@
         />
 
         <label for="max-tokens">Max tokens</label>
-        <select id="max-tokens">
-          <option value="1024">1k</option>
-          <option value="4096" selected>4k</option>
-          <option value="16384">16k</option>
-          <option value="64000">64k</option>
-        </select>
+        <div class="max-tokens-row">
+          <select id="max-tokens">
+            <option value="1024">1k</option>
+            <option value="4096" selected>4k</option>
+            <option value="16384">16k</option>
+            <option value="64000">64k</option>
+            <option value="300000">300k</option>
+          </select>
+          <label
+            class="flow-toggle"
+            for="max-tokens-adaptive"
+            title="Automatically use the highest output ceiling the selected model supports, up to 300k tokens, instead of the fixed choice above."
+          >
+            <input type="checkbox" id="max-tokens-adaptive" />
+            <span>adaptive</span>
+          </label>
+        </div>
+
+        <label
+          class="flow-toggle"
+          for="autonomous-toggle"
+          id="autonomous-toggle-wrap"
+          hidden
+          title="Let the model work autonomously: fan out to multiple reasoning workers and synthesize their findings into one answer. Aegis Cloud models only."
+        >
+          <input type="checkbox" id="autonomous-toggle" />
+          <span>work autonomously</span>
+        </label>
         <p class="hint" id="model-hint"></p>
       </section>
 
@@ -92,7 +114,20 @@
       </section>
 
       <section class="card">
-        <h2>Memory</h2>
+        <!-- The heading is the click target for the full memory inspector.
+             The button lives *inside* the h2 (not the reverse) because a
+             <button> may only contain phrasing content, and <h2> is not. -->
+        <h2>
+          <button
+            type="button"
+            class="card-title-btn"
+            id="memory-open"
+            title="Open the memory inspector — every entry with its source, tags and topics"
+          >
+            <span>Memory</span>
+            <span class="ctb-expand" aria-hidden="true">⤢</span>
+          </button>
+        </h2>
         <form id="memory-search-form" class="memory-search">
           <input
             type="text"
@@ -117,6 +152,53 @@
     </aside>
 
     <section class="chat">
+      <!-- Inert template: cloned into #messages by renderWelcome() so the
+           welcome markup lives in exactly one place and survives the
+           innerHTML clears in newChat()/openSession(). -->
+      <template id="welcome-template">
+        <div class="chat-welcome" id="chat-welcome">
+          <div class="chat-greeting-row">
+            <div class="glyph">✦</div>
+            <div class="title" id="chat-greeting">Hello</div>
+          </div>
+          <div class="sub">
+            Ask anything — or start with one of these.
+          </div>
+          <div class="chat-quick-actions">
+            <button class="chat-quick-pill" type="button" data-quick="Write a ">
+              <span class="qp-ic">✎</span>Write code
+            </button>
+            <button class="chat-quick-pill" type="button" data-quick="Explain how ">
+              <span class="qp-ic">✦</span>Explain a concept
+            </button>
+            <button
+              class="chat-quick-pill"
+              type="button"
+              data-quick="Help me debug this error:&#10;&#10;"
+            >
+              <span class="qp-ic">🐛</span>Debug an error
+            </button>
+            <button
+              class="chat-quick-pill"
+              type="button"
+              data-quick="Compare two approaches to "
+            >
+              <span class="qp-ic">⇄</span>Weigh two options
+            </button>
+            <button
+              class="chat-quick-pill"
+              type="button"
+              data-quick="Help me plan "
+            >
+              <span class="qp-ic">⊞</span>Plan a project
+            </button>
+          </div>
+          <div class="hints">
+            Enter to send · Shift+Enter for a newline · the discovery lane adds
+            two extra paths to every answer
+          </div>
+        </div>
+      </template>
       <div class="messages" id="messages" aria-live="polite"></div>
       <form class="composer" id="composer">
         <textarea
@@ -138,6 +220,57 @@
       </form>
     </section>
   </main>
+
+  <!-- Memory inspector: full-viewport translucent overlay opened from the
+       sidebar Memory heading. Markup is static and populated by
+       renderMemoryOverlay() — this renderer runs under CSP `script-src 'self'`,
+       so inline handlers would be dropped silently. -->
+  <div class="memory-overlay" id="memory-overlay" hidden>
+    <div class="memory-backdrop" id="memory-backdrop"></div>
+    <div
+      class="memory-panel"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="memory-panel-title"
+    >
+      <header class="memory-panel-head">
+        <h2 id="memory-panel-title">Memory</h2>
+        <span class="memory-count" id="memory-count"></span>
+        <div class="spacer"></div>
+        <button type="button" id="memory-close" class="ghost-btn" title="Close (Esc)">
+          Close
+        </button>
+      </header>
+
+      <form class="memory-filters" id="memory-filters">
+        <input
+          type="text"
+          id="memory-overlay-query"
+          placeholder="Filter by text, tag, topic or source…"
+          autocomplete="off"
+        />
+        <button type="submit">Filter</button>
+        <button type="button" id="memory-filters-clear" class="ghost-btn">Clear</button>
+      </form>
+
+      <div class="memory-chips" id="memory-chips"></div>
+
+      <div class="memory-scroll">
+        <ul class="memory-list" id="memory-list"></ul>
+      </div>
+
+      <div class="memory-actions">
+        <textarea
+          id="memory-overlay-entry"
+          rows="2"
+          placeholder="Save a note to memory…"
+        ></textarea>
+        <button type="button" id="memory-overlay-save" class="btn-block">
+          Save to memory
+        </button>
+      </div>
+    </div>
+  </div>
 
   <script src="max-tokens.js"></script>
   <script src="app.js"></script>

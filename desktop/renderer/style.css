@@ -315,6 +315,377 @@ select:disabled {
   border-style: dashed;
 }
 
+/* Sidebar rows now carry provenance: the source is a quiet prefix, the body
+   stays the readable part. Both are <span>s inside the existing <li>. */
+.memory-results .mem-side-src {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--teal);
+  opacity: 0.75;
+  margin-bottom: 2px;
+}
+
+.memory-results .mem-side-body {
+  color: var(--text);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+/* The Memory heading doubles as the inspector's trigger. Reset the button so
+   it inherits the .card h2 typography (style.css:179) and reads as a heading,
+   then add only an affordance on hover/focus. */
+.card-title-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.card-title-btn .ctb-expand {
+  margin-left: auto;
+  font-size: 11px;
+  opacity: 0.4;
+  transition: opacity 0.15s, color 0.15s;
+}
+
+.card-title-btn:hover,
+.card-title-btn:focus-visible {
+  color: var(--teal);
+}
+
+.card-title-btn:hover .ctb-expand,
+.card-title-btn:focus-visible .ctb-expand {
+  opacity: 1;
+  color: var(--teal);
+}
+
+.card-title-btn:focus-visible {
+  outline: 1px solid var(--teal);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* ------------------------------------------------------ memory inspector */
+/* Full-viewport translucent layer: the app stays visible but recedes behind a
+   blur, so every entry and its source reads as a foreground sheet. */
+.memory-overlay[hidden] {
+  display: none;
+}
+
+.memory-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 24px;
+}
+
+.memory-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(4, 8, 14, 0.55);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.memory-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(860px, 100%);
+  max-height: 100%;
+  min-height: 0;
+  background: color-mix(in srgb, var(--surface2) 88%, transparent);
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+
+.memory-panel-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.memory-panel-head h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text2);
+  margin: 0;
+  font-family: var(--font-display);
+}
+
+.memory-count {
+  font-size: 11px;
+  color: var(--text2);
+  font-family: var(--font-mono);
+}
+
+.memory-panel-head .spacer {
+  flex: 1;
+}
+
+.memory-filters {
+  display: flex;
+  gap: 6px;
+  padding: 12px 16px 0;
+}
+
+.memory-filters input {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 9px;
+  font: inherit;
+}
+
+.memory-filters input:focus {
+  outline: none;
+  border-color: var(--teal);
+}
+
+.memory-filters button {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0 12px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.memory-filters button:hover {
+  border-color: var(--teal);
+  color: var(--teal);
+}
+
+.memory-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 16px 0;
+}
+
+.memory-chips:empty {
+  display: none;
+}
+
+.mem-chip-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.mem-chip-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text3);
+  margin-right: 2px;
+}
+
+.mem-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  line-height: 1.6;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text2);
+  background: var(--surface);
+  white-space: nowrap;
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+button.mem-chip {
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+}
+
+button.mem-chip:hover {
+  border-color: var(--teal);
+  color: var(--teal);
+}
+
+button.mem-chip.on {
+  border-color: var(--teal);
+  background: rgba(0, 229, 192, 0.14);
+  color: var(--teal);
+}
+
+.mem-chip.src {
+  border-color: rgba(0, 229, 192, 0.45);
+  color: var(--teal);
+}
+
+.mem-chip.role {
+  border-color: rgba(107, 143, 212, 0.5);
+  color: var(--purple);
+}
+
+.mem-chip.imp {
+  border-color: rgba(255, 145, 0, 0.45);
+  color: var(--amber);
+}
+
+.mem-chip.sent,
+.mem-chip.flag {
+  color: var(--text3);
+}
+
+.mem-chip.pill {
+  border-style: dashed;
+  color: var(--text2);
+}
+
+.memory-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px;
+}
+
+.memory-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mem-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 9px 11px;
+}
+
+.mem-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 6px;
+}
+
+.mem-card-meta {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text3);
+  font-family: var(--font-mono);
+}
+
+.mem-card-body {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  cursor: pointer;
+}
+
+.mem-card.expanded .mem-card-body {
+  -webkit-line-clamp: unset;
+}
+
+.mem-card-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px dashed var(--border);
+}
+
+.mem-empty {
+  font-size: 12px;
+  color: var(--text2);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 18px;
+  text-align: center;
+}
+
+.mem-upgrade {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+  border-color: rgba(255, 145, 0, 0.45);
+}
+
+.mem-upgrade strong {
+  color: var(--amber);
+}
+
+.mem-upgrade span {
+  max-width: 52ch;
+  line-height: 1.6;
+}
+
+.mem-upgrade a {
+  color: var(--teal);
+}
+
+.memory-actions {
+  border-top: 1px solid var(--border);
+  padding: 12px 16px 14px;
+}
+
+.memory-actions textarea {
+  width: 100%;
+  resize: none;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+}
+
+.memory-actions textarea:focus {
+  outline: none;
+  border-color: var(--teal);
+}
+
+/* Stop the page behind the overlay from scrolling under it. */
+body.memory-open {
+  overflow: hidden;
+}
+
 #memory-entry {
   width: 100%;
   margin-top: 10px;
@@ -626,6 +997,29 @@ select:disabled {
   white-space: nowrap;
 }
 
+.max-tokens-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.max-tokens-row select {
+  flex: 1;
+  min-width: 0;
+}
+
+#autonomous-toggle-wrap {
+  margin-top: 6px;
+}
+
+/* .flow-toggle sets display: flex, which — being an author-stylesheet rule —
+   outranks the UA stylesheet's `[hidden] { display: none }` regardless of
+   selector specificity. Without this override, hiding the toggle via the
+   `hidden` attribute (see loadModels() in app.js) has no visual effect. */
+#autonomous-toggle-wrap[hidden] {
+  display: none;
+}
+
 .flow-toggle input {
   accent-color: var(--teal);
   margin: 0;
@@ -857,4 +1251,107 @@ label {
 .session-meta {
   font-size: 11px;
   color: var(--text2);
+}
+
+/* ---------------------------------------------------------- chat welcome */
+/* Shown when the transcript is empty; cloned from #welcome-template. */
+@keyframes shimmer {
+  to {
+    background-position: 200% center;
+  }
+}
+
+.chat-welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  gap: 18px;
+  text-align: center;
+  padding: 40px 24px;
+  color: var(--text3);
+}
+
+.chat-greeting-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  justify-content: center;
+}
+
+.chat-welcome .glyph {
+  font-size: 38px;
+  line-height: 1;
+  margin: 0;
+  background: linear-gradient(135deg, #b0d4ee, #5a7fd4, var(--teal));
+  background-size: 200%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 0 14px rgba(0, 229, 192, 0.3));
+  animation: shimmer 5s linear infinite;
+}
+
+.chat-welcome .title {
+  font-size: 30px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.02em;
+  margin: 0;
+  font-family: var(--font-display);
+}
+
+.chat-welcome .sub {
+  font-size: 12px;
+  color: var(--text3);
+  max-width: 420px;
+  line-height: 1.6;
+  margin: 0;
+}
+
+.chat-quick-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  max-width: 560px;
+  margin-top: 2px;
+}
+
+.chat-quick-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border2);
+  background: var(--surface);
+  color: var(--text2);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: var(--font-chat);
+  white-space: nowrap;
+}
+
+.chat-quick-pill:hover {
+  border-color: var(--teal);
+  color: var(--teal);
+  background: rgba(0, 229, 192, 0.06);
+}
+
+.chat-quick-pill .qp-ic {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.chat-welcome .hints {
+  font-size: 10px;
+  color: var(--text3);
+  margin-top: 6px;
+  opacity: 0.55;
+  max-width: 460px;
+  line-height: 1.6;
 }

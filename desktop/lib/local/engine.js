@@ -156,6 +156,11 @@ function createLocalEngine({ aegis, settings, ollama, providers }) {
     const cls = payload && payload.class;
     const model = payload && payload.model;
     const maxTokens = payload && payload.maxTokens;
+    // "Work autonomously" — routes this call through aegis1's pool_brain
+    // worker fan-out (services/pool_brain.py: N reasoning workers + a
+    // synthesis pass) instead of a single provider call. Pooled AEGIS Cloud
+    // only: BYOK bills on the relay's own key and has no brain route.
+    const autonomous = cls === 'aegis' && Boolean(payload && payload.autonomous);
     const sessionId = (payload && payload.sessionId) || randomUUID();
 
     const controller = new AbortController();
@@ -191,7 +196,11 @@ function createLocalEngine({ aegis, settings, ollama, providers }) {
           // same flag aegis-online sets. Matches aegiscodex-dev's own
           // cross-session memory (auto-indexed, no manual tagging); pooled
           // AEGIS-class chat only — BYOK's relay is stateless by contract.
-          extra: { aegis_memory: true, session: sessionId },
+          extra: {
+            aegis_memory: true,
+            session: sessionId,
+            ...(autonomous ? { brain: true } : {}),
+          },
         });
       }
 

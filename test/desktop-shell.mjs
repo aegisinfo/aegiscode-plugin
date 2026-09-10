@@ -122,6 +122,7 @@ const EXPECTED = [
   'importConversation',
   'listModels',
   'memoryActivate',
+  'memoryImport',
   'memoryList',
   'memoryPull',
   'memorySave',

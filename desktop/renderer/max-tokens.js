@@ -6,7 +6,7 @@
  * pulling in DOM/window.aegis — app.js only calls into it.
  */
 
-const FLAT_CEILING = 64000;
+const FLAT_CEILING = 300000;
 
 function maxTokensCeiling(meta) {
   const raw = meta && Number(meta.max_output);
