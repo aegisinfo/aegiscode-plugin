@@ -13,7 +13,7 @@ const calls = [];
 const aegis = {
   apiKey: 'k',
   async listModels() {
-    return { models: [{ id: 'm1' }] };
+    return { models: [{ id: 'openai' }] };
   },
   async byokStatus() {
     return { keys: { openai: true } };
@@ -70,9 +70,64 @@ for (const n of ['aegis', 'byok', 'ollama', 'openai-compat', 'anthropic']) {
 assert(classes.find((c) => c.class === 'ollama').configured === true, 'ollama configured');
 
 // listModels per class
-assert((await engine.listModels('aegis')).models[0].id === 'm1', 'aegis models');
+assert((await engine.listModels('aegis')).models[0].id === 'openai', 'aegis models');
 assert((await engine.listModels('ollama')).models[0].id === 'llama3', 'ollama models');
-assert((await engine.listModels('byok')).models[0].id === 'openai', 'byok models');
+
+// BYOK models come from the relay's model catalog, *not* from keyed provider
+// names — surfacing the latter as ids put provider names in the picker
+// (defect #4). Keyed providers are reported separately for labelling.
+const byok = await engine.listModels('byok');
+assert(byok.models[0].id === 'openai', `byok models from catalog, got ${byok.models[0].id}`);
+assert(
+  JSON.stringify(byok.providers) === JSON.stringify(['openai']),
+  `byok providers reported separately, got ${JSON.stringify(byok.providers)}`
+);
+
+// defect #4 regression: provider-tagged catalog entries are filtered to the
+// providers that actually hold a key, and an unkeyed provider yields nothing.
+const taggedAegis = {
+  ...aegis,
+  async listModels() {
+    return {
+      models: [
+        { id: 'gpt-4o', provider: 'openai' },
+        { id: 'claude-3-5-sonnet', provider: 'anthropic' },
+        { id: 'untagged' },
+      ],
+    };
+  },
+};
+const taggedEngine = createLocalEngine({ aegis: taggedAegis, settings, ollama, providers });
+const filtered = await taggedEngine.listModels('byok');
+assert(
+  JSON.stringify(filtered.models.map((m) => m.id)) ===
+    JSON.stringify(['gpt-4o', 'untagged']),
+  `unkeyed provider filtered out, got ${JSON.stringify(filtered.models.map((m) => m.id))}`
+);
+
+const noKeyEngine = createLocalEngine({
+  aegis: { ...taggedAegis, async byokStatus() { return { keys: {} }; } },
+  settings,
+  ollama,
+  providers,
+});
+const none = await noKeyEngine.listModels('byok');
+assert(none.models.length === 0, `no BYOK key -> no models, got ${none.models.length}`);
+
+// A relay that cannot report key state falls back to the untagged catalog
+// rather than hiding every model.
+const offlineEngine = createLocalEngine({
+  aegis: { ...taggedAegis, async byokStatus() { throw new Error('relay down'); } },
+  settings,
+  ollama,
+  providers,
+});
+const offline = await offlineEngine.listModels('byok');
+assert(offline.models.length === 3, `key state unknown -> full catalog, got ${offline.models.length}`);
+assert(
+  JSON.stringify(offline.providers) === JSON.stringify([]),
+  'key state unknown -> empty providers list'
+);
 
 // chat routing per class
 await engine.chat({ class: 'aegis', prompt: 'hi', model: 'm1' }, () => {});

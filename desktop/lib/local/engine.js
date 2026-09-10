@@ -32,6 +32,26 @@ function normalizeCatalog(models) {
     .filter((m) => m && m.id);
 }
 
+/**
+ * The Aegis Cloud catalog (`/api/v1/models`) also lists internal routing
+ * aliases — per-provider variants like `openai-gpt4o-mini`/`anthropic-haiku`,
+ * and six pooled-brain tier ids (`{aegis,nexus}-brain[-smart|-neo]`) that all
+ * run the same worker pool on the same backend model. None of those are a
+ * human's model choice; picking between them put six near-duplicate "brain"
+ * entries in the desktop dropdown. Surface only the four platform models the
+ * user actually selects between, plus one collapsed "Nexus" entry standing
+ * in for whichever brain tier the pool advertises.
+ */
+const AEGIS_PLATFORM_MODELS = Object.freeze(['openai', 'anthropic', 'groq', 'gemini']);
+const NEXUS_BRAIN_ID = 'aegis-brain';
+const NEXUS_LABEL = 'Nexus (Aegis brain)';
+
+function filterAegisCatalog(models) {
+  const platform = models.filter((m) => AEGIS_PLATFORM_MODELS.includes(m.id));
+  const nexus = models.find((m) => m.id === NEXUS_BRAIN_ID);
+  return nexus ? [...platform, { ...nexus, label: NEXUS_LABEL }] : platform;
+}
+
 /** True when a BYOK-status entry says "a key is stored for this provider". */
 function keyedEntry(info) {
   if (info == null) return false;
@@ -92,7 +112,7 @@ function createLocalEngine({ aegis, settings, ollama, providers }) {
   async function listModels(cls) {
     if (cls === 'aegis') {
       const data = await aegis.listModels();
-      return { class: cls, models: normalizeCatalog(data && data.models) };
+      return { class: cls, models: filterAegisCatalog(normalizeCatalog(data && data.models)) };
     }
     if (cls === 'ollama') {
       const tags = await ollama.listTags();
