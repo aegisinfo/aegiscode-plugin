@@ -34,16 +34,34 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      # Force one cache location name across all three OSes (default paths
+      # differ: ~/.cache/electron on Linux, ~/Library/Caches on mac,
+      # %LOCALAPPDATA% on Windows) so a single actions/cache step below can
+      # key all of them the same way.
+      ELECTRON_CACHE: ${{ github.workspace }}/.cache/electron
+      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Cache Electron/electron-builder downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.ELECTRON_CACHE }}
+            ${{ env.ELECTRON_BUILDER_CACHE }}
+          key: ${{ runner.os }}-electron-${{ hashFiles('desktop/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-electron-
 
       - name: Install electron-builder (dev-only deps)
         working-directory: desktop
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: Stage shared client into the app (predist)
         working-directory: desktop
@@ -61,7 +79,18 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: aegis-desktop-${{ matrix.os }}
-          path: desktop/release/*
+          # Installers only — NOT the *-unpacked/ app-bundle trees or
+          # builder-debug.yml/builder-effective-config.yaml that also land in
+          # desktop/release/. A bare `release/*` glob was pulling those in too:
+          # hundreds of extra files inflating the upload, and (since the
+          # release job re-globs `artifacts/**`) they'd have landed as loose
+          # assets on the draft release itself.
+          path: |
+            desktop/release/*.AppImage
+            desktop/release/*.exe
+            desktop/release/*.msi
+            desktop/release/*.dmg
+            desktop/release/*.blockmap
           if-no-files-found: error
 
   release:
