@@ -65,6 +65,9 @@ const ELEMENT_IDS = {
   maxTokensAdaptive: 'max-tokens-adaptive',
   autonomousToggle: 'autonomous-toggle',
   autonomousToggleWrap: 'autonomous-toggle-wrap',
+  autonomousControls: 'autonomous-controls',
+  autonomousEffort: 'autonomous-effort',
+  autonomousWorkers: 'autonomous-workers',
   modelHint: 'model-hint',
   settingsList: 'settings-list',
   settingsHint: 'settings-hint',
@@ -113,6 +116,8 @@ const CLASS_KEY = 'aegis.class';
 const MAX_TOKENS_KEY = 'aegis.maxTokens';
 const MAX_TOKENS_ADAPTIVE_KEY = 'aegis.maxTokensAdaptive';
 const AUTONOMOUS_KEY = 'aegis.autonomous';
+const AUTONOMOUS_EFFORT_KEY = 'aegis.autonomousEffort';
+const AUTONOMOUS_WORKERS_KEY = 'aegis.autonomousWorkers';
 const EXPLORE_KEY = 'aegis.explore';
 // "Work autonomously" (pool_brain worker fan-out, aegis1 services/pool_brain.py)
 // is only billable/routable through the pooled AEGIS Cloud class.
@@ -237,6 +242,14 @@ function maxTokensAdaptive() {
 function autonomousEnabled() {
   const box = els.autonomousToggle;
   return Boolean(box && box.checked);
+}
+
+/** Effort/workers only matter (and only show) once autonomous mode is on for
+ * the pooled class — same gating as the toggle itself, plus its checked state. */
+function updateAutonomousControlsVisibility() {
+  if (!els.autonomousControls) return;
+  const wrapVisible = els.autonomousToggleWrap && !els.autonomousToggleWrap.hidden;
+  els.autonomousControls.hidden = !(wrapVisible && autonomousEnabled());
 }
 
 // ---------------------------------------------------------------- UI helpers
@@ -425,6 +438,15 @@ async function fetchMemory(query, limit) {
     const data = query
       ? await aegis.memorySearch(query, limit)
       : await aegis.memoryList(limit);
+    // The free-plan cap does NOT arrive as a rejection on this path: main.js
+    // detects it where `err.status`/`err.data` still exist (ipcRenderer.invoke
+    // carries only the message string across the process boundary) and resolves
+    // `{ entries: [], upgrade }` instead. Checking the resolved payload first
+    // is what makes the upgrade UI reachable at all — the catch below only
+    // covers a non-IPC caller that still throws the raw client error.
+    if (data && data.upgrade) {
+      return { entries: [], error: '', upgrade: data.upgrade };
+    }
     // `entries` is the real key. Keep the `results` fallback only so an older
     // backend that still sends it degrades to a working list, not an empty one.
     const raw = data && (data.entries || data.results);
@@ -452,9 +474,46 @@ async function fetchMemory(query, limit) {
   }
 }
 
+/** Shared free-plan-cap notice. Every surface that can hit the 402 funnels
+ *  through here so the wording and the target stay identical to the
+ *  inspector's block. The hint elements are bare <p>s, so the subscribe link
+ *  has to be a real child node — a plain text assignment would wipe it, and an
+ *  href left in text is not clickable. */
+function capNotice(el, upgrade, prefix, cta) {
+  if (!el) return;
+  const used = upgrade.used != null ? upgrade.used : '?';
+  const cap = upgrade.limit != null ? upgrade.limit : '?';
+  el.textContent =
+    `${prefix || 'free plan limit reached'} — ${used} of ${cap} sync sessions used. ` +
+    'Nothing was lost. ';
+  const a = document.createElement('a');
+  a.href = upgrade.url || 'https://aegiscloud.org/subscribe';
+  a.target = '_blank';
+  a.rel = 'noreferrer noopener';
+  a.textContent = cta || 'Upgrade to keep saving →';
+  el.appendChild(a);
+}
+
+/** The cap notice in the memory section's hint line. */
+function renderCapHint(upgrade, prefix) {
+  capNotice(els.memoryHint, upgrade, prefix);
+}
+
 /** Compact sidebar row: content only, with the source as a quiet prefix. */
-function renderMemoryResults(entries, error) {
+function renderMemoryResults(entries, error, upgrade) {
   els.memoryResults.innerHTML = '';
+  if (upgrade) {
+    const li = document.createElement('li');
+    li.className = 'empty mem-side-upgrade';
+    const a = document.createElement('a');
+    a.href = upgrade.url || 'https://aegiscloud.org/subscribe';
+    a.target = '_blank';
+    a.rel = 'noreferrer noopener';
+    a.textContent = 'Free plan limit reached — upgrade to read memory →';
+    li.appendChild(a);
+    els.memoryResults.appendChild(li);
+    return;
+  }
   if (error) {
     const li = document.createElement('li');
     li.className = 'empty';
@@ -487,10 +546,9 @@ function renderMemoryResults(entries, error) {
 async function searchMemory(query) {
   els.memoryHint.textContent = 'searching…';
   const res = await fetchMemory(query, MEMORY_SIDEBAR_LIMIT);
-  renderMemoryResults(res.entries, res.error);
-  els.memoryHint.textContent = res.upgrade
-    ? 'cloud memory needs an active plan — see the inspector for details.'
-    : res.error || '';
+  renderMemoryResults(res.entries, res.error, res.upgrade);
+  if (res.upgrade) renderCapHint(res.upgrade, 'cloud memory needs an active plan');
+  else els.memoryHint.textContent = res.error || '';
 }
 
 // ------------------------------------------------- memory inspector overlay
@@ -730,8 +788,11 @@ async function importMemory() {
   els.memoryImportBtn.disabled = true;
   els.memoryHint.textContent = 'scanning for other AI tool memory…';
   try {
-    // Phase 1 — dry run. Nothing leaves the machine until the user confirms,
-    // so show exactly what was found (and from which tool) first.
+    // Phase 1 — dry run. The scan is read-only against the foreign stores
+    // (client/foreign-memory.js never writes to them) and the user already
+    // asked for the import by clicking, so this runs unattended: no confirm
+    // prompt. The preview text left in the hint is the audit trail of what
+    // was found and from where, which is what the dialog used to be for.
     const preview = await aegis.memoryImport({ confirm: false });
     if (!preview || !preview.totals || !preview.totals.entries) {
       els.memoryHint.textContent = preview && preview.summary ? preview.summary : 'nothing found.';
@@ -740,19 +801,20 @@ async function importMemory() {
 
     const detail = (preview.sources || [])
       .filter((s) => s.present && s.count > 0)
-      .map((s) => `  • ${s.label}: ${s.count}`)
-      .join('\n');
-    const ok = window.confirm(
-      `Found ${preview.totals.entries} memory entries in other AI tools:\n\n${detail}\n\nSave them to AEGIS memory?`
-    );
-    if (!ok) {
-      els.memoryHint.textContent = 'import cancelled — nothing was saved.';
+      .map((s) => `${s.label}: ${s.count}`)
+      .join(' · ');
+
+    // Phase 2 — the confirmed write, immediately.
+    els.memoryHint.textContent = `importing ${preview.totals.entries} entries — ${detail}`;
+    const result = await aegis.memoryImport({ confirm: true, limit: 1000 });
+    if (result && result.upgrade) {
+      // The cap stopped the import part-way. Entries already in the cloud stay
+      // there and the rest are still in the foreign stores, so a later scan
+      // re-finds them — nothing to retry by hand, just show the plan page.
+      renderCapHint(result.upgrade, `import stopped after ${result.saved || 0} entries`);
+      await refreshMemoryViews();
       return;
     }
-
-    // Phase 2 — confirmed write.
-    els.memoryHint.textContent = 'importing…';
-    const result = await aegis.memoryImport({ confirm: true, limit: 1000 });
     const queued = result && result.queued ? ` (${result.queued} queued offline)` : '';
     els.memoryHint.textContent = result && result.ok
       ? `imported ${result.saved} entries${queued}.`
@@ -774,9 +836,19 @@ async function saveMemory() {
   if (els.memoryOverlaySave) els.memoryOverlaySave.disabled = true;
   els.memoryHint.textContent = 'saving…';
   try {
-    await aegis.memorySave({ text, source: 'aegis-desktop' });
+    const result = await aegis.memorySave({ text, source: 'aegis-desktop' });
+    if (result && result.upgrade) {
+      // Nothing was stored, and it is not queued either (main.js deliberately
+      // does not queue a cap — it would flush-fail forever). So keep the text
+      // in the box: clearing it here would destroy the note the user just
+      // tried to remember, while the hint claimed it was saved.
+      renderCapHint(result.upgrade, 'free plan limit reached');
+      await refreshMemoryViews();
+      return;
+    }
     box.value = '';
-    els.memoryHint.textContent = 'saved.';
+    els.memoryHint.textContent =
+      result && result.queued ? 'saved offline — syncs when AEGIS is reachable.' : 'saved.';
     await refreshMemoryViews();
   } catch (err) {
     els.memoryHint.textContent = `save failed: ${err && err.message ? err.message : err}`;
@@ -851,8 +923,11 @@ function hideWelcome() {
 }
 
 // `sessionId`, when given for an assistant message, renders a "copy" button
-// that puts the message text on the clipboard.
-function addMessage(role, text, meta, sessionId) {
+// that puts the message text on the clipboard. `toolLog` (assistant only) is
+// the turn's collected `{name, args, ok}` tool calls, rendered above the
+// answer text so the reply the user reads is followed by, not replaced by,
+// what the model actually did to produce it.
+function addMessage(role, text, meta, sessionId, toolLog) {
   hideWelcome();
   const row = document.createElement('div');
   row.className = `msg ${role}`;
@@ -867,6 +942,16 @@ function addMessage(role, text, meta, sessionId) {
   body.textContent = text;
 
   row.appendChild(who);
+  if (Array.isArray(toolLog) && toolLog.length) {
+    const toolsEl = document.createElement('div');
+    toolsEl.className = 'tool-activity';
+    for (const t of toolLog) {
+      const line = document.createElement('div');
+      line.textContent = toolActivityLabel(t);
+      toolsEl.appendChild(line);
+    }
+    row.appendChild(toolsEl);
+  }
   row.appendChild(body);
 
   if (meta) {
@@ -980,6 +1065,14 @@ async function spawnPath(card, spec) {
 
   let streamed = '';
   const onDelta = (chunk) => {
+    if (chunk && chunk.tool) {
+      if (card.classList.contains('pending')) {
+        card.classList.remove('pending');
+        state.textContent = 'streaming…';
+      }
+      appendToolActivity(card, chunk.tool, 'flow-tools', '.flow-body');
+      return;
+    }
     const delta =
       chunk && (typeof chunk.delta === 'string' ? chunk.delta : chunk.content);
     if (!delta) return;
@@ -1119,6 +1212,40 @@ function setBusy(busy, { cancellable } = {}) {
   }
 }
 
+/**
+ * One display line for a completed tool call (`onDelta`'s `{ tool: {name,
+ * args, ok} }` chunk — see desktop/lib/local/engine.js). Fires after the tool
+ * already ran, so this is a retrospective log line, not a live spinner.
+ */
+function toolActivityLabel(tool) {
+  const { name, args, ok } = tool || {};
+  const mark = ok === false ? '✗' : '✓';
+  const a = args || {};
+  if (name === 'task') {
+    const kind = a.subagent_type && a.subagent_type !== 'general' ? a.subagent_type : 'general';
+    return `${mark} task → ${a.description || 'subagent'} (${kind})`;
+  }
+  const detail = a.file_path || a.path || a.pattern || (a.command ? a.command.slice(0, 60) : '') || '';
+  return `${mark} ${name}${detail ? `(${detail})` : ''}`;
+}
+
+/** Append one tool-activity line to `row`, creating the container on first use. */
+function appendToolActivity(row, tool, containerClass, beforeSelector) {
+  if (!row) return;
+  let toolsEl = row.querySelector(`.${containerClass}`);
+  if (!toolsEl) {
+    toolsEl = document.createElement('div');
+    toolsEl.className = containerClass;
+    const before = beforeSelector ? row.querySelector(beforeSelector) : null;
+    if (before) row.insertBefore(toolsEl, before);
+    else row.appendChild(toolsEl);
+  }
+  const line = document.createElement('div');
+  line.textContent = toolActivityLabel(tool);
+  toolsEl.appendChild(line);
+  return toolsEl;
+}
+
 function classLabel(cls) {
   const found = classOptions.find((c) => c.class === cls);
   return found ? found.label : cls;
@@ -1199,6 +1326,7 @@ async function loadModels(cls) {
   if (els.autonomousToggleWrap) {
     els.autonomousToggleWrap.hidden = cls !== AUTONOMOUS_CLASS;
   }
+  updateAutonomousControlsVisibility();
 
   const custom = CUSTOM_CLASSES.has(cls);
   els.modelSelect.hidden = custom;
@@ -1532,7 +1660,17 @@ async function syncNow() {
   try {
     const pushResult = await sync.push();
     const pullResult = await sync.pull();
-    if (!pushResult.ok && !pullResult.ok) {
+    if (pushResult.upgrade || pullResult.upgrade) {
+      // The queued memory-save flush hit the free-plan cap. main.js stops the
+      // flush at that point rather than reporting a clean "synced" while every
+      // entry silently stays queued — point at the plan page instead.
+      capNotice(
+        els.sessionsHint,
+        pushResult.upgrade || pullResult.upgrade,
+        'queued memory is waiting on the free-plan cap',
+        'Upgrade to sync it →'
+      );
+    } else if (!pushResult.ok && !pullResult.ok) {
       els.sessionsHint.textContent =
         `sync failed: ${pushResult.reason || pullResult.reason || 'unknown error'}`;
     } else {
@@ -1607,6 +1745,11 @@ async function send() {
   const ceiling = applyMaxTokensClamp(model);
   const maxTokens = maxTokensAdaptive() ? ceiling : parseInt(els.maxTokens.value, 10) || 4096;
   const autonomous = cls === AUTONOMOUS_CLASS && autonomousEnabled();
+  // Only meaningful (and only sent) alongside `autonomous` — see
+  // aegis1 services/pool_brain.py parse_brain_request for the effort/workers
+  // clamping this feeds.
+  const effort = autonomous ? els.autonomousEffort.value : undefined;
+  const workers = autonomous ? parseInt(els.autonomousWorkers.value, 10) || undefined : undefined;
   const sessionId = newSessionId();
   pendingSessionId = sessionId;
 
@@ -1620,7 +1763,17 @@ async function send() {
   }
 
   let streamedText = '';
+  const toolLog = [];
   const onDelta = (chunk) => {
+    if (chunk && chunk.tool) {
+      toolLog.push(chunk.tool);
+      if (pendingEl) {
+        pendingEl.classList.remove('pending');
+        appendToolActivity(pendingEl, chunk.tool, 'tool-activity', '.body');
+        els.messages.scrollTop = els.messages.scrollHeight;
+      }
+      return;
+    }
     const delta =
       chunk && (typeof chunk.delta === 'string' ? chunk.delta : chunk.content);
     if (!delta) return;
@@ -1636,7 +1789,7 @@ async function send() {
     // All four classes route through the model: surface (the main process
     // decides transport — cloud client, ollama, or a direct provider).
     const data = await models.chat(
-      { class: cls, prompt, model, maxTokens, sessionId, autonomous },
+      { class: cls, prompt, model, maxTokens, sessionId, autonomous, effort, workers },
       onDelta
     );
 
@@ -1649,11 +1802,11 @@ async function send() {
     if (data && data.model) bits.push(`model: ${data.model}`);
     else if (model) bits.push(`model: ${model}`);
     bits.push(classLabel(cls));
-    if (autonomous) bits.push('autonomous');
+    if (autonomous) bits.push(`autonomous (${effort}, ${workers || 3}w)`);
     if (data && data.usage && data.usage.total_tokens != null) {
       bits.push(`tokens: ${data.usage.total_tokens}`);
     }
-    addMessage('assistant', text, bits.join(' · ') || undefined, sessionId);
+    addMessage('assistant', text, bits.join(' · ') || undefined, sessionId, toolLog);
 
     try {
       await sync.append(sessionId, { role: 'assistant', content: text });
@@ -1712,7 +1865,23 @@ async function init() {
   if (savedAutonomous === 'on') els.autonomousToggle.checked = true;
   els.autonomousToggle.addEventListener('change', () => {
     localStorage.setItem(AUTONOMOUS_KEY, els.autonomousToggle.checked ? 'on' : 'off');
+    updateAutonomousControlsVisibility();
   });
+
+  // Effort/worker count for the pool_brain fan-out (aegis1
+  // services/pool_brain.py parse_brain_request reads `effort`/`workers` off
+  // the request body) — opt-in per machine, remembered across restarts.
+  const savedEffort = localStorage.getItem(AUTONOMOUS_EFFORT_KEY);
+  if (savedEffort) els.autonomousEffort.value = savedEffort;
+  els.autonomousEffort.addEventListener('change', () => {
+    localStorage.setItem(AUTONOMOUS_EFFORT_KEY, els.autonomousEffort.value);
+  });
+  const savedWorkers = localStorage.getItem(AUTONOMOUS_WORKERS_KEY);
+  if (savedWorkers) els.autonomousWorkers.value = savedWorkers;
+  els.autonomousWorkers.addEventListener('change', () => {
+    localStorage.setItem(AUTONOMOUS_WORKERS_KEY, els.autonomousWorkers.value);
+  });
+  updateAutonomousControlsVisibility();
 
   // The discovery lane is opt-in per machine, remembered across restarts.
   const savedExplore = localStorage.getItem(EXPLORE_KEY);

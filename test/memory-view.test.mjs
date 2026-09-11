@@ -106,6 +106,13 @@ class FakeEl {
   allText() {
     return [this._text, ...this.children.map((c) => c.allText())].join(' ');
   }
+  /** Every descendant with this tagName. findAll() matches className, and a
+   *  rendered <a> carries none, so links need their own lookup. */
+  findTag(tag, out = []) {
+    if (this.tagName === String(tag).toUpperCase()) out.push(this);
+    for (const c of this.children) c.findTag(tag, out);
+    return out;
+  }
   /** Every descendant whose className contains `cls`. */
   findAll(cls, out = []) {
     if (this.className && String(this.className).split(/\s+/).includes(cls)) out.push(this);
@@ -147,15 +154,31 @@ const els = new Proxy(
 const memoryView = { entries: [], query: '', source: '', role: '', error: '', upgrade: null, loading: false };
 const aegis = {};
 const MEMORY_INSPECTOR_LIMIT = 50;
+const MEMORY_SIDEBAR_LIMIT = 20;
+// saveMemory()/importMemory() repaint both surfaces when they finish. The
+// refetch is not what is under test here, so it is stubbed out rather than
+// dragging the whole sidebar/session machinery into the harness.
+const refreshMemoryViews = async () => {};
 
-const NS = { document, window, els, memoryView, aegis, MEMORY_INSPECTOR_LIMIT };
+const NS = {
+  document,
+  window,
+  els,
+  memoryView,
+  aegis,
+  MEMORY_INSPECTOR_LIMIT,
+  MEMORY_SIDEBAR_LIMIT,
+  refreshMemoryViews,
+};
 const names = Object.keys(NS);
 const src = [
-  'const { document, window, els, memoryView, aegis, MEMORY_INSPECTOR_LIMIT } = __NS;',
+  'const { document, window, els, memoryView, aegis, MEMORY_INSPECTOR_LIMIT, MEMORY_SIDEBAR_LIMIT, refreshMemoryViews } = __NS;',
   extractFn(APP_SRC, 'overlayOpen'),
   extractFn(APP_SRC, 'relTime'),
   extractFn(APP_SRC, 'normalizeMemoryEntry'),
   extractFn(APP_SRC, 'fetchMemory'),
+  extractFn(APP_SRC, 'capNotice'),
+  extractFn(APP_SRC, 'renderCapHint'),
   extractFn(APP_SRC, 'renderMemoryResults'),
   extractFn(APP_SRC, 'memoryChip'),
   extractFn(APP_SRC, 'memoryCard'),
@@ -167,7 +190,9 @@ const src = [
   extractFn(APP_SRC, 'openMemoryOverlay'),
   extractFn(APP_SRC, 'closeMemoryOverlay'),
   extractFn(APP_SRC, 'activeMemoryEntry'),
-  'return { overlayOpen, relTime, normalizeMemoryEntry, fetchMemory, renderMemoryResults, memoryChip, memoryCard, memoryFacets, memoryMatches, renderMemoryChips, renderMemoryOverlay, loadMemoryOverlay, openMemoryOverlay, closeMemoryOverlay, activeMemoryEntry };',
+  extractFn(APP_SRC, 'saveMemory'),
+  extractFn(APP_SRC, 'importMemory'),
+  'return { overlayOpen, relTime, normalizeMemoryEntry, fetchMemory, capNotice, renderCapHint, renderMemoryResults, memoryChip, memoryCard, memoryFacets, memoryMatches, renderMemoryChips, renderMemoryOverlay, loadMemoryOverlay, openMemoryOverlay, closeMemoryOverlay, activeMemoryEntry, saveMemory, importMemory };',
 ].join('\n');
 
 // eslint-disable-next-line no-new-func
@@ -283,6 +308,112 @@ async function main() {
 
   api.renderMemoryResults([], 'search failed: HTTP 500');
   assert(side.children[0].textContent.includes('500'), 'an error is shown, not swallowed as "empty"');
+
+  // The cap does not actually reach the renderer as a rejection. main.js
+  // detects it where `err.status`/`err.data` still exist (ipcRenderer.invoke
+  // carries only the message string) and RESOLVES `{ entries: [], upgrade }`.
+  // Handling only the throw would leave the sidebar saying "no memory entries"
+  // for a capped account and make the upgrade UI unreachable in the shipped app.
+  const upgrade = { url: 'https://aegiscloud.org/subscribe', used: 3, limit: 3 };
+  aegis.memoryList = async () => ({ entries: [], upgrade });
+  const resolved = await api.fetchMemory('', 50);
+  assert(resolved.upgrade !== null, 'a resolved upgrade payload must set upgrade');
+  assert(resolved.upgrade.url.includes('subscribe'), 'the resolved upgrade carries its URL');
+  assert(resolved.error === '' && resolved.entries.length === 0, 'a resolved cap is not an error row');
+
+  // ...and the sidebar must render that as the way out, never as "empty".
+  api.renderMemoryResults([], '', upgrade);
+  assert(side.children.length === 1, 'the cap paints one row');
+  assert(side.findAll('mem-side-upgrade').length === 1, 'the cap row is labelled mem-side-upgrade');
+  assert(side.children[0].allText() !== 'no memory entries', 'a capped account is not told its memory is empty');
+  assert(side.children[0].findTag('a')[0].href.includes('subscribe'), 'the cap row links to the plan page');
+
+  // -------------------------------------------------- save / import paths
+  els.memoryOverlay.hidden = true;
+  els.memoryEntry.value = 'remember the dark mode pref';
+  aegis.memorySave = async () => ({
+    ok: false,
+    queued: 0,
+    saved: 0,
+    upgrade,
+    reason: 'free_session_limit_reached',
+  });
+  await api.saveMemory();
+  assert(els.memoryEntry.value === 'remember the dark mode pref',
+    'a capped save keeps the text in the box — clearing it would destroy the note');
+  assert(els.memoryHint.textContent.includes('saved') === false, 'a capped save must never claim "saved."');
+  assert(els.memoryHint.findTag('a').length === 1, 'the cap hint carries a real link, not bare text');
+  assert(els.memoryHint.findTag('a')[0].href.includes('subscribe'), 'the hint link goes to the plan page');
+
+  // The offline-queue fallback resolves { queued: true } — that is not the same
+  // as a plain save, so it is labelled (and it does clear the box).
+  aegis.memorySave = async () => ({ ok: true, queued: true, reason: 'no AEGIS key configured' });
+  els.memoryEntry.value = 'offline note';
+  await api.saveMemory();
+  assert(els.memoryEntry.value === '', 'a queued save clears the box');
+  assert(els.memoryHint.textContent.includes('offline'),
+    `a queued save is labelled offline, got "${els.memoryHint.textContent}"`);
+
+  aegis.memorySave = async () => ({ ok: true });
+  els.memoryEntry.value = 'plain note';
+  await api.saveMemory();
+  assert(els.memoryEntry.value === '', 'a successful save clears the box');
+  assert(els.memoryHint.textContent === 'saved.', 'a successful save says "saved."');
+
+  // The import FROM other AI tools is automatic: the scan is read-only against
+  // the foreign stores and the click is the consent, so it must complete with
+  // no confirm prompt. window.confirm throwing turns a regression into a hard
+  // failure rather than a hung test.
+  NS.window.confirm = () => {
+    throw new Error('import must not stop to ask for confirmation');
+  };
+  const importCalls = [];
+  aegis.memoryImport = async (opts) => {
+    importCalls.push(opts);
+    if (!opts.confirm) {
+      return {
+        summary: 'found 2 entries in 1 source',
+        totals: { entries: 2 },
+        sources: [{ id: 'claude-code', label: 'Claude Code', present: true, count: 2, skipped: 0 }],
+        ok: true,
+        dryRun: true,
+      };
+    }
+    return { ok: true, saved: 2, queued: 0, totals: { entries: 2 }, sources: [] };
+  };
+  await api.importMemory();
+  assert(importCalls.length === 2, `import runs dry run then write, got ${importCalls.length} calls`);
+  assert(importCalls[0].confirm === false && importCalls[1].confirm === true, 'the two phases stay dry-run-then-write');
+  assert(els.memoryHint.textContent.includes('imported 2'),
+    `a clean import reports what landed, got "${els.memoryHint.textContent}"`);
+  assert(els.memoryImportBtn.disabled === false, 'the import button is re-enabled afterwards');
+
+  // A scan that finds nothing must report, not fire an empty write.
+  aegis.memoryImport = async () => ({ summary: 'nothing found.', totals: { entries: 0 }, sources: [], ok: true });
+  await api.importMemory();
+  assert(els.memoryHint.textContent === 'nothing found.', 'an empty scan reports instead of writing');
+
+  // A cap part-way through the import: what was saved stays saved, the rest is
+  // still in the foreign stores, and the user is pointed at the plan page.
+  let capPhase = 0;
+  aegis.memoryImport = async (opts) => {
+    capPhase += 1;
+    if (!opts.confirm) {
+      return {
+        summary: 'found 3 entries in 1 source',
+        totals: { entries: 3 },
+        sources: [{ id: 'cursor', label: 'Cursor', present: true, count: 3, skipped: 0 }],
+        ok: true,
+        dryRun: true,
+      };
+    }
+    return { ok: false, saved: 1, queued: 0, upgrade, reason: 'free_session_limit_reached', totals: { entries: 3 }, sources: [] };
+  };
+  await api.importMemory();
+  assert(capPhase === 2, 'the capped import still ran both phases');
+  assert(els.memoryHint.findTag('a').length === 1, 'a capped import shows the plan link');
+  assert(els.memoryHint.textContent.includes('import stopped after 1'),
+    `the cap says how much landed, got "${els.memoryHint.textContent}"`);
 
   // ------------------------------------------------- card + facets
   const card = api.memoryCard(api.normalizeMemoryEntry(ROW));

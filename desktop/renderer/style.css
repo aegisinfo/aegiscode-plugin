@@ -660,6 +660,18 @@ button.mem-chip.on {
   color: var(--teal);
 }
 
+/* Sidebar counterpart of the inspector's .mem-upgrade card: the same cap
+   notice, sized for the narrow memory list instead of the full-width panel. */
+.mem-side-upgrade {
+  border-color: rgba(255, 145, 0, 0.45);
+}
+
+.mem-side-upgrade a {
+  color: var(--teal);
+  line-height: 1.5;
+  display: inline-block;
+}
+
 .memory-actions {
   border-top: 1px solid var(--border);
   padding: 12px 16px 14px;
@@ -827,6 +839,19 @@ body.memory-open {
   word-break: break-word;
 }
 
+/* Tool-call log for a turn (desktop/lib/local/engine.js onDelta's `tool`
+   events) — a retrospective list of what the model did, shown above the
+   answer text it produced. */
+.tool-activity {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text2);
+  margin-bottom: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .meta {
   font-size: 11px;
   color: var(--text2);
@@ -979,6 +1004,15 @@ body.memory-open {
   color: var(--teal);
 }
 
+.flow-tools {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text2);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .flow-body {
   flex: 1;
   font-family: var(--font-chat);
@@ -1056,6 +1090,30 @@ body.memory-open {
    selector specificity. Without this override, hiding the toggle via the
    `hidden` attribute (see loadModels() in app.js) has no visual effect. */
 #autonomous-toggle-wrap[hidden] {
+  display: none;
+}
+
+.autonomous-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text2);
+}
+
+.autonomous-controls select,
+.autonomous-controls input {
+  font-size: 11px;
+}
+
+.autonomous-controls input[type='number'] {
+  width: 48px;
+}
+
+/* Same author-stylesheet-beats-UA-stylesheet gotcha as #autonomous-toggle-wrap
+   above: `display: flex` here needs an explicit [hidden] override too. */
+.autonomous-controls[hidden] {
   display: none;
 }
 

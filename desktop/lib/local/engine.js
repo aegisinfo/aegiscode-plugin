@@ -234,6 +234,12 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
           aegis_memory: true,
           session: opts.sessionId,
           ...(opts.autonomous ? { brain: true } : {}),
+          // Only meaningful (and only sent) alongside `brain` — aegis1
+          // services/pool_brain.py parse_brain_request reads `effort`/
+          // `workers` straight off the body and clamps them itself
+          // (EFFORT_LEVELS / MAX_WORKERS), so no client-side validation here.
+          ...(opts.autonomous && opts.effort ? { effort: opts.effort } : {}),
+          ...(opts.autonomous && opts.workers ? { workers: opts.workers } : {}),
           // The pool forwards `tools` to the provider and returns tool_calls
           // (aegis1 app.py:7765 → provider, pool_brain synthesis keeps them).
           ...(opts.tools.length ? { tools: opts.tools } : {}),
@@ -325,7 +331,11 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
         throw err;
       }
 
-      const base = { cls, model, mode: payload && payload.mode, maxTokens, autonomous, sessionId, signal, onDelta, cfg, apiKey, toolChoice };
+      const base = {
+        cls, model, mode: payload && payload.mode, maxTokens, autonomous, sessionId, signal, onDelta, cfg, apiKey, toolChoice,
+        effort: payload && payload.effort,
+        workers: payload && payload.workers,
+      };
 
       let last = null;
       for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {

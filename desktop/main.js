@@ -305,11 +305,13 @@ function createIpcDispatch(aegis, dir, persistApiKey) {
       ),
 
     memorySearch: (payload) =>
-      aegis.memorySearch(payload && payload.query, payload && payload.limit),
+      normalizeMemoryRead(
+        aegis.memorySearch(payload && payload.query, payload && payload.limit)
+      ),
     memorySave: (payload) =>
       saveMemoryWithQueue(aegis, dir, payload && payload.entry),
     memoryList: (payload) =>
-      aegis.memoryList(payload && payload.limit),
+      normalizeMemoryRead(aegis.memoryList(payload && payload.limit)),
 
     verifyToken: (payload) =>
       aegis.verifyToken(payload && payload.token),
@@ -441,19 +443,31 @@ function createSyncDispatch(sessions, dir, aegis) {
    *  (e.g. one bad entry among several) stay queued for the next attempt. */
   async function flushMemoryQueue() {
     const queued = memoryQueue.listQueued(dir);
-    if (!queued.length) return { flushed: 0 };
+    if (!queued.length) return { flushed: 0, remaining: 0, upgrade: null };
     const remaining = [];
     let flushed = 0;
-    for (const entry of queued) {
+    let upgrade = null;
+    for (let i = 0; i < queued.length; i += 1) {
       try {
-        await aegis.memorySave(entry);
+        await aegis.memorySave(queued[i]);
         flushed += 1;
-      } catch {
-        remaining.push(entry);
+      } catch (err) {
+        const capped = upgradeInfo(err);
+        if (capped) {
+          // A 402 is not "try again later": every remaining entry would fail
+          // the same way, the queue would never drain, and the paywall would
+          // stay invisible behind a "synced" toast. Stop, keep the rest
+          // queued for after the upgrade, and surface the cap to the renderer.
+          upgrade = capped;
+          remaining.push(...queued.slice(i));
+          break;
+        }
+        // Any other failure (offline / transient) keeps the entry queued.
+        remaining.push(queued[i]);
       }
     }
     memoryQueue.save(dir, remaining);
-    return { flushed, remaining: remaining.length };
+    return { flushed, remaining: remaining.length, upgrade };
   }
 
   async function push() {
@@ -463,7 +477,13 @@ function createSyncDispatch(sessions, dir, aegis) {
     }
     const memoryFlush = await flushMemoryQueue();
     if (!pending.length) {
-      return { ok: true, queued: 0, pushed: 0, memoryFlushed: memoryFlush.flushed };
+      return {
+        ok: true,
+        queued: 0,
+        pushed: 0,
+        memoryFlushed: memoryFlush.flushed,
+        upgrade: memoryFlush.upgrade,
+      };
     }
 
     let pushed = 0;
@@ -485,9 +505,21 @@ function createSyncDispatch(sessions, dir, aegis) {
     const queued = sessions.listPending(dir).length;
     if (pushed) lastSyncAt = Date.now();
     if (pushed === 0 && lastError) {
-      return { ok: false, queued, reason: lastError.message || 'push failed', memoryFlushed: memoryFlush.flushed };
+      return {
+        ok: false,
+        queued,
+        reason: lastError.message || 'push failed',
+        memoryFlushed: memoryFlush.flushed,
+        upgrade: memoryFlush.upgrade,
+      };
     }
-    return { ok: true, queued, pushed, memoryFlushed: memoryFlush.flushed };
+    return {
+      ok: true,
+      queued,
+      pushed,
+      memoryFlushed: memoryFlush.flushed,
+      upgrade: memoryFlush.upgrade,
+    };
   }
 
   async function pull() {

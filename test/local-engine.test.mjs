@@ -79,6 +79,31 @@ assert(calls[calls.length - 1][0] === 'openai', 'custom routes to openaiCompatib
 await engine.chat({ class: 'anthropic', prompt: 'hi', model: 'x' }, () => {});
 assert(calls[calls.length - 1][0] === 'anthropic', 'anthropic routes to anthropicMessages');
 
+// autonomous + effort/workers reach aegis1's pool_brain via `extra`
+// (services/pool_brain.py parse_brain_request reads body.effort/body.workers)
+await engine.chat({ class: 'aegis', prompt: 'hi', model: 'm1', autonomous: true, effort: 'medium', workers: 5 }, () => {});
+{
+  const [, args] = calls[calls.length - 1];
+  assert(args.extra.brain === true, 'autonomous turn sets extra.brain');
+  assert(args.extra.effort === 'medium', `effort forwarded: ${JSON.stringify(args.extra)}`);
+  assert(args.extra.workers === 5, `workers forwarded: ${JSON.stringify(args.extra)}`);
+}
+
+// effort/workers are dropped when NOT autonomous — never sent bare, and never
+// sent when autonomous is on but the value itself is falsy/omitted.
+await engine.chat({ class: 'aegis', prompt: 'hi', model: 'm1', effort: 'high', workers: 4 }, () => {});
+{
+  const [, args] = calls[calls.length - 1];
+  assert(!('brain' in args.extra), 'non-autonomous turn sets no brain flag');
+  assert(!('effort' in args.extra) && !('workers' in args.extra), `effort/workers withheld without autonomous: ${JSON.stringify(args.extra)}`);
+}
+await engine.chat({ class: 'aegis', prompt: 'hi', model: 'm1', autonomous: true }, () => {});
+{
+  const [, args] = calls[calls.length - 1];
+  assert(args.extra.brain === true
+    && !('effort' in args.extra) && !('workers' in args.extra), `autonomous with no effort/workers omits both: ${JSON.stringify(args.extra)}`);
+}
+
 // cancel: unknown id is a no-op; aborting an in-flight stream works
 assert(engine.cancel('nope').ok === false, 'unknown session cancel -> false');
 
