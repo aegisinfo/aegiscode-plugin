@@ -10,7 +10,7 @@ one backend, and you can use any of them without the others.
 | I want to… | Use | Install |
 |---|---|---|
 | Get AEGIS tools inside Claude Code | [Claude Code plugin](#claude-code-plugin) | one-line installer |
-| Use a standalone desktop AI app | [AEGIS Desktop](#aegis-desktop-electron) | build from source |
+| Use a standalone desktop AI app | [AEGIS Desktop](#aegis-desktop-electron) | `npm i -g aegis-desktop` |
 | Embed the transport in my own software | [Shared thin client](#shared-thin-client) | copy `client/aegis.js` |
 
 Get a free key at **https://aegiscloud.org**.
@@ -118,6 +118,13 @@ the model can read, write, and edit files, list directories, glob, grep, run
 shell commands in a persistent session, and delegate whole sub-tasks to
 subagents. It does **not** require Claude Code.
 
+Published to npm as [`aegis-desktop`](https://www.npmjs.com/package/aegis-desktop)
+(`npm i -g aegis-desktop && aegis`), with its own dedicated source repo at
+[aegiscloud/aegiscode-desktop](https://github.com/aegiscloud/aegiscode-desktop)
+(a `git subtree split` of this `desktop/` directory) — this section stays the
+canonical build/architecture reference; the other repo carries the install
+guide and screenshot.
+
 | Tool | What it does |
 |---|---|
 | `readFile` · `writeFile` · `editFile` | File access scoped to the working directory |
@@ -140,6 +147,13 @@ Conversations persist locally (`sessions.json`) and sync to AEGIS cloud memory
 via a pending queue that flushes on each "Sync now" or heartbeat retry. The
 **remember** button on any assistant reply pins that message to cross-machine
 memory — queued locally if you're offline.
+
+### Install
+
+```bash
+npm install -g aegis-desktop
+aegis
+```
 
 ### Run from source
 
