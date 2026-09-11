@@ -234,4 +234,70 @@ const dirtyReport = scan({ home: dirty });
 assert(dirtyReport.entries.length === 1, 'a control-char-laced entry survives');
 assert(dirtyReport.entries[0].content === 'alpha beta gamma delta epsilon zeta', 'control chars are scrubbed before save');
 
+// --- platform layout resolution -------------------------------------------
+// The roots themselves are probed with isDir, so a Windows-only layout is
+// unobservable on the Linux CI host. These tests drive the resolver directly
+// and then prove the resolved roots reach listSources/scan.
+assert(_internal.platformOf('win32') === 'win32', 'platformOf honours an explicit override');
+assert(_internal.platformOf(undefined) === process.platform, 'platformOf falls back to the host platform');
+assert(_internal.platformOf('') === process.platform, 'platformOf treats an empty string as unset');
+
+assert(_internal.roamingDir('/home/u', 'linux') === null, 'roamingDir is null off Windows');
+assert(_internal.localDir('/home/u', 'darwin') === null, 'localDir is null off Windows');
+assert(_internal.macSupportDir('/home/u', 'win32') === null, 'macSupportDir is null off macOS');
+assert(
+  _internal.macSupportDir('/home/u', 'darwin') === join('/home/u', 'Library', 'Application Support'),
+  'macSupportDir resolves ~/Library/Application Support'
+);
+
+const winHome = mkdtempSync(join(tmpdir(), 'aegis-win-home-'));
+mkdirSync(join(winHome, 'AppData', 'Roaming', 'goose'), { recursive: true });
+writeFileSync(
+  join(winHome, 'AppData', 'Roaming', 'goose', 'notes.md'),
+  'Goose keeps its notes under %APPDATA% on Windows, a tree the POSIX-only scanner never probed.'
+);
+
+const winRoots = _internal.appRoots(winHome, 'win32', 'goose', { data: true });
+assert(winRoots.some((r) => r.includes(join('AppData', 'Roaming'))), 'win32 roots include %APPDATA%');
+assert(winRoots.some((r) => r.includes(join('AppData', 'Local'))), 'win32 roots include %LOCALAPPDATA%');
+assert(winRoots.some((r) => r.endsWith(join('.config', 'goose'))), 'win32 roots keep the POSIX ~/.config candidate');
+
+const linRoots = _internal.appRoots(winHome, 'linux', 'goose', { data: true });
+assert(!linRoots.some((r) => r.includes('AppData')), 'linux roots never contain a Windows path');
+
+const macRoots = _internal.appRoots('/Users/u', 'darwin', 'Claude', { macSupport: true });
+assert(
+  macRoots.some((r) => r.endsWith(join('Library', 'Application Support', 'Claude'))),
+  'darwin roots include ~/Library/Application Support when requested'
+);
+assert(macRoots.some((r) => r.endsWith(join('.config', 'Claude'))), 'darwin roots keep the POSIX layout (additive, never replacing)');
+assert(
+  !_internal.appRoots('/Users/u', 'darwin', 'goose', { data: true }).some((r) => r.includes('Application Support')),
+  'macSupport is opt-in per source, not applied globally'
+);
+
+const winListing = listSources(winHome, 'win32');
+assert(winListing.find((s) => s.id === 'goose').present === true, 'listSources resolves the Windows layout');
+assert(listSources(winHome, 'linux').find((s) => s.id === 'goose').present === false, 'the same home is invisible to the linux layout');
+
+const winReport = scan({ home: winHome, platform: 'win32' });
+const winGoose = winReport.sources.find((s) => s.id === 'goose');
+assert(winGoose.present === true, 'scan detects the Windows store when platform is win32');
+assert(winGoose.count > 0, 'the Windows store yields importable entries');
+assert(winReport.entries.some((e) => e.source === 'goose'), 'entries are attributed to the Windows source');
+
+const linReport = scan({ home: winHome, platform: 'linux' });
+assert(linReport.sources.find((s) => s.id === 'goose').present === false, 'the Windows store is invisible to the linux layout');
+assert(linReport.entries.some((e) => e.source === 'goose') === false, 'and contributes no entries there');
+
+const bareWin = mkdtempSync(join(tmpdir(), 'aegis-empty-win-'));
+assert(
+  listSources(bareWin, 'win32').every((s) => s.present === false),
+  'an empty Windows home still reports no sources present'
+);
+assert(
+  listSources(bareWin, 'darwin').every((s) => s.present === false),
+  'an empty macOS home still reports no sources present'
+);
+
 console.log(`foreign-memory tests passed (${passed} assertions)`);

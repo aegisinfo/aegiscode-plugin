@@ -1,5 +1,5 @@
 # electron-builder config for the AEGIS Desktop thin host (plan Phase D3).
-# Targets: Windows NSIS .exe, macOS .dmg, Linux AppImage.
+# Targets: Windows NSIS .exe + MSI, macOS .dmg, Linux AppImage.
 #
 # Hard boundary: the packaged app contains ONLY the thin shell + the staged
 # copy of the shared transport. electron-builder cannot reach outside the app
@@ -38,9 +38,21 @@ mac:
   # unsigned-but-buildable on mac too.
 
 win:
-  target: nsis
+  # Both Windows targets: NSIS .exe (interactive install) and MSI (managed /
+  # group-policy deployment). electron-builder builds the MSI with its bundled
+  # WiX toolset on the windows-latest runner — no extra setup step.
+  target:
+    - nsis
+    - msi
   # Windows Authenticode signing runs via SignPath Foundation once the grant
   # lands (see SIGNING.md) — wired into .github/workflows/release.yml.
+
+msi:
+  # Per-machine install (Program Files), unlike NSIS which defaults to
+  # perMachine=false. MSI is the target for managed deployment, so the
+  # machine-wide scope is the point; oneClick stays off to show the UI.
+  oneClick: false
+  perMachine: true
 
 linux:
   target: AppImage

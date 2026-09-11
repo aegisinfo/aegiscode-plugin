@@ -74,6 +74,73 @@ function homeDir(home) {
   return home || os.homedir();
 }
 
+// --- per-platform root layout ---------------------------------------------
+// Every source below declares its roots through these helpers instead of
+// hardcoding `path.join(home, '.config', name)`. That hardcoding was a
+// cross-platform bug, not a style choice: `~/.config` is the XDG convention on
+// Linux only. On Windows the equivalent trees are `%APPDATA%` (Roaming) and
+// `%LOCALAPPDATA%` (Local), and several of these tools use
+// `~/Library/Application Support` on macOS. Resolving only `~/.config` meant
+// the entire scan silently reported `present: false` for every source on a
+// Windows install — the app packaged and ran fine, it simply found nothing to
+// import, with no error to explain why.
+//
+// `platform` is a parameter (not a bare `process.platform` read) so the
+// Windows and macOS layouts stay unit-testable from Linux CI.
+
+function platformOf(platform) {
+  return platform || process.platform;
+}
+
+/** Roaming app data (`%APPDATA%`), or null off Windows. */
+function roamingDir(home, plat) {
+  if (plat !== 'win32') return null;
+  // A redirected profile can move %APPDATA% off the home dir, so prefer the
+  // real env var — but only when scanning the real home. A caller-supplied
+  // home (tests, overrides) is the source of truth.
+  if (home === os.homedir() && process.env.APPDATA) return process.env.APPDATA;
+  return path.join(home, 'AppData', 'Roaming');
+}
+
+/** Local app data / cache (`%LOCALAPPDATA%`), or null off Windows. */
+function localDir(home, plat) {
+  if (plat !== 'win32') return null;
+  if (home === os.homedir() && process.env.LOCALAPPDATA) return process.env.LOCALAPPDATA;
+  return path.join(home, 'AppData', 'Local');
+}
+
+/** macOS `~/Library/Application Support`, or null elsewhere. */
+function macSupportDir(home, plat) {
+  return plat === 'darwin' ? path.join(home, 'Library', 'Application Support') : null;
+}
+
+/**
+ * Candidate roots for one app, across all three platform layouts.
+ *
+ * Deliberately additive: the POSIX paths are always included, so a source can
+ * never *lose* a root it used to match, and the Windows/macOS alternates are
+ * appended only when they apply. `present` is still a probe of existing
+ * directories, so extra candidates that don't exist change nothing.
+ *
+ * @param {boolean} [opts.config]     include `<config>/<name>` layouts
+ * @param {boolean} [opts.data]       include `<data>/<name>` (XDG share) layouts
+ * @param {boolean} [opts.macSupport] include `~/Library/Application Support/<name>`
+ */
+function appRoots(home, plat, name, { config = true, data = false, macSupport = false } = {}) {
+  const roots = [];
+  if (config) roots.push(path.join(home, '.config', name)); // linux (and XDG-following mac apps)
+  if (data) roots.push(path.join(home, '.local', 'share', name)); // linux XDG data
+  const roaming = roamingDir(home, plat);
+  if (roaming && config) roots.push(path.join(roaming, name)); // windows %APPDATA%
+  const local = localDir(home, plat);
+  if (local) roots.push(path.join(local, name)); // windows %LOCALAPPDATA%
+  if (macSupport) {
+    const support = macSupportDir(home, plat);
+    if (support) roots.push(path.join(support, name)); // macOS
+  }
+  return roots;
+}
+
 /** Collapse whitespace, strip control chars, trim. */
 function cleanText(value) {
   if (typeof value !== 'string') return '';
@@ -335,7 +402,7 @@ const SOURCES = [
     id: 'goose',
     label: 'Goose',
     verified: false,
-    roots: (home) => [path.join(home, '.config', 'goose'), path.join(home, '.local', 'share', 'goose')],
+    roots: (home, plat) => appRoots(home, plat, 'goose', { data: true }),
     files: () => [],
     extract: { '.jsonl': extractGenericJsonl, '.json': extractJsonMemory, '.md': extractMarkdown },
   },
@@ -343,10 +410,7 @@ const SOURCES = [
     id: 'opencode',
     label: 'opencode',
     verified: false,
-    roots: (home) => [
-      path.join(home, '.local', 'share', 'opencode'),
-      path.join(home, '.config', 'opencode'),
-    ],
+    roots: (home, plat) => appRoots(home, plat, 'opencode', { data: true }),
     files: () => [],
     extract: { '.json': extractJsonMemory, '.jsonl': extractGenericJsonl, '.md': extractMarkdown },
   },
@@ -354,7 +418,14 @@ const SOURCES = [
     id: 'windsurf',
     label: 'Windsurf / Codeium',
     verified: false,
-    roots: (home) => [path.join(home, '.windsurf'), path.join(home, '.codeium')],
+    // Home-relative dot-dirs on every platform; macOS additionally stores the
+    // app under Application Support.
+    roots: (home, plat) => [
+      path.join(home, '.windsurf'),
+      path.join(home, '.codeium'),
+      ...appRoots(home, plat, 'Windsurf', { config: false, macSupport: true }),
+      ...appRoots(home, plat, 'Codeium', { config: false, macSupport: true }),
+    ],
     files: () => [],
     extract: { '.json': extractJsonMemory, '.jsonl': extractGenericJsonl, '.md': extractMarkdown },
   },
@@ -362,7 +433,9 @@ const SOURCES = [
     id: 'zed',
     label: 'Zed',
     verified: false,
-    roots: (home) => [path.join(home, '.config', 'zed')],
+    // Zed follows XDG on Linux, uses %APPDATA% on Windows, and keeps
+    // ~/.config/zed on macOS too — `config: true` covers all three.
+    roots: (home, plat) => appRoots(home, plat, 'zed'),
     files: () => [],
     extract: { '.json': extractJsonMemory, '.jsonl': extractGenericJsonl },
   },
@@ -370,7 +443,7 @@ const SOURCES = [
     id: 'claude-desktop',
     label: 'Claude Desktop app',
     verified: false,
-    roots: (home) => [path.join(home, '.config', 'Claude')],
+    roots: (home, plat) => appRoots(home, plat, 'Claude', { macSupport: true }),
     files: () => [],
     extract: { '.json': extractJsonMemory, '.jsonl': extractClaudeJsonl, '.md': extractMarkdown },
   },
@@ -402,10 +475,11 @@ function sourceById(id) {
  * Which sources exist on this machine. Cheap (stat only) — safe to call from a
  * UI before the user commits to an import.
  */
-function listSources(home) {
+function listSources(home, platform) {
   const h = homeDir(home);
+  const plat = platformOf(platform);
   return SOURCES.map((source) => {
-    const roots = source.roots(h).filter(isDir);
+    const roots = source.roots(h, plat).filter(isDir);
     const files = (source.files ? source.files(h) : []).filter(isFile);
     return {
       id: source.id,
@@ -427,10 +501,12 @@ function listSources(home) {
  * @param {number} [opts.minChars]    drop entries shorter than this
  * @param {number} [opts.maxChars]    truncate entries longer than this
  * @param {number} [opts.maxEntriesPerSource]
+ * @param {string} [opts.platform]    override platform (tests); defaults to process.platform
  * @returns {{entries: Array, sources: Array, totals: object, scannedAt: string}}
  */
 function scan(opts = {}) {
   const home = homeDir(opts.home);
+  const plat = platformOf(opts.platform);
   const minChars = opts.minChars != null ? opts.minChars : DEFAULTS.minChars;
   const maxChars = opts.maxChars != null ? opts.maxChars : DEFAULTS.maxChars;
   const perSource = opts.maxEntriesPerSource != null ? opts.maxEntriesPerSource : DEFAULTS.maxEntriesPerSource;
@@ -444,7 +520,7 @@ function scan(opts = {}) {
   for (const source of SOURCES) {
     if (wanted && !wanted.has(source.id)) continue;
 
-    const roots = source.roots(home).filter(isDir);
+    const roots = source.roots(home, plat).filter(isDir);
     const looseFiles = (source.files ? source.files(home) : []).filter(isFile);
     const present = roots.length > 0 || looseFiles.length > 0;
 
@@ -569,5 +645,22 @@ module.exports = {
   stableId,
   sourceById,
   // exported for tests
-  _internal: { walkFiles, extractClaudeJsonl, extractGenericJsonl, extractJsonMemory, extractMarkdown, cleanText, isNoise, suffixOf },
+  _internal: {
+    walkFiles,
+    extractClaudeJsonl,
+    extractGenericJsonl,
+    extractJsonMemory,
+    extractMarkdown,
+    cleanText,
+    isNoise,
+    suffixOf,
+    // Platform-layout resolution: exported so the Windows/macOS branch can be
+    // exercised from a Linux CI runner (the roots themselves are probed with
+    // isDir, so they are unobservable on the host that lacks them).
+    platformOf,
+    roamingDir,
+    localDir,
+    macSupportDir,
+    appRoots,
+  },
 };

@@ -1,8 +1,11 @@
 # Phase D3 — packaging + GitHub Release.
 #
-# On every v* tag push: build the thin Electron host for Windows (NSIS .exe),
-# macOS (.dmg) and Linux (AppImage), stage the shared client into the app via
-# predist, then attach all artifacts to a draft GitHub Release.
+# On every v* tag push: build the thin Electron host for Windows (NSIS .exe +
+# MSI), macOS (.dmg) and Linux (AppImage), stage the shared client into the app
+# via predist, then attach all artifacts to a draft GitHub Release.
+#
+# Also runnable on demand (workflow_dispatch) so a packaging change can be
+# smoke-tested without cutting a release tag; the release job is skipped then.
 #
 # Signing: Windows Authenticode via SignPath Foundation is an external grant —
 # once approved, add the SignPath GitHub Action to the windows job (see
@@ -14,6 +17,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -63,6 +67,9 @@ jobs:
   release:
     name: attach artifacts to GitHub Release
     needs: package
+    # A manual dispatch has no tag to attach to, so it builds and uploads
+    # workflow artifacts only.
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

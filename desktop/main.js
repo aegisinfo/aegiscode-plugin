@@ -53,7 +53,16 @@ const ollama = require('./lib/local/ollama.js');
 const providers = require('./lib/local/providers.js');
 const sessionStore = require('./lib/sync/sessions.js');
 const memoryQueue = require('./lib/sync/memory-queue.js');
-const foreignMemory = require('./lib/foreign-memory.js');
+// Foreign-memory scanner (shared with client/foreign-memory.js). Same
+// resolution rule as the transport above: the canonical file inside the repo,
+// the predist-staged copy in a packaged app. Never forked logic — so it needs
+// no wrapper module of its own.
+let foreignMemory;
+try {
+  foreignMemory = require('../client/foreign-memory.js');
+} catch {
+  foreignMemory = require('./vendor/foreign-memory.js');
+}
 // Builtin tool executor for the agent loop (client half of aegiscodex-dev's
 // tool calling). MAIN-process only: it is reachable from the renderer solely
 // through the whitelisted `tools:` IPC surface registered below — see the
