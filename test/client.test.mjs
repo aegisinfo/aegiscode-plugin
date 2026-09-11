@@ -67,18 +67,27 @@ try {
   assert(body.provider === 'openai', 'byok defaults provider to openai');
   assert(body.max_tokens === 4096, 'byok default max_tokens 4096');
 
-  // 5. Full-history `messages` supersedes prompt/system shorthand.
+  // 5. A full-history `messages` array is preserved, a second `system` is not
+  // duplicated, and a non-empty `prompt` is appended as the live user turn.
+  // (Superseding the history with the prompt alone used to drop every prior
+  // message — including the system turn — on this transport.)
   await client.chatCompletion({
     messages: [
       { role: 'system', content: 'be brief' },
       { role: 'user', content: 'hello' },
     ],
     system: 'ignored',
-    prompt: 'ignored',
+    prompt: 'live turn',
   });
   body = JSON.parse(captured[captured.length - 1].opts.body);
-  assert(body.messages.length === 2, 'explicit messages array wins');
-  assert(body.messages[0].role === 'system', 'system turn preserved');
+  assert(body.messages.length === 3, 'history is preserved and the prompt appended');
+  assert(body.messages[0].role === 'system' && body.messages[0].content === 'be brief', 'the original system turn is kept');
+  assert(
+    body.messages.filter((m) => m.role === 'system').length === 1,
+    'a second system turn is never added to an explicit history'
+  );
+  assert(body.messages[1].content === 'hello', 'the history turns survive in order');
+  assert(body.messages[2].role === 'user' && body.messages[2].content === 'live turn', 'the prompt becomes the final user turn');
 
   // 6. listModels() passes server model metadata through unmodified — the
   // desktop output-ceiling picker (plan P2 §6.3) depends on `max_output` and

@@ -51,6 +51,8 @@ async function chat({
   prompt,
   maxTokens = 4096,
   temperature,
+  tools,
+  toolChoice,
   signal,
   onDelta,
 } = {}) {
@@ -63,6 +65,10 @@ async function chat({
     prompt,
     maxTokens,
     temperature,
+    // Ollama's OpenAI-compatible shim accepts `tools` on current builds; the
+    // engine retries without them once if an older daemon 400s.
+    tools,
+    toolChoice,
     signal,
     onDelta,
   });

@@ -238,12 +238,26 @@ function createClient(opts = {}) {
   }
 
   /** Build the OpenAI-style messages array from either a full history or the
-   *  single-shot { system, prompt } shorthand. */
+   *  single-shot { system, prompt } shorthand.
+   *
+   *  The history is no longer returned verbatim when present: doing so dropped
+   *  `system` entirely, so the agent loop's ported persona disappeared on this
+   *  transport alone. The system turn is prepended unless the caller already
+   *  supplied one, and a non-empty `prompt` is appended as a final user turn
+   *  (skipped when the history already ends with that same turn). */
   function buildMessages(messages, system, prompt) {
-    if (Array.isArray(messages) && messages.length) return messages;
+    const history = Array.isArray(messages) ? messages.filter(Boolean) : [];
     const out = [];
-    if (system) out.push({ role: 'system', content: system });
-    out.push({ role: 'user', content: prompt || '' });
+    if (system && !history.some((m) => m && m.role === 'system')) {
+      out.push({ role: 'system', content: system });
+    }
+    out.push(...history);
+    if (prompt != null && prompt !== '') {
+      const last = out[out.length - 1];
+      if (!(last && last.role === 'user' && last.content === prompt)) {
+        out.push({ role: 'user', content: prompt });
+      }
+    }
     return out;
   }
 
@@ -388,6 +402,13 @@ function createClient(opts = {}) {
     let resultModel = body.model;
     let usage = null;
     let sseError = '';
+    // Tool-call fragments, keyed by the provider's index. The pool forwards
+    // the provider's own `delta.tool_calls` chunks verbatim when the caller
+    // sent `tools`, so the shared client has to reassemble them the same way
+    // the non-streaming branch does — otherwise a tool-calling turn would
+    // resolve with text only and the caller could never see the calls.
+    const toolCallsByIndex = new Map();
+    let finishReason = null;
 
     // Idle watchdog: if the server holds the connection open without ever
     // sending another byte (a stuck upstream call, a proxy that swallows the
@@ -447,6 +468,7 @@ function createClient(opts = {}) {
         if (json.model) resultModel = json.model;
         if (json.usage) usage = json.usage;
         const choice = json.choices && json.choices[0];
+        if (choice && choice.finish_reason) finishReason = choice.finish_reason;
         const delta =
           (choice &&
             ((choice.delta && choice.delta.content) ||
@@ -455,6 +477,25 @@ function createClient(opts = {}) {
         if (delta) {
           fullText += delta;
           onStream({ delta });
+        }
+        const fragments =
+          (choice && choice.delta && choice.delta.tool_calls) ||
+          (choice && choice.message && choice.message.tool_calls);
+        if (Array.isArray(fragments)) {
+          for (const tc of fragments) {
+            const idx = tc.index == null ? 0 : tc.index;
+            const cur = toolCallsByIndex.get(idx) || {
+              id: '',
+              type: 'function',
+              function: { name: '', arguments: '' },
+            };
+            if (tc.id) cur.id = tc.id;
+            if (tc.type) cur.type = tc.type;
+            const fn = tc.function || {};
+            if (fn.name) cur.function.name = fn.name;
+            if (typeof fn.arguments === 'string') cur.function.arguments += fn.arguments;
+            toolCallsByIndex.set(idx, cur);
+          }
         }
       }
     }
@@ -465,9 +506,19 @@ function createClient(opts = {}) {
       throw err;
     }
 
+    // An id-less fragment stream still yields usable calls, but the caller
+    // needs *an* id to pair results back, so synthesize one.
+    const toolCalls = [...toolCallsByIndex.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([idx, c]) => ({ ...c, id: c.id || `call_${idx}` }));
+
+    const message = { content: fullText };
+    if (toolCalls.length) message.tool_calls = toolCalls;
     const result = {
       model: resultModel,
-      choices: [{ message: { content: fullText } }],
+      choices: [
+        { message, ...(finishReason ? { finish_reason: finishReason } : {}) },
+      ],
     };
     if (usage) result.usage = usage;
     return result;

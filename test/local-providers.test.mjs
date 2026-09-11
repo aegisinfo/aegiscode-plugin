@@ -44,6 +44,55 @@ assert(oa[1].role === 'user' && oa[1].content === 'hi', 'OpenAI user turn');
 const an = buildAnthropicMessages([{ role: 'user', content: 'hi' }], null);
 assert(an.length === 1 && an[0].role === 'user', 'Anthropic has no system turn');
 
+// ---- OpenAI-shaped tool traffic must become Anthropic content blocks ------
+//
+// Anthropic has no `tool` role and no `tool_calls` field. Passing the OpenAI
+// agent-loop history through verbatim was a hard 400 on any real tool
+// round-trip via the custom/BYOK 'anthropic' class.
+{
+  const turns = buildAnthropicMessages(
+    [
+      { role: 'user', content: 'read it' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          { id: 'call_1', type: 'function', function: { name: 'read_file', arguments: '{"path":"/etc/hosts"}' } },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_1', name: 'read_file', content: '127.0.0.1 localhost' },
+    ],
+    null
+  );
+  assert(turns.map((t) => t.role).join(',') === 'user,assistant,user', 'tool round-trip becomes user,assistant,user');
+  assert(turns[0].content === 'read it', 'plain text turn passes through unchanged');
+  const toolUse = turns[1].content[0];
+  assert(toolUse.type === 'tool_use' && toolUse.id === 'call_1' && toolUse.name === 'read_file', 'tool_calls become tool_use block');
+  assert(toolUse.input.path === '/etc/hosts', 'stringified arguments parsed into input object');
+  const toolResult = turns[2].content[0];
+  assert(toolResult.type === 'tool_result' && toolResult.tool_use_id === 'call_1', 'tool message becomes tool_result block');
+  assert(toolResult.content === '127.0.0.1 localhost', 'tool_result content preserved');
+}
+
+// Parallel tool calls/results must land in ONE user turn (separate turns is a
+// hard 400 on real Anthropic).
+{
+  const turns = buildAnthropicMessages(
+    [
+      { role: 'assistant', tool_calls: [
+        { id: 'a', function: { name: 'f', arguments: '{}' } },
+        { id: 'b', function: { name: 'g', arguments: '{}' } },
+      ] },
+      { role: 'tool', tool_call_id: 'a', content: 'result-a' },
+      { role: 'tool', tool_call_id: 'b', content: 'result-b' },
+    ],
+    null
+  );
+  assert(turns.map((t) => t.role).join(',') === 'assistant,user', 'parallel results merge into one user turn');
+  assert(turns[1].content.length === 2, 'both tool_result blocks present');
+  assert(turns[1].content[0].tool_use_id === 'a' && turns[1].content[1].tool_use_id === 'b', 'result order preserved');
+}
+
 // ---- OpenAI-compatible streaming ------------------------------------------
 let lastFetch = null;
 globalThis.fetch = async (url, opts) => {

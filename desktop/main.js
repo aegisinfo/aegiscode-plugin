@@ -54,10 +54,16 @@ const providers = require('./lib/local/providers.js');
 const sessionStore = require('./lib/sync/sessions.js');
 const memoryQueue = require('./lib/sync/memory-queue.js');
 const foreignMemory = require('./lib/foreign-memory.js');
+// Builtin tool executor for the agent loop (client half of aegiscodex-dev's
+// tool calling). MAIN-process only: it is reachable from the renderer solely
+// through the whitelisted `tools:` IPC surface registered below — see the
+// sandbox note on registerToolsIpc().
+const localTools = require('./lib/local/tools.js');
 
 const IPC_PREFIX = 'aegis:';
 const MODEL_PREFIX = 'model:';
 const SYNC_PREFIX = 'sync:';
+const TOOLS_PREFIX = 'tools:';
 
 /**
  * Main -> renderer push channel for chat SSE deltas (D2.1 streaming render).
@@ -91,20 +97,76 @@ function maskKey(key) {
 }
 
 /**
+ * Classify a memory-endpoint failure: is this the free-plan cap, or is it just
+ * offline? aegis1 answers HTTP 402 `free_session_limit_reached` on every
+ * metered memory endpoint (app.py:9229) and the shared client attaches
+ * `err.status` / `err.data` (vendor/aegis.js parseResponse) — but
+ * `ipcRenderer.invoke` only carries the *message string* across the process
+ * boundary. A thrown cap therefore reaches the renderer as the bare text
+ * "free_session_limit_reached" with `status`/`data` stripped, which is why the
+ * upgrade UI in fetchMemory() never fired. So: detect it here, in main, where
+ * the fields still exist, and hand the renderer a plain resolved payload.
+ *
+ * Returns null for anything that is not a cap (offline, no key, 500, …).
+ */
+function upgradeInfo(err) {
+  const status = err && err.status;
+  const data = (err && err.data) || {};
+  const code = typeof data.error === 'string' ? data.error : '';
+  if (status !== 402 && code !== 'free_session_limit_reached') return null;
+  return {
+    url: data.upgradeUrl || 'https://aegiscloud.org/subscribe',
+    used: data.sessionsUsed != null ? data.sessionsUsed : null,
+    limit: data.freeSessionLimit != null ? data.freeSessionLimit : null,
+    code: code || 'free_session_limit_reached',
+  };
+}
+
+/** Message text for a failure, without assuming the Error shape. */
+function errorText(err) {
+  return err && err.message ? err.message : String(err);
+}
+
+/**
  * `aegis:memorySave` with the offline-first fallback (plan P3 §7): try the
  * cloud save first; if it fails (no key, offline, transient error) queue the
  * entry in <dir>/memory-queue.json instead of throwing, so the renderer's
  * "remember" affordance never surfaces an error for the no-key case. `dir` is
  * optional — callers that omit it (e.g. the desktop-shell smoke test) simply
  * get the un-queued rejection back, unchanged from before this existed.
+ *
+ * The cap is the one failure that is deliberately NOT queued: see upgradeInfo.
+ * A 402 resolves `{ ok:false, upgrade }` — never thrown, because the fields
+ * would not survive the IPC trip — and the entry is left un-stored so the
+ * renderer can keep it in the box and point at the subscribe page.
  */
 async function saveMemoryWithQueue(aegis, dir, entry) {
   try {
     return await aegis.memorySave(entry);
   } catch (err) {
+    const upgrade = upgradeInfo(err);
+    if (upgrade) {
+      return { ok: false, queued: 0, saved: 0, upgrade, reason: errorText(err) };
+    }
     if (!dir || !entry) throw err;
     memoryQueue.enqueue(dir, entry);
-    return { ok: true, queued: true, reason: err && err.message ? err.message : String(err) };
+    return { ok: true, queued: true, reason: errorText(err) };
+  }
+}
+
+/**
+ * Read side of the same normalisation. `memorySearch` / `memoryList` run
+ * `_memory_sync_access` server-side, so they 402 on exactly the same cap;
+ * resolving `{ entries: [], upgrade }` keeps one detection path for all four
+ * memory calls instead of four renderer-side branches that can't see `err.status`.
+ */
+async function normalizeMemoryRead(promise) {
+  try {
+    return await promise;
+  } catch (err) {
+    const upgrade = upgradeInfo(err);
+    if (!upgrade) throw err;
+    return { entries: [], upgrade };
   }
 }
 
@@ -149,20 +211,26 @@ async function importForeignMemory(aegis, dir, payload) {
   let saved = 0;
   let queued = 0;
   const errors = [];
+  let upgrade = null;
   for (const batch of foreignMemory.chunk(report.entries, 200)) {
     try {
       const data = await aegis.memorySaveBatch(batch);
       saved += (data && data.saved) || batch.length;
     } catch (err) {
-      // Offline-first, exactly like saveMemoryWithQueue(): keep the entries
-      // rather than dropping them. Anything already saved stays saved.
-      if (dir) {
+      // The cap is not an offline failure: don't queue the batch. The entries
+      // are still in the foreign stores, so a later scan re-finds them — but a
+      // queued copy would flush-fail forever and, worse, made a mid-import 402
+      // report as a silent `queued` count. Report the upgrade instead.
+      upgrade = upgradeInfo(err);
+      if (!upgrade && dir) {
+        // Offline-first, exactly like saveMemoryWithQueue(): keep the entries
+        // rather than dropping them. Anything already saved stays saved.
         for (const entry of batch) {
           memoryQueue.enqueue(dir, entry);
           queued += 1;
         }
       }
-      errors.push(err && err.message ? err.message : String(err));
+      errors.push(errorText(err));
       break;
     }
   }
@@ -173,6 +241,7 @@ async function importForeignMemory(aegis, dir, payload) {
     dryRun: false,
     saved,
     queued,
+    upgrade,
     reason: errors[0] || null,
   };
 }

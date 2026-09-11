@@ -1097,8 +1097,12 @@ function setBusy(busy, { cancellable } = {}) {
   els.send.disabled = busy;
   els.prompt.disabled = busy;
   if (busy) {
-    pendingEl = addMessage('assistant', '…');
+    pendingEl = addMessage('assistant', '');
     pendingEl.classList.add('pending');
+    const dots = document.createElement('span');
+    dots.className = 'typing-dots';
+    for (let i = 0; i < 3; i++) dots.appendChild(document.createElement('span'));
+    pendingEl.querySelector('.body').appendChild(dots);
     if (cancellable) {
       const cancelBtn = document.createElement('button');
       cancelBtn.type = 'button';
