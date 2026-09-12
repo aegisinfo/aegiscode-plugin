@@ -1,7 +1,7 @@
 {
   "name": "aegis-desktop",
   "productName": "AEGIS Desktop",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Thin Electron host for AEGIS — a local chat UI over the shared client/aegis.js transport. Ships transport + UI only; engine logic stays server-side.",
   "author": {
     "name": "AEGIS Code",
