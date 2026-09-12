@@ -24,7 +24,7 @@ const require = createRequire(import.meta.url);
 const tools = require('../desktop/lib/local/tools.js');
 const prompt = require('../desktop/lib/local/prompt.js');
 const providers = require('../desktop/lib/local/providers.js');
-const { createLocalEngine, MAX_TOOL_ROUNDS, extractToolCalls } = require('../desktop/lib/local/engine.js');
+const { createLocalEngine, extractToolCalls } = require('../desktop/lib/local/engine.js');
 const { ShellSession } = require('../desktop/lib/local/shell.js');
 const { createClient } = require('../client/aegis.js');
 
@@ -232,18 +232,32 @@ const final = { model: 'm', choices: [{ message: { content: 'done reading' } }] 
 }
 
 {
+  // No round cap: a model that keeps calling tools past the old 12-round
+  // limit is never cut off — the loop runs as long as it keeps calling
+  // tools and only stops once it answers in text.
   const { engine } = fakeEngine([callOnce]);
   const forever = { ...callOnce, toolCalls: [{ id: 'x', name: 'listDir', args: { path: tmp } }] };
+  const oldCap = 12;
+  const toolRounds = oldCap + 8;
   let rounds = 0;
   const e = createLocalEngine({
     aegis: { apiKey: 'k', async listModels() { return { models: [] }; }, async chatCompletion() { return {}; } },
     settings: { get: () => ({ baseURL: 'http://local', configured: true }), rawKey: () => 'k' },
     ollama: { async probe() { return { running: false }; }, async listTags() { return []; }, async chat() { return {}; } },
-    providers: { async openaiCompatible() { rounds++; return forever; }, async anthropicMessages() { return {}; } },
+    providers: {
+      async openaiCompatible() {
+        rounds++;
+        return rounds <= toolRounds ? forever : final;
+      },
+      async anthropicMessages() { return {}; },
+    },
   });
   const res = await e.chat({ class: 'openai-compat', prompt: 'go', model: 'm' }, () => {});
-  assert(rounds === MAX_TOOL_ROUNDS + 1, `the round cap bounds the loop (${rounds} rounds vs cap ${MAX_TOOL_ROUNDS})`);
-  assert(res && res.choices, 'hitting the cap still returns the last response instead of throwing');
+  assert(rounds === toolRounds + 1, `ran past the old ${oldCap}-round cap (${rounds} rounds)`);
+  assert(
+    res && res.choices[0].message.content === 'done reading',
+    'the loop keeps going until the model actually answers in text'
+  );
   void engine;
 }
 
@@ -414,4 +428,4 @@ if (failures) {
   console.error(`\nlocal-tools test FAILED: ${failures} assertion(s)`);
   process.exit(1);
 }
-console.log('\nLocal tool-calling test passed: schemas, executors, message builders, agent loop, round cap.');
+console.log('\nLocal tool-calling test passed: schemas, executors, message builders, agent loop, no round cap.');

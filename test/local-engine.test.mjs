@@ -236,4 +236,61 @@ for (const cls of ['openai-compat', 'anthropic']) {
   delete globalThis.fetch;
 }
 
+// ---- no round cap: a long tool-calling turn is never cut off ---------------
+//
+// engine.js used to hand back a blank (tool-call, no-text) response once a
+// turn hit a fixed 12-round cap, which renderer/app.js rendered as
+// "(empty response)" even on a legitimate long research turn. There is no
+// cap anymore: the loop keeps running exactly as long as the model keeps
+// calling tools, stopping only when it answers in text (or the caller
+// cancels). This drives the loop well past the old cap (20 tool rounds) and
+// checks every round actually executed before the model's real answer wins.
+{
+  const OLD_CAP = 12;
+  const TOOL_ROUNDS = OLD_CAP + 8;
+  const fakeTools = {
+    SUBAGENT_TOOL: 'task',
+    MUTATING_TOOLS: new Set(),
+    toolsFor: () => [{ type: 'function', function: { name: 'poke', parameters: {} } }],
+    async executeTool() {
+      return { ok: true, output: 'poked' };
+    },
+    toolResultText: (r) => r.output,
+  };
+
+  let dispatchCount = 0;
+  let executeCount = 0;
+  const originalExecuteTool = fakeTools.executeTool;
+  fakeTools.executeTool = async (...args) => {
+    executeCount += 1;
+    return originalExecuteTool(...args);
+  };
+  const longHaulProviders = {
+    async openaiCompatible() {
+      dispatchCount += 1;
+      if (dispatchCount > TOOL_ROUNDS) {
+        return { model: 'x', choices: [{ message: { content: 'final summary' } }] };
+      }
+      return {
+        model: 'x',
+        choices: [{ message: { content: '', tool_calls: [{ id: `c${dispatchCount}`, function: { name: 'poke', arguments: '{}' } }] } }],
+      };
+    },
+  };
+
+  const longHaulEngine = createLocalEngine({
+    aegis,
+    settings,
+    ollama,
+    providers: longHaulProviders,
+    tools: fakeTools,
+  });
+
+  const res = await longHaulEngine.chat({ class: 'openai-compat', prompt: 'dig forever', model: 'x' }, () => {});
+  const text = res && res.choices && res.choices[0] && res.choices[0].message && res.choices[0].message.content;
+  assert(text === 'final summary', `a long tool-calling turn still gets the final text answer, got ${JSON.stringify(res)}`);
+  assert(dispatchCount === TOOL_ROUNDS + 1, `no cap: ran past the old ${OLD_CAP}-round limit (${dispatchCount} dispatches)`);
+  assert(executeCount === TOOL_ROUNDS, `every tool round actually executed (${executeCount}/${TOOL_ROUNDS})`);
+}
+
 console.log('engine tests passed');
