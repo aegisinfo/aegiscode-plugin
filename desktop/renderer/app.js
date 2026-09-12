@@ -160,6 +160,13 @@ const RESERVED_PROVIDERS = new Set(['__aegis', 'aegis']);
 
 let pendingEl = null;
 let pendingSessionId = null;
+// The active thread's session id + prior turns. Both used to reset only on
+// "New Chat" / opening a different session — NOT on every send() — so the
+// model actually sees what was said earlier in the same open conversation
+// instead of starting from a blank slate on every message (the root cause
+// of "the model doesn't remember anything I just said").
+let currentSessionId = null;
+let threadMessages = [];
 let classOptions = [];
 let modelMeta = new Map(); // model id -> raw model object from listModels() (P2 §6.3 ceiling)
 
@@ -444,13 +451,17 @@ async function fetchMemory(query, limit) {
     // `{ entries: [], upgrade }` instead. Checking the resolved payload first
     // is what makes the upgrade UI reachable at all — the catch below only
     // covers a non-IPC caller that still throws the raw client error.
+    // An over-quota account arrives as a SUCCESS with `upgrade` attached (reads
+    // are served over quota — main.js quotaFromPayload), so the entries must
+    // render alongside the notice. Returning `{entries: []}` here is only right
+    // for the 402 path, where there is genuinely nothing to show.
+    const raw = data && (data.entries || data.results);
+    const entries = Array.isArray(raw) ? raw.map(normalizeMemoryEntry) : [];
     if (data && data.upgrade) {
-      return { entries: [], error: '', upgrade: data.upgrade };
+      return { entries, error: '', upgrade: data.upgrade };
     }
     // `entries` is the real key. Keep the `results` fallback only so an older
     // backend that still sends it degrades to a working list, not an empty one.
-    const raw = data && (data.entries || data.results);
-    const entries = Array.isArray(raw) ? raw.map(normalizeMemoryEntry) : [];
     return { entries, error: '', upgrade: null };
   } catch (err) {
     const status = err && err.status;
@@ -461,8 +472,8 @@ async function fetchMemory(query, limit) {
         error: '',
         upgrade: {
           url: (err.data && err.data.upgradeUrl) || 'https://aegiscloud.org/subscribe',
-          used: err.data && err.data.sessionsUsed,
-          limit: err.data && err.data.freeSessionLimit,
+          used: err.data && (err.data.tokensUsed != null ? err.data.tokensUsed : err.data.sessionsUsed),
+          limit: err.data && (err.data.tokenLimit != null ? err.data.tokenLimit : err.data.freeSessionLimit),
         },
       };
     }
@@ -479,12 +490,24 @@ async function fetchMemory(query, limit) {
  *  inspector's block. The hint elements are bare <p>s, so the subscribe link
  *  has to be a real child node — a plain text assignment would wipe it, and an
  *  href left in text is not clickable. */
+/** Human token count for the sync quota: 10000000 -> "10M", 42800 -> "43k".
+ *  The quota is denominated in tokens (aegis1 FREE_SYNC_TOKENS/PRO_SYNC_TOKENS),
+ *  which for stored prose is about one per character — rendering the raw
+ *  integer ("10000000") tells a user nothing at a glance. */
+function formatTokens(n) {
+  if (n == null || isNaN(n)) return '?';
+  const v = Number(n);
+  if (v >= 1e6) return `${(v / 1e6).toFixed(v % 1e6 === 0 ? 0 : 1)}M`;
+  if (v >= 1e4) return `${Math.round(v / 1e3)}k`;
+  return v.toLocaleString('en-US');
+}
+
 function capNotice(el, upgrade, prefix, cta) {
   if (!el) return;
-  const used = upgrade.used != null ? upgrade.used : '?';
-  const cap = upgrade.limit != null ? upgrade.limit : '?';
+  const used = upgrade.used != null ? formatTokens(upgrade.used) : '?';
+  const cap = upgrade.limit != null ? formatTokens(upgrade.limit) : '?';
   el.textContent =
-    `${prefix || 'free plan limit reached'} — ${used} of ${cap} sync sessions used. ` +
+    `${prefix || 'sync limit reached'} — ${used} of ${cap} tokens synced. ` +
     'Nothing was lost. ';
   const a = document.createElement('a');
   a.href = upgrade.url || 'https://aegiscloud.org/subscribe';
@@ -683,11 +706,11 @@ function renderMemoryOverlay() {
     const h = document.createElement('strong');
     h.textContent = 'Cloud memory is paused on the free plan';
     const p = document.createElement('span');
-    const used = memoryView.upgrade.used != null ? memoryView.upgrade.used : '?';
-    const cap = memoryView.upgrade.limit != null ? memoryView.upgrade.limit : '?';
+    const used = memoryView.upgrade.used != null ? formatTokens(memoryView.upgrade.used) : '?';
+    const cap = memoryView.upgrade.limit != null ? formatTokens(memoryView.upgrade.limit) : '?';
     p.textContent =
-      `This account has used ${used} of ${cap} sync sessions. Saved memory is ` +
-      'not lost — it becomes readable again once the plan is active.';
+      `This account has used ${used} of ${cap} tokens of synced conversation. ` +
+      'Saved memory is still readable — only new saves are paused until there is room again.';
     const a = document.createElement('a');
     a.href = memoryView.upgrade.url;
     a.target = '_blank';
@@ -1703,6 +1726,13 @@ function openSession(id) {
               : 'user';
         addMessage(role, m.content || m.text || '', undefined, role === 'assistant' ? s.id : undefined);
       }
+      // Resuming a past conversation must resume its context too, not just
+      // its on-screen transcript — continuing it as sessionId reuses the same
+      // id and threadMessages carries the prior turns into the next send().
+      currentSessionId = s.id;
+      threadMessages = msgs
+        .filter((m) => m.role === 'user' || m.role === 'assistant')
+        .map((m) => ({ role: m.role, content: m.content || m.text || '' }));
       els.sessionsHint.textContent = `opened ${s.id.slice(0, 8)}…`;
     })
     .catch((err) => {
@@ -1717,6 +1747,8 @@ function newChat() {
   els.sessionsHint.textContent = '';
   pendingEl = null;
   pendingSessionId = null;
+  currentSessionId = null;
+  threadMessages = [];
   flowCount = 0;
 }
 
@@ -1750,8 +1782,18 @@ async function send() {
   // clamping this feeds.
   const effort = autonomous ? els.autonomousEffort.value : undefined;
   const workers = autonomous ? parseInt(els.autonomousWorkers.value, 10) || undefined : undefined;
-  const sessionId = newSessionId();
+  // Reuse the open thread's session id (minted once, on its first message)
+  // instead of a fresh one per send — a new id every turn is what made both
+  // the local `messages` history below and the cloud class's server-side
+  // session memory reset on every single message.
+  if (!currentSessionId) currentSessionId = newSessionId();
+  const sessionId = currentSessionId;
   pendingSessionId = sessionId;
+
+  // Snapshot prior turns for the model — the new prompt travels separately
+  // as `prompt` and providers.js appends it after `messages` on the wire.
+  const historyForModel = threadMessages.slice();
+  threadMessages.push({ role: 'user', content: prompt });
 
   setBusy(true, { cancellable: true });
 
@@ -1789,7 +1831,7 @@ async function send() {
     // All four classes route through the model: surface (the main process
     // decides transport — cloud client, ollama, or a direct provider).
     const data = await models.chat(
-      { class: cls, prompt, model, maxTokens, sessionId, autonomous, effort, workers },
+      { class: cls, prompt, model, maxTokens, sessionId, autonomous, effort, workers, messages: historyForModel },
       onDelta
     );
 
@@ -1798,6 +1840,7 @@ async function send() {
       (choice.message && choice.message.content) ||
       streamedText ||
       '(empty response)';
+    threadMessages.push({ role: 'assistant', content: text });
     const bits = [];
     if (data && data.model) bits.push(`model: ${data.model}`);
     else if (model) bits.push(`model: ${model}`);

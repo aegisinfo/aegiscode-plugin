@@ -106,15 +106,20 @@ function maskKey(key) {
 }
 
 /**
- * Classify a memory-endpoint failure: is this the free-plan cap, or is it just
- * offline? aegis1 answers HTTP 402 `free_session_limit_reached` on every
- * metered memory endpoint (app.py:9229) and the shared client attaches
- * `err.status` / `err.data` (vendor/aegis.js parseResponse) — but
- * `ipcRenderer.invoke` only carries the *message string* across the process
- * boundary. A thrown cap therefore reaches the renderer as the bare text
- * "free_session_limit_reached" with `status`/`data` stripped, which is why the
- * upgrade UI in fetchMemory() never fired. So: detect it here, in main, where
- * the fields still exist, and hand the renderer a plain resolved payload.
+ * Classify a memory-endpoint failure: is this the plan's sync quota, or is it
+ * just offline? aegis1 answers HTTP 402 `free_session_limit_reached` when a
+ * WRITE would exceed the plan's synced-token ceiling (free = 1M, pro = 10M).
+ * Since the quota became token-denominated, reads (search/pull) are always
+ * served over quota, so only pushes can answer 402 — a pull that 402s is an
+ * older server.
+ *
+ * The shared client attaches `err.status` / `err.data` (vendor/aegis.js
+ * parseResponse) — but `ipcRenderer.invoke` only carries the *message string*
+ * across the process boundary. A thrown cap therefore reaches the renderer as
+ * the bare text "free_session_limit_reached" with `status`/`data` stripped,
+ * which is why the upgrade UI in fetchMemory() never fired. So: detect it here,
+ * in main, where the fields still exist, and hand the renderer a plain resolved
+ * payload.
  *
  * Returns null for anything that is not a cap (offline, no key, 500, …).
  */
@@ -123,10 +128,19 @@ function upgradeInfo(err) {
   const data = (err && err.data) || {};
   const code = typeof data.error === 'string' ? data.error : '';
   if (status !== 402 && code !== 'free_session_limit_reached') return null;
+  // Quota numbers are TOKENS now (`tokensUsed` / `tokenLimit`). The legacy
+  // session-named keys are read only as a fallback so this build still shows a
+  // number against a server that predates the rename.
+  const used = data.tokensUsed != null
+    ? data.tokensUsed
+    : (data.sessionsUsed != null ? data.sessionsUsed : null);
+  const limit = data.tokenLimit != null
+    ? data.tokenLimit
+    : (data.freeSessionLimit != null ? data.freeSessionLimit : null);
   return {
     url: data.upgradeUrl || 'https://aegiscloud.org/subscribe',
-    used: data.sessionsUsed != null ? data.sessionsUsed : null,
-    limit: data.freeSessionLimit != null ? data.freeSessionLimit : null,
+    used,
+    limit,
     code: code || 'free_session_limit_reached',
   };
 }
@@ -164,19 +178,43 @@ async function saveMemoryWithQueue(aegis, dir, entry) {
 }
 
 /**
- * Read side of the same normalisation. `memorySearch` / `memoryList` run
- * `_memory_sync_access` server-side, so they 402 on exactly the same cap;
- * resolving `{ entries: [], upgrade }` keeps one detection path for all four
- * memory calls instead of four renderer-side branches that can't see `err.status`.
+ * Read side of the same normalisation. Since the sync quota became
+ * token-denominated, aegis1 no longer refuses reads over quota — it serves
+ * `memorySearch` / `memoryList` and reports `tokensUsed` / `tokenLimit` in the
+ * payload. So an exhausted account arrives as a *success*, and the notice has
+ * to be derived from the fields rather than from a thrown 402. The 402 branch
+ * stays for an older server that still caps reads.
+ *
+ * Both paths resolve the same `upgrade` shape so the renderer keeps one branch.
  */
 async function normalizeMemoryRead(promise) {
   try {
-    return await promise;
+    const data = await promise;
+    const quota = quotaFromPayload(data);
+    // Entries are deliberately preserved: an over-quota account still owns its
+    // memory and must see it. Only the notice is added.
+    return quota ? Object.assign({}, data, { upgrade: quota }) : data;
   } catch (err) {
     const upgrade = upgradeInfo(err);
     if (!upgrade) throw err;
     return { entries: [], upgrade };
   }
+}
+
+/** Over-quota notice derived from a successful read payload, or null.
+ *  `tokensUsed`/`tokenLimit` come from aegis1 `_token_quota_fields`. */
+function quotaFromPayload(data) {
+  if (!data || typeof data !== 'object') return null;
+  const used = data.tokensUsed != null ? data.tokensUsed : null;
+  const limit = data.tokenLimit != null ? data.tokenLimit : null;
+  if (used == null || limit == null || limit <= 0) return null;
+  if (used < limit) return null;
+  return {
+    url: 'https://aegiscloud.org/subscribe',
+    used,
+    limit,
+    code: 'sync_quota_reached',
+  };
 }
 
 /**
