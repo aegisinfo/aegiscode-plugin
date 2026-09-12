@@ -79,6 +79,34 @@ assert(calls[calls.length - 1][0] === 'openai', 'custom routes to openaiCompatib
 await engine.chat({ class: 'anthropic', prompt: 'hi', model: 'x' }, () => {});
 assert(calls[calls.length - 1][0] === 'anthropic', 'anthropic routes to anthropicMessages');
 
+// ---- DeepSeek reasoning floor (matches aegiscodex-dev's own DeepSeek fix) --
+//
+// A user pointing "Custom OpenAI-compatible" straight at DeepSeek's API with
+// the renderer's 4k default hits the same bug aegiscodex-dev already fixed
+// for itself: DeepSeek's reasoning models spend max_tokens on hidden
+// chain-of-thought, so a low cap burns the whole budget and the turn
+// finishes with empty content. The floor only raises a too-low value, never
+// lowers an explicit higher one, and never touches non-reasoning ids.
+for (const model of ['deepseek-flash', 'deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-reasoner']) {
+  await engine.chat({ class: 'openai-compat', prompt: 'hi', model, maxTokens: 4096 }, () => {});
+  const [, args] = calls[calls.length - 1];
+  assert(args.maxTokens === 32768, `${model} floors the default 4k up to the high-effort budget, got ${args.maxTokens}`);
+}
+await engine.chat({ class: 'openai-compat', prompt: 'hi', model: 'deepseek-flash', maxTokens: 4096, effort: 'low' }, () => {});
+assert(calls[calls.length - 1][1].maxTokens === 8192, 'an explicit low effort uses the low-effort budget (8192)');
+
+// A non-reasoning DeepSeek id (deepseek-chat) and a non-DeepSeek model both
+// pass their maxTokens through untouched.
+await engine.chat({ class: 'openai-compat', prompt: 'hi', model: 'deepseek-chat', maxTokens: 4096 }, () => {});
+assert(calls[calls.length - 1][1].maxTokens === 4096, 'deepseek-chat (non-reasoning) is not floored');
+await engine.chat({ class: 'openai-compat', prompt: 'hi', model: 'gpt-4o-mini', maxTokens: 4096 }, () => {});
+assert(calls[calls.length - 1][1].maxTokens === 4096, 'a non-DeepSeek model is not floored');
+
+// The floor only ever raises — an explicit choice already above the budget
+// (e.g. "adaptive" sending the model's real ceiling) is left alone.
+await engine.chat({ class: 'openai-compat', prompt: 'hi', model: 'deepseek-v4-pro', maxTokens: 300000 }, () => {});
+assert(calls[calls.length - 1][1].maxTokens === 300000, 'an already-higher explicit value is never lowered');
+
 // autonomous + effort/workers reach aegis1's pool_brain via `extra`
 // (services/pool_brain.py parse_brain_request reads body.effort/body.workers)
 await engine.chat({ class: 'aegis', prompt: 'hi', model: 'm1', autonomous: true, effort: 'medium', workers: 5 }, () => {});

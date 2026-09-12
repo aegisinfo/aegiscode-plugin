@@ -58,6 +58,40 @@ const CLASSES = [
   { class: 'anthropic', label: 'Anthropic-compatible', kind: 'custom' },
 ];
 
+/**
+ * Mirrors aegiscodex-dev's src/backend.js DEEPSEEK_REASONING_MODEL_RE +
+ * EFFORT_TOKEN_BUDGET verbatim. DeepSeek's reasoning models (deepseek-flash,
+ * deepseek-v4-pro, the deprecated deepseek-reasoner, and the legacy
+ * v4-flash/v4.1-flash aliases some configs still carry) spend part of
+ * max_tokens on hidden chain-of-thought before ever emitting visible
+ * content — DeepSeek counts reasoning tokens against the same budget as
+ * content. At the renderer's 4k default (index.html's max-tokens select),
+ * any non-trivial question can burn the whole budget reasoning and finish
+ * with empty content: no error, no tool calls, just a turn that "completes"
+ * with nothing to show for it (the empty-response bug). A user pointing the
+ * Custom OpenAI-compatible class straight at DeepSeek's API hits exactly
+ * this, so the request floors to the same effort budget aegiscodex-dev uses
+ * for its own direct DeepSeek calls instead of shipping whatever the
+ * dropdown happens to have selected.
+ */
+const DEEPSEEK_REASONING_MODEL_RE = /^deepseek-(v4(\.\d+)?-(flash|pro)|flash|pro|reasoner)$/;
+const EFFORT_TOKEN_BUDGET = { low: 8192, medium: 16384, high: 32768 };
+
+/**
+ * Only ever raises a too-low budget for a DeepSeek reasoning model — never
+ * lowers whatever the caller (renderer dropdown, or "adaptive" ceiling)
+ * already asked for. Everything else (non-DeepSeek models, non-reasoning
+ * DeepSeek ids like deepseek-chat) passes through untouched. Effort defaults
+ * to 'high' since custom endpoints have no effort selector of their own
+ * (that UI is aegis-class/autonomous-only) — matching aegiscodex-dev's own
+ * default effort.
+ */
+function deepseekReasoningFloor(model, maxTokens, effort) {
+  if (!DEEPSEEK_REASONING_MODEL_RE.test(String(model || ''))) return maxTokens;
+  const eff = effort === 'low' || effort === 'medium' ? effort : 'high';
+  return Math.max(Number(maxTokens) || 0, EFFORT_TOKEN_BUDGET[eff]);
+}
+
 /** Relay model entries arrive as ids or objects; keep only real model ids. */
 function normalizeCatalog(models) {
   if (!Array.isArray(models)) return [];
@@ -401,7 +435,7 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
   async function chat(payload, onDelta) {
     const cls = payload && payload.class;
     const model = payload && payload.model;
-    const maxTokens = payload && payload.maxTokens;
+    const maxTokens = deepseekReasoningFloor(model, payload && payload.maxTokens, payload && payload.effort);
     // "Work autonomously" — routes this call through aegis1's pool_brain
     // worker fan-out (services/pool_brain.py: N reasoning workers + a
     // synthesis pass) instead of a single provider call. UI-gated to the
