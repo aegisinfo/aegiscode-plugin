@@ -24,6 +24,9 @@ const {
   CHAT_DELTA_CHANNEL,
   maskKey,
 } = require('../desktop/main.js');
+const DESKTOP_VERSION = JSON.parse(
+  readFileSync(join(__dirname, '..', 'desktop', 'package.json'), 'utf8')
+).version;
 
 function assert(cond, msg) {
   if (!cond) throw new Error(`ASSERT FAILED: ${msg}`);
@@ -128,6 +131,7 @@ const EXPECTED = [
   'memorySave',
   'memorySaveBatch',
   'memorySearch',
+  'openExternal',
   'setApiKey',
   'status',
   'tokenBankBalance',
@@ -161,7 +165,7 @@ try {
     'status must not leak the raw key'
   );
   assert(
-    status.appVersion === '0.3.0',
+    status.appVersion === DESKTOP_VERSION,
     `appVersion should come from desktop/package.json, got ${status.appVersion}`
   );
   assert(
@@ -356,6 +360,30 @@ try {
     'non-streaming chat over IPC should pass through unchanged'
   );
   assert(sentDeltas.length === 2, 'non-streaming chat must not emit deltas');
+
+  // 7b. openExternal: only http/https reach the injected shell opener —
+  // markdown links must never be able to hand the OS an arbitrary scheme
+  // (file:, javascript:, etc.) straight from model output.
+  const openedUrls = [];
+  const extDispatch = createIpcDispatch(stubClient, undefined, undefined, (url) => {
+    openedUrls.push(url);
+    return Promise.resolve();
+  });
+  const okResult = await extDispatch.openExternal({ url: 'https://example.com/x' });
+  assert(okResult.ok === true, 'an https URL is allowed');
+  assert(openedUrls[0] === 'https://example.com/x', 'the allowed URL reaches the injected opener');
+
+  const blockedResult = await extDispatch.openExternal({ url: 'javascript:alert(1)' });
+  assert(blockedResult.ok === false, 'a non-http(s) scheme is rejected');
+  assert(openedUrls.length === 1, 'a rejected URL never reaches the opener');
+
+  const fileBlocked = await extDispatch.openExternal({ url: 'file:///etc/passwd' });
+  assert(fileBlocked.ok === false, 'file: URLs are rejected');
+
+  // With no opener injected (the createIpcDispatch(stubClient) default from
+  // section 2), the method still resolves safely rather than throwing.
+  const noOpenerResult = await dispatch.openExternal({ url: 'https://example.com' });
+  assert(noOpenerResult.ok === false, 'no injected opener resolves ok:false, never throws');
 
   // 8. Discovery lane (D2.2): the horizontal chat-flow track. The lane is
   //    built in the renderer, so assert the wiring that makes it possible —

@@ -945,6 +945,26 @@ function hideWelcome() {
   if (w) w.remove();
 }
 
+// Assistant text is rendered as sanitized markdown (headings, lists, links,
+// highlighted fenced code with a copy button — see renderer/markdown.js);
+// user text always stays plain via textContent, and this is the only place
+// that decides which one a role gets. AegisMarkdown.renderInto() itself
+// falls back to textContent if marked/DOMPurify failed to load, so this
+// never risks putting raw model output into innerHTML.
+function renderMessageBody(bodyEl, role, text) {
+  if (role === 'assistant' && window.AegisMarkdown) {
+    // Rendered markdown supplies its own block spacing (marked emits real
+    // <p>/<pre>/<li> elements); the plain-text `white-space: pre-wrap` on
+    // .body/.flow-body would otherwise turn the newlines *between* those
+    // tags into extra visible blank lines. md-body opts back to normal flow.
+    bodyEl.classList.add('md-body');
+    window.AegisMarkdown.renderInto(bodyEl, text);
+  } else {
+    bodyEl.classList.remove('md-body');
+    bodyEl.textContent = text;
+  }
+}
+
 // `sessionId`, when given for an assistant message, renders a "copy" button
 // that puts the message text on the clipboard. `toolLog` (assistant only) is
 // the turn's collected `{name, args, ok}` tool calls, rendered above the
@@ -962,7 +982,7 @@ function addMessage(role, text, meta, sessionId, toolLog) {
 
   const body = document.createElement('div');
   body.className = 'body';
-  body.textContent = text;
+  renderMessageBody(body, role, text);
 
   row.appendChild(who);
   if (Array.isArray(toolLog) && toolLog.length) {
@@ -1139,7 +1159,7 @@ async function spawnPath(card, spec) {
     const choice = (data && data.choices && data.choices[0]) || {};
     const text =
       (choice.message && choice.message.content) || streamed || '(no path found)';
-    body.textContent = text;
+    renderMessageBody(body, 'assistant', text);
     card.classList.remove('pending');
     card.classList.add('done');
     state.textContent = 'done';

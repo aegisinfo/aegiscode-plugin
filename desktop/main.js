@@ -293,11 +293,27 @@ async function importForeignMemory(aegis, dir, payload) {
   };
 }
 
+/** Only http/https may be opened externally — file://, javascript:, etc.
+ *  would hand the OS shell an arbitrary URI straight from model output. */
+function isSafeExternalUrl(url) {
+  if (typeof url !== 'string' || !url) return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Pure mapping: IPC payload -> shared-client call. No Electron types here, so
- * tests can drive it with a stub client and a fake ipcMain.
+ * tests can drive it with a stub client and a fake ipcMain. `openExternal` is
+ * the one exception — it is itself just a function (default a harmless
+ * reject), injected by bootstrap() so this module still needs no `electron`
+ * import to stay unit-testable.
  */
-function createIpcDispatch(aegis, dir, persistApiKey) {
+function createIpcDispatch(aegis, dir, persistApiKey, openExternal) {
+  const openExternalFn = openExternal || (() => Promise.reject(new Error('no opener configured')));
   const dispatch = {
     status: () => ({
       appVersion: APP_VERSION,
@@ -363,15 +379,31 @@ function createIpcDispatch(aegis, dir, persistApiKey) {
       importForeignMemory(aegis, dir, payload),
     importConversation: (payload) =>
       aegis.importConversation(payload || {}),
+
+    // Links inside rendered markdown must never navigate the app's own
+    // BrowserWindow (that would point the chat UI at an arbitrary model-
+    // supplied origin) — they open in the OS default browser instead.
+    openExternal: (payload) => {
+      const url = payload && payload.url;
+      if (!isSafeExternalUrl(url)) {
+        return Promise.resolve({ ok: false, reason: 'unsupported URL scheme' });
+      }
+      return Promise.resolve(openExternalFn(url)).then(
+        () => ({ ok: true }),
+        (err) => ({ ok: false, reason: errorText(err) })
+      );
+    },
   };
   return dispatch;
 }
 
 /** Register every dispatch method as `aegis:<name>` on ipcMain. `dir` (the
  *  user-data dir) is optional and threaded through only for the memorySave
- *  offline-queue fallback — see saveMemoryWithQueue(). */
-function registerIpc(ipcMain, aegis, dir, persistApiKey) {
-  const dispatch = createIpcDispatch(aegis, dir, persistApiKey);
+ *  offline-queue fallback — see saveMemoryWithQueue(). `openExternal` is the
+ *  real electron.shell.openExternal, injected by bootstrap(); omitted in
+ *  tests, where the safe no-op default in createIpcDispatch takes over. */
+function registerIpc(ipcMain, aegis, dir, persistApiKey, openExternal) {
+  const dispatch = createIpcDispatch(aegis, dir, persistApiKey, openExternal);
   for (const [name, handler] of Object.entries(dispatch)) {
     if (name === 'chatCompletion') {
       // Streaming render (D2.1): when the renderer asks for stream, SSE deltas
@@ -675,7 +707,7 @@ function registerModelIpc(ipcMain, engine, sessionsDir, aegis) {
 // ---------------------------------------------------------------------------
 
 function bootstrap() {
-  const { app, BrowserWindow, ipcMain, safeStorage } = electron;
+  const { app, BrowserWindow, ipcMain, safeStorage, shell } = electron;
 
   app.setName('AEGIS Desktop');
 
@@ -696,7 +728,7 @@ function bootstrap() {
   // "Remove" delete the AEGIS key; defect #1).
   const persistApiKey = (key) => settings.setAegisKey(key);
 
-  registerIpc(ipcMain, aegis, dataDir, persistApiKey);
+  registerIpc(ipcMain, aegis, dataDir, persistApiKey, (url) => shell.openExternal(url));
   registerModelIpc(ipcMain, engine, sessionsDir, aegis);
 
   function createWindow() {
@@ -758,4 +790,5 @@ module.exports = {
   createEngine,
   resolveUserDataDir,
   importForeignMemory,
+  isSafeExternalUrl,
 };

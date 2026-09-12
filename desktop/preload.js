@@ -107,6 +107,10 @@ const api = {
   memorySaveBatch: (entries) => invoke('memorySaveBatch', { entries }),
   memoryImport: (payload) => invoke('memoryImport', payload || {}),
   importConversation: (payload) => invoke('importConversation', payload || {}),
+  // Rendered markdown's links (and the discovery lane's) open in the OS
+  // default browser, never the app's own BrowserWindow — see main.js
+  // isSafeExternalUrl for the http/https-only allowlist.
+  openExternal: (url) => invoke('openExternal', { url }),
 };
 
 // Model-class surface (plan P1 §5.3): backed by the `model:` channels in
