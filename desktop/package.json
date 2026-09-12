@@ -40,7 +40,8 @@
     "test:markdown": "node ../test/markdown.test.mjs"
   },
   "dependencies": {
-    "electron": "^33.0.0"
+    "electron": "^33.0.0",
+    "electron-updater": "^6.8.9"
   },
   "devDependencies": {
     "electron-builder": "^25.1.8"

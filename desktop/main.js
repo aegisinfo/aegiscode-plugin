@@ -702,12 +702,191 @@ function registerModelIpc(ipcMain, engine, sessionsDir, aegis) {
   return { modelDispatch, syncDispatch };
 }
 
+/**
+ * Main -> renderer push channel for auto-update status (mirrors
+ * CHAT_DELTA_CHANNEL): the renderer's update banner listens here instead of
+ * polling `aegis:updateStatus`.
+ */
+const UPDATE_STATUS_CHANNEL = `${IPC_PREFIX}updateStatus`;
+
+/** Re-check for a new release every few hours — frequent enough that a
+ *  long-lived session still notices a release, rare enough to not hammer
+ *  the GitHub Releases API. */
+const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
+
+/**
+ * Auto-update state machine over electron-updater (GitHub Releases provider,
+ * configured via desktop/electron-builder.yml `publish:` — see main.js's
+ * top-of-file note and that file's comment for the feed this points at).
+ *
+ * Deliberately inert outside a packaged app: `electron .` in dev has no
+ * app-update.yml (electron-builder only writes one at build time), so
+ * calling checkForUpdates() there would just throw on every launch. Rather
+ * than special-case that error, `isPackaged: false` skips wiring the real
+ * autoUpdater entirely and every method resolves a harmless 'disabled'
+ * state — dev never touches the network or the update machinery.
+ *
+ * `autoDownload` stays false: checking happens automatically (on ready and
+ * on the interval below), but the multi-hundred-MB download itself only
+ * starts when the renderer's banner "Download" button calls download() —
+ * see the IPC dispatch below. This keeps every step user-visible and
+ * matches the "never auto-restart without consent" rule: quitAndInstall()
+ * is likewise only ever invoked by an explicit "Restart to install" click.
+ */
+function createUpdateManager({ autoUpdater, isPackaged, onStatus }) {
+  let state = { status: 'idle', version: null, error: null };
+
+  function setState(patch) {
+    state = { ...state, ...patch };
+    if (onStatus) onStatus(state);
+  }
+
+  if (!isPackaged || !autoUpdater) {
+    const disabledState = { status: 'disabled', version: null, error: null };
+    return {
+      status: () => disabledState,
+      check: () => Promise.resolve(disabledState),
+      download: () => Promise.resolve(disabledState),
+      quitAndInstall: () => {},
+      start: () => {},
+    };
+  }
+
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+
+  autoUpdater.on('checking-for-update', () => setState({ status: 'checking', error: null }));
+  autoUpdater.on('update-available', (info) =>
+    setState({ status: 'available', version: info && info.version, error: null })
+  );
+  autoUpdater.on('update-not-available', () => setState({ status: 'up-to-date', error: null }));
+  autoUpdater.on('download-progress', (progress) =>
+    setState({ status: 'downloading', progress: progress && progress.percent })
+  );
+  autoUpdater.on('update-downloaded', (info) =>
+    setState({ status: 'downloaded', version: info && info.version, error: null })
+  );
+  // Any failure — offline, a malformed feed, a 404 on latest.yml — lands
+  // here instead of an unhandled rejection, since electron-updater emits
+  // 'error' for background failures that occur outside the promise a
+  // check()/download() call is awaiting.
+  autoUpdater.on('error', (err) => setState({ status: 'error', error: errorText(err) }));
+
+  async function check() {
+    try {
+      await autoUpdater.checkForUpdates();
+    } catch (err) {
+      setState({ status: 'error', error: errorText(err) });
+    }
+    return state;
+  }
+
+  async function download() {
+    try {
+      await autoUpdater.downloadUpdate();
+    } catch (err) {
+      setState({ status: 'error', error: errorText(err) });
+    }
+    return state;
+  }
+
+  function quitAndInstall() {
+    autoUpdater.quitAndInstall();
+  }
+
+  function start() {
+    check();
+    const timer = setInterval(check, UPDATE_CHECK_INTERVAL_MS);
+    // Never keep the process alive solely to poll for updates.
+    if (timer.unref) timer.unref();
+  }
+
+  return { status: () => state, check, download, quitAndInstall, start };
+}
+
+/** Pure mapping: IPC payload -> update-manager call, same shape as
+ *  createIpcDispatch — unit-testable with a stub updateManager. */
+function createUpdateDispatch(updateManager) {
+  return {
+    checkForUpdates: () => updateManager.check(),
+    downloadUpdate: () => updateManager.download(),
+    quitAndInstallUpdate: () => {
+      updateManager.quitAndInstall();
+      return { ok: true };
+    },
+    updateStatus: () => Promise.resolve(updateManager.status()),
+  };
+}
+
+/** Register update dispatch methods as `aegis:<name>`, same convention as
+ *  registerIpc() above. */
+function registerUpdateIpc(ipcMain, updateManager) {
+  const dispatch = createUpdateDispatch(updateManager);
+  for (const [name, handler] of Object.entries(dispatch)) {
+    ipcMain.handle(`${IPC_PREFIX}${name}`, (_event, payload) => handler(payload));
+  }
+  return dispatch;
+}
+
+/** Application menu: the platform defaults (Edit roles, mac's app/quit
+ *  items) plus one addition — a manual "Check for Updates…" entry, since
+ *  the automatic checks in createUpdateManager.start() only run on ready
+ *  and every few hours. */
+function buildAppMenu({ app, Menu, updateManager }) {
+  const isMac = process.platform === 'darwin';
+  const checkForUpdatesItem = {
+    label: 'Check for Updates…',
+    click: () => updateManager.check(),
+  };
+  const template = [
+    ...(isMac
+      ? [
+          {
+            label: app.getName(),
+            submenu: [
+              { role: 'about' },
+              checkForUpdatesItem,
+              { type: 'separator' },
+              { role: 'services' },
+              { type: 'separator' },
+              { role: 'hide' },
+              { role: 'hideOthers' },
+              { role: 'unhide' },
+              { type: 'separator' },
+              { role: 'quit' },
+            ],
+          },
+        ]
+      : []),
+    {
+      label: 'File',
+      submenu: [
+        ...(isMac ? [] : [checkForUpdatesItem, { type: 'separator' }]),
+        isMac ? { role: 'close' } : { role: 'quit' },
+      ],
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' },
+      ],
+    },
+  ];
+  return Menu.buildFromTemplate(template);
+}
+
 // ---------------------------------------------------------------------------
 // Electron-only bootstrap
 // ---------------------------------------------------------------------------
 
 function bootstrap() {
-  const { app, BrowserWindow, ipcMain, safeStorage, shell } = electron;
+  const { app, BrowserWindow, ipcMain, safeStorage, shell, Menu } = electron;
 
   app.setName('AEGIS Desktop');
 
@@ -731,6 +910,33 @@ function bootstrap() {
   registerIpc(ipcMain, aegis, dataDir, persistApiKey, (url) => shell.openExternal(url));
   registerModelIpc(ipcMain, engine, sessionsDir, aegis);
 
+  // electron-updater touches the network and expects a build-time
+  // app-update.yml that only exists in a packaged app; requiring it is safe
+  // either way, but it's wrapped defensively so a version mismatch or a
+  // missing optional native dep degrades to "updates disabled" instead of
+  // taking the whole app down.
+  let realAutoUpdater = null;
+  try {
+    realAutoUpdater = require('electron-updater').autoUpdater;
+  } catch {
+    realAutoUpdater = null;
+  }
+
+  const openWindows = new Set();
+  function broadcastUpdateStatus(state) {
+    for (const win of openWindows) {
+      if (!win.isDestroyed()) win.webContents.send(UPDATE_STATUS_CHANNEL, state);
+    }
+  }
+
+  const updateManager = createUpdateManager({
+    autoUpdater: realAutoUpdater,
+    isPackaged: app.isPackaged,
+    onStatus: broadcastUpdateStatus,
+  });
+  registerUpdateIpc(ipcMain, updateManager);
+  Menu.setApplicationMenu(buildAppMenu({ app, Menu, updateManager }));
+
   function createWindow() {
     const win = new BrowserWindow({
       width: 1080,
@@ -750,6 +956,8 @@ function bootstrap() {
 
     win.setMenuBarVisibility(false);
     win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+    openWindows.add(win);
+    win.on('closed', () => openWindows.delete(win));
     return win;
   }
 
@@ -760,6 +968,7 @@ function bootstrap() {
     const persistedKey = settings.aegisRawKey();
     if (persistedKey) aegis.setApiKey(persistedKey);
     createWindow();
+    updateManager.start();
   });
 
   app.on('window-all-closed', () => {
@@ -782,6 +991,8 @@ module.exports = {
   MODEL_PREFIX,
   SYNC_PREFIX,
   CHAT_DELTA_CHANNEL,
+  UPDATE_STATUS_CHANNEL,
+  UPDATE_CHECK_INTERVAL_MS,
   taggedChunk,
   maskKey,
   createModelDispatch,
@@ -791,4 +1002,8 @@ module.exports = {
   resolveUserDataDir,
   importForeignMemory,
   isSafeExternalUrl,
+  createUpdateManager,
+  createUpdateDispatch,
+  registerUpdateIpc,
+  buildAppMenu,
 };

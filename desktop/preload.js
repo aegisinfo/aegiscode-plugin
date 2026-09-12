@@ -17,6 +17,7 @@ const IPC_PREFIX = 'aegis:';
 const MODEL_PREFIX = 'model:';
 const SYNC_PREFIX = 'sync:';
 const CHAT_DELTA_CHANNEL = `${IPC_PREFIX}chatDelta`;
+const UPDATE_STATUS_CHANNEL = `${IPC_PREFIX}updateStatus`;
 
 function invoke(name, payload) {
   return ipcRenderer.invoke(
@@ -111,6 +112,25 @@ const api = {
   // default browser, never the app's own BrowserWindow — see main.js
   // isSafeExternalUrl for the http/https-only allowlist.
   openExternal: (url) => invoke('openExternal', { url }),
+
+  // Auto-update (electron-updater over GitHub Releases — see main.js
+  // createUpdateManager). check/download resolve the same status shape the
+  // push channel delivers; both are no-ops that resolve `{ status:
+  // 'disabled' }` in an unpackaged dev build. quitAndInstallUpdate must only
+  // ever be called from an explicit user action (the banner's "Restart to
+  // install" button) — main.js never restarts on its own.
+  checkForUpdates: () => invoke('checkForUpdates'),
+  downloadUpdate: () => invoke('downloadUpdate'),
+  quitAndInstallUpdate: () => invoke('quitAndInstallUpdate'),
+  updateStatus: () => invoke('updateStatus'),
+  // Live push as the state machine advances (checking -> available ->
+  // downloading -> downloaded, or -> error at any point). Returns an
+  // unsubscribe function, same shape as the chat delta listeners above.
+  onUpdateStatus: (onStatus) => {
+    const listener = (_event, state) => onStatus(state);
+    ipcRenderer.on(UPDATE_STATUS_CHANNEL, listener);
+    return () => ipcRenderer.removeListener(UPDATE_STATUS_CHANNEL, listener);
+  },
 };
 
 // Model-class surface (plan P1 §5.3): backed by the `model:` channels in

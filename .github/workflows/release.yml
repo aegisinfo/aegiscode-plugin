@@ -90,7 +90,9 @@ jobs:
             desktop/release/*.exe
             desktop/release/*.msi
             desktop/release/*.dmg
+            desktop/release/*.zip
             desktop/release/*.blockmap
+            desktop/release/latest*.yml
           if-no-files-found: error
 
   release:

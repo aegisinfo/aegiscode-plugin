@@ -45,6 +45,11 @@ if (!aegis || !models) {
 // getters re-read the live DOM on each access, so boot order can never cause
 // that failure mode.
 const ELEMENT_IDS = {
+  updateBanner: 'update-banner',
+  updateBannerText: 'update-banner-text',
+  updateDownloadBtn: 'update-download-btn',
+  updateRestartBtn: 'update-restart-btn',
+  updateLaterBtn: 'update-later-btn',
   connDot: 'conn-dot',
   connText: 'conn-text',
   app: 'st-app',
@@ -276,6 +281,55 @@ function renderStatus(s) {
   els.base.textContent = s.apiBase || '–';
   els.key.textContent = s.keyConfigured ? s.keyMask : 'not set';
   setConn(s.keyConfigured, s.keyConfigured ? 'key configured' : 'no API key');
+}
+
+// -------------------------------------------------------------- auto-update
+//
+// Mirrors the state machine in desktop/main.js createUpdateManager: 'idle' /
+// 'disabled' (dev build) / 'checking' / 'up-to-date' render nothing, since
+// none of them need the user's attention. `updateDismissedFor` remembers the
+// status the user last clicked "Later" on, so the banner stays gone for that
+// status (an hourly re-check finding the SAME pending update shouldn't keep
+// resurrecting a banner the user already dismissed) while still reappearing
+// the moment the status actually advances (e.g. available -> downloaded).
+let lastUpdateState = null;
+let updateDismissedFor = null;
+
+function renderUpdateBanner(state) {
+  if (!els.updateBanner) return;
+  lastUpdateState = state;
+  const status = state && state.status;
+  const silent = !status || status === 'idle' || status === 'disabled' ||
+    status === 'checking' || status === 'up-to-date';
+  if (silent || status === updateDismissedFor) {
+    els.updateBanner.hidden = true;
+    return;
+  }
+
+  let text = '';
+  let showDownload = false;
+  let showRestart = false;
+  const version = state.version ? `v${state.version} ` : '';
+  if (status === 'available') {
+    text = `Update ${version}available.`;
+    showDownload = true;
+  } else if (status === 'downloading') {
+    const pct = typeof state.progress === 'number' ? ` (${Math.round(state.progress)}%)` : '';
+    text = `Downloading update${pct}…`;
+  } else if (status === 'downloaded') {
+    text = `Update ${version}downloaded — restart to install.`;
+    showRestart = true;
+  } else if (status === 'error') {
+    text = `Update check failed: ${state.error || 'unknown error'}`;
+  } else {
+    els.updateBanner.hidden = true;
+    return;
+  }
+
+  els.updateBannerText.textContent = text;
+  els.updateDownloadBtn.hidden = !showDownload;
+  els.updateRestartBtn.hidden = !showRestart;
+  els.updateBanner.hidden = false;
 }
 
 async function loadAccountInfo() {
@@ -2151,6 +2205,31 @@ async function init() {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && overlayOpen()) closeMemoryOverlay();
   });
+
+  // Auto-update banner: `?`-guarded like the memory inspector above, since
+  // the markup is optional and a missing node must never crash boot.
+  if (els.updateBanner && aegis.onUpdateStatus) {
+    aegis.onUpdateStatus(renderUpdateBanner);
+    aegis.updateStatus().then(renderUpdateBanner).catch(() => {});
+
+    els.updateDownloadBtn.addEventListener('click', () => {
+      els.updateDownloadBtn.disabled = true;
+      aegis.downloadUpdate().finally(() => {
+        els.updateDownloadBtn.disabled = false;
+      });
+    });
+
+    // The only place quitAndInstallUpdate is ever called — an explicit user
+    // click. Nothing in this app restarts itself without that.
+    els.updateRestartBtn.addEventListener('click', () => {
+      aegis.quitAndInstallUpdate();
+    });
+
+    els.updateLaterBtn.addEventListener('click', () => {
+      updateDismissedFor = lastUpdateState && lastUpdateState.status;
+      els.updateBanner.hidden = true;
+    });
+  }
 
   // First paint: show the welcome panel unless a session already rendered rows.
   if (!els.messages.querySelector('.msg, .chatflow')) renderWelcome();

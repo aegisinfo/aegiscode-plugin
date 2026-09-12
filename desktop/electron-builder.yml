@@ -30,12 +30,28 @@ npmRebuild: false
 # Version-tagged artifact per OS, e.g. aegis-desktop-0.3.0-win-x64.exe
 artifactName: aegis-desktop-${version}-${os}-${arch}.${ext}
 
+# electron-updater feed: GitHub Releases on the repo the release workflow
+# publishes to (.github/workflows/release.yml). Generates latest.yml /
+# latest-mac.yml / latest-linux.yml next to the installers on every build
+# (even with --publish never), which is what main.js's autoUpdater reads.
+publish:
+  provider: github
+  owner: aegisinfo
+  repo: aegiscode-plugin
+
 mac:
   category: public.app-category.productivity
-  target: dmg
+  # zip is required alongside dmg: Squirrel.Mac (electron-updater's mac
+  # updater) downloads the app as a zip, not the dmg — dmg is install-only.
+  target:
+    - dmg
+    - zip
   # Signing/notarization is intentionally absent until certificates exist; the
   # release workflow passes CSC_IDENTITY_AUTO_DISCOVERY=false so CI builds are
-  # unsigned-but-buildable on mac too.
+  # unsigned-but-buildable on mac too. Unsigned mac builds mean autoUpdater's
+  # background download will typically still work, but the OS may block the
+  # unsigned update from applying — surfaced to the user as a failed status,
+  # never a crash (see main.js autoUpdater error handling).
 
 win:
   # Both Windows targets: NSIS .exe (interactive install) and MSI (managed /
