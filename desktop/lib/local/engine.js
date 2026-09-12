@@ -11,9 +11,11 @@
  * aegiscodex-dev's src/backend.js runProvider): every turn carries a real
  * system prompt (prompt.js) and the builtin tool schemas (tools.js), and when
  * a provider answers with tool calls the loop executes them in-process and
- * feeds the results back until the model answers with text or the round cap is
- * hit. The window stays contextIsolated + sandboxed: this module runs in the
- * MAIN process, so the executor never has to be exposed to the renderer.
+ * feeds the results back for as many rounds as the model keeps calling tools
+ * — there is no round cap; a turn ends when the model answers with text, or
+ * the user cancels it (cancel()/AbortController). The window stays
+ * contextIsolated + sandboxed: this module runs in the MAIN process, so the
+ * executor never has to be exposed to the renderer.
  *
  * Two turn-scoped resources ride along with the loop, mirroring
  * aegiscodex-dev's runProvider exactly:
@@ -39,9 +41,6 @@ const { agentSystemPrompt, agentRoleLabel } = require('./agents.js');
 
 /** Classes whose transport is a user-supplied endpoint + credential. */
 const CUSTOM_CLASSES = Object.freeze(['openai-compat', 'anthropic']);
-
-/** Hard cap on tool rounds per turn — mirrors the CLI's bounded loop. */
-const MAX_TOOL_ROUNDS = 12;
 
 /**
  * Depth at which the task tool stops being offered. The main chat (depth 0)
@@ -135,6 +134,127 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
   const controllers = new Map(); // sessionId -> AbortController
   const T = tools || toolsModule;
   const buildSystemPrompt = (promptBuilder && promptBuilder.buildSystemPrompt) || promptModule.buildSystemPrompt;
+
+  // ── Tool-call approval gate (renderer confirms exec/writeFile/editFile
+  // before they run) ─────────────────────────────────────────────────────
+  //
+  // `sessionAllowlists` is keyed by the CONVERSATION's root session id (the
+  // one the renderer's `send()` mints once per thread and reuses across
+  // turns — see rootSessionId below), never by the per-call sessionId a
+  // subagent gets, so "allow for this session" reads the way the user sees
+  // it: one decision per open conversation, not per nested tool round.
+  // In-memory only, on purpose — never persisted, so a restart (or
+  // newChat()'s clearSessionApprovals) always starts from a clean gate.
+  const sessionAllowlists = new Map(); // rootSessionId -> Set<toolName>
+  const pendingApprovals = new Map(); // approvalId -> { resolve }
+
+  function sessionAllows(rootId, name) {
+    const set = sessionAllowlists.get(rootId);
+    return Boolean(set && set.has(name));
+  }
+
+  function allowForSession(rootId, name) {
+    if (!sessionAllowlists.has(rootId)) sessionAllowlists.set(rootId, new Set());
+    sessionAllowlists.get(rootId).add(name);
+  }
+
+  /** newChat() in the renderer calls this so a fresh conversation never
+   *  inherits a prior thread's blanket allows. */
+  function clearSessionApprovals(rootSessionId) {
+    sessionAllowlists.delete(rootSessionId);
+    return { ok: true };
+  }
+
+  /** The renderer's approval card resolves the pending requestApproval()
+   *  promise below. An unknown/already-answered id is a no-op — the card
+   *  can only be clicked once (it disables itself), but a duplicate or
+   *  late message must never throw. */
+  function respondApproval(approvalId, decision) {
+    const pending = pendingApprovals.get(approvalId);
+    if (!pending) return { ok: false };
+    pendingApprovals.delete(approvalId);
+    pending.resolve(decision === 'session' || decision === 'once' ? decision : 'deny');
+    return { ok: true };
+  }
+
+  /**
+   * Ask the renderer to approve one mutating tool call. Resolves 'once',
+   * 'session' or 'deny'. Sent over `rootOnDelta` (see chat()) as an
+   * `{ approval }` chunk so it rides the exact same streaming channel as
+   * tool-activity chunks — no new IPC surface needed on the push side, only
+   * on the reply side (respondApproval). Fails safe: no listener able to
+   * ever answer (no onDelta, or the turn was aborted) resolves 'deny'
+   * instead of hanging the tool round forever.
+   */
+  function requestApproval(rootSessionId, rootOnDelta, signal, info) {
+    return new Promise((resolve) => {
+      if (signal && signal.aborted) {
+        resolve('deny');
+        return;
+      }
+      const id = randomUUID();
+      let settled = false;
+      const onAbort = () => finish('deny');
+      const finish = (decision) => {
+        if (settled) return;
+        settled = true;
+        pendingApprovals.delete(id);
+        if (signal) signal.removeEventListener('abort', onAbort);
+        resolve(decision);
+      };
+      if (signal) signal.addEventListener('abort', onAbort, { once: true });
+      pendingApprovals.set(id, { resolve: finish });
+      if (typeof rootOnDelta !== 'function') {
+        finish('deny');
+        return;
+      }
+      rootOnDelta({
+        delta: '',
+        approval: {
+          id,
+          sessionId: rootSessionId,
+          tool: info.tool,
+          args: info.args,
+          diff: info.diff || null,
+        },
+      });
+    });
+  }
+
+  /**
+   * The gate itself: read-only tools and already-session-allowed mutating
+   * tools run exactly like executeTool always did. A first-time mutating
+   * call previews writeFile/editFile (a preview failure — e.g. old_string
+   * not found — is returned as the ordinary tool error, no approval prompt
+   * needed for a call that couldn't succeed anyway), asks the renderer, and
+   * on approval either applies with a fresh hash check (writeFile/editFile)
+   * or runs normally (exec — nothing to hash-check).
+   */
+  async function gatedExecuteTool(call, { toolCtx, rootSessionId, rootOnDelta, signal }) {
+    const { name, args } = call;
+    if (!T.MUTATING_TOOLS.has(name)) return T.executeTool(name, args, toolCtx);
+    if (sessionAllows(rootSessionId, name)) return T.executeTool(name, args, toolCtx);
+
+    let preview = null;
+    if (name === 'writeFile' || name === 'editFile') {
+      preview = T.previewMutation(name, args);
+      if (!preview.ok) return { ok: false, error: preview.error };
+    }
+
+    const decision = await requestApproval(rootSessionId, rootOnDelta, signal, {
+      tool: name,
+      args,
+      diff: preview && preview.diff,
+    });
+
+    if (decision === 'deny') {
+      return { ok: false, error: `${name} was not executed — the user denied the request.` };
+    }
+    if (decision === 'session') allowForSession(rootSessionId, name);
+
+    if (preview) return T.applyChecked(name, args, preview);
+    return T.executeTool(name, args, toolCtx);
+  }
 
   /**
    * Custom endpoints are only usable when they are actually configured:
@@ -292,6 +412,18 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
     // subagent spawned by depth N. Never set by an IPC caller — only by
     // runSubagent's own recursive chat() call below.
     const depth = Number.isInteger(payload && payload.depth) ? payload.depth : 0;
+    // The approval gate's identity for this whole conversation, regardless of
+    // depth: a real user turn defines it (defaults to its own sessionId); a
+    // subagent's nested chat() call always receives it explicitly from
+    // runSubagent below, so "allow for this session" means the same thing
+    // whether the call came from the top-level turn or three subagents deep.
+    const rootSessionId = (payload && payload.rootSessionId) || sessionId;
+    // Likewise, approval requests must always reach the ORIGINAL caller's
+    // stream — a subagent's own chat() call is invoked with a no-op onDelta
+    // (its tool activity/text is not streamed to the renderer), so without
+    // this a nested approval request would call that no-op and hang forever
+    // waiting for a response nobody can ever send.
+    const rootOnDelta = (payload && payload.rootOnDelta) || onDelta;
 
     const controller = new AbortController();
     controllers.set(sessionId, controller);
@@ -337,8 +469,14 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
         workers: payload && payload.workers,
       };
 
-      let last = null;
-      for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
+      // No round cap: a model that keeps calling tools keeps going for as
+      // long as it wants to. The old fixed cap (12 rounds) cut off genuinely
+      // long research/exploration turns mid-investigation and handed back a
+      // response whose text content was empty (renderer/app.js then showed
+      // "(empty response)") even though real tool results were sitting in
+      // `history` unused. The only way out now is the model answering with
+      // text, or the user cancelling via cancel()/AbortController.
+      for (;;) {
         const opts = { ...base, system, messages: history, prompt, tools: toolSchemas };
         let res;
         try {
@@ -351,11 +489,9 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
           if (!retriable) throw e;
           res = await dispatch(cls, { ...opts, tools: [] });
         }
-        last = res;
 
         const calls = toolSchemas.length ? extractToolCalls(res) : [];
         if (!calls.length) return res;
-        if (round === MAX_TOOL_ROUNDS) return res; // round cap: hand back what we have
 
         // Continuing the loop means round 1's shorthand prompt has to become
         // part of the history — it was sent as `prompt`, not as a message, so
@@ -382,8 +518,10 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
 
         for (const call of calls) {
           const result = call.name === T.SUBAGENT_TOOL
-            ? await runSubagent(call.args, { cls, model, maxTokens, mode: payload && payload.mode, parentSignal: signal, depth })
-            : await T.executeTool(call.name, call.args, toolCtx);
+            ? await runSubagent(call.args, {
+                cls, model, maxTokens, mode: payload && payload.mode, parentSignal: signal, depth, rootSessionId, rootOnDelta,
+              })
+            : await gatedExecuteTool(call, { toolCtx, rootSessionId, rootOnDelta, signal });
           if (onDelta) onDelta({ delta: '', tool: { name: call.name, args: call.args, ok: result.ok } });
           history.push({
             role: 'tool',
@@ -393,7 +531,6 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
           });
         }
       }
-      return last;
     } finally {
       if (shell) shell.dispose();
       controllers.delete(sessionId);
@@ -408,7 +545,10 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
    * throws — resolves { ok, output } or { ok:false, error }, matching
    * tools.js's executor contract so the caller treats it identically.
    */
-  async function runSubagent({ description, subagent_type, prompt: subPrompt } = {}, { cls, model, maxTokens, mode, parentSignal, depth } = {}) {
+  async function runSubagent(
+    { description, subagent_type, prompt: subPrompt } = {},
+    { cls, model, maxTokens, mode, parentSignal, depth, rootSessionId, rootOnDelta } = {}
+  ) {
     const task = String(subPrompt || description || '').trim();
     if (!task) return { ok: false, error: 'task requires a prompt' };
     const label = subagent_type && subagent_type !== 'general' ? agentRoleLabel(subagent_type) : 'general';
@@ -425,8 +565,15 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
     }
 
     try {
+      // rootSessionId/rootOnDelta ride along explicitly (see chat()) so the
+      // subagent's own mutating tool calls still gate through the SAME
+      // approval card the user sees for the top-level turn, instead of
+      // silently hanging behind this call's no-op onDelta below.
       const res = await chat(
-        { class: cls, model, maxTokens, mode, system, prompt: task, sessionId: subSessionId, depth: (depth || 0) + 1 },
+        {
+          class: cls, model, maxTokens, mode, system, prompt: task, sessionId: subSessionId, depth: (depth || 0) + 1,
+          rootSessionId, rootOnDelta,
+        },
         () => {}
       );
       const text = assistantText(res);
@@ -448,13 +595,14 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
 
   return {
     CLASSES,
-    MAX_TOOL_ROUNDS,
     listClasses,
     listModels,
     chat,
     cancel,
+    respondApproval,
+    clearSessionApprovals,
     settings,
   };
 }
 
-module.exports = { CLASSES, MAX_TOOL_ROUNDS, createLocalEngine, extractToolCalls, parseArgs };
+module.exports = { CLASSES, createLocalEngine, extractToolCalls, parseArgs };

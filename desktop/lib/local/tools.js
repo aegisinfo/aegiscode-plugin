@@ -39,6 +39,7 @@
  */
 
 const { spawn } = require('node:child_process');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { agentRoles } = require('./agents.js');
@@ -53,6 +54,11 @@ const GREP_SIZE_CAP = 10 * 1024 * 1024; // grep silently skips files above this
 const EXEC_TIMEOUT_DEFAULT = 120_000;
 const EXEC_TIMEOUT_CAP = 600_000; // 10 minutes, matches the CLI's cap
 const EXEC_MAX_BUFFER = 1_048_576; // 1 MB of combined stdout+stderr
+// The LCS diff below is O(lines_before * lines_after); past this many cells
+// (or this many lines on either side) the diff is skipped in favor of a
+// one-line summary rather than freezing the approval flow on a huge file.
+const DIFF_MAX_CELLS = 4_000_000;
+const DIFF_MAX_LINES = 20_000;
 
 /** Truncate oversized tool output (the model never needs the whole log). */
 function cap(s) {
@@ -332,26 +338,258 @@ function writeFile({ file_path, content } = {}) {
   }
 }
 
-function editFile({ file_path, old_string, new_string, replace_all } = {}) {
+function editFile(args = {}) {
   try {
-    if (!file_path) return fail('file_path is required');
-    if (old_string === undefined || old_string === '') {
-      return fail('old_string is required and must be non-empty');
-    }
-    const src = fs.readFileSync(file_path, 'utf8');
-    const count = src.split(old_string).length - 1;
-    if (count === 0) return fail(`old_string not found in ${file_path}`);
-    if (count > 1 && !replace_all) {
-      return fail(`old_string is not unique (${count} matches) — use replace_all or more context`);
-    }
-    const next = replace_all
-      ? src.split(old_string).join(new_string == null ? '' : new_string)
-      : src.replace(old_string, new_string == null ? '' : new_string);
-    fs.writeFileSync(file_path, next, 'utf8');
-    return ok(`Edited ${file_path} (${count} occurrence${count > 1 ? 's' : ''} replaced)`);
+    const preview = previewEditFile(args);
+    if (!preview.ok) return fail(preview.error);
+    fs.writeFileSync(args.file_path, preview.after, 'utf8');
+    return ok(`Edited ${args.file_path} (${preview.count} occurrence${preview.count > 1 ? 's' : ''} replaced)`);
   } catch (e) {
     return fail(e && e.message ? e.message : String(e));
   }
+}
+
+// ── Approval-gate helpers ───────────────────────────────────────────────────
+//
+// The renderer approval gate (desktop/lib/local/engine.js gatedExecuteTool)
+// needs to show the user a diff BEFORE a mutating call runs, then re-verify
+// the file hasn't moved out from under it before actually writing. Everything
+// below is pure preparation: it never writes to disk on its own except
+// applyWriteChecked/applyEditChecked, which are the only functions engine.js
+// calls once the user has approved.
+
+/** exec/writeFile/editFile change machine state; listDir/glob/grep/readFile
+ *  never do — this is the set the approval gate checks against. */
+const MUTATING_TOOLS = new Set(['exec', 'writeFile', 'editFile']);
+
+function sha256(text) {
+  return crypto.createHash('sha256').update(text == null ? '' : text, 'utf8').digest('hex');
+}
+
+/** Read a file for a preview/hash snapshot. Distinguishes "doesn't exist yet"
+ *  (ok, exists:false) from a real read failure (permissions, is a directory —
+ *  ok:false), so callers can tell a brand-new file from a broken path. */
+function readForPreview(file_path) {
+  try {
+    if (!fs.existsSync(file_path)) return { ok: true, exists: false, content: null };
+    if (fs.statSync(file_path).isDirectory()) {
+      return { ok: false, error: `${file_path} is a directory` };
+    }
+    return { ok: true, exists: true, content: fs.readFileSync(file_path, 'utf8') };
+  } catch (e) {
+    return { ok: false, error: e && e.message ? e.message : String(e) };
+  }
+}
+
+/** Classic LCS line diff: returns the {type:'equal'|'delete'|'insert', a, b}
+ *  op list turning array `a` into array `b`, indices into each array. */
+function diffLines(a, b) {
+  const n = a.length;
+  const m = b.length;
+  const dp = new Array(n + 1);
+  for (let i = 0; i <= n; i++) dp[i] = new Int32Array(m + 1);
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const ops = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      ops.push({ type: 'equal', a: i, b: j });
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      ops.push({ type: 'delete', a: i });
+      i++;
+    } else {
+      ops.push({ type: 'insert', b: j });
+      j++;
+    }
+  }
+  while (i < n) ops.push({ type: 'delete', a: i++ });
+  while (j < m) ops.push({ type: 'insert', b: j++ });
+  return ops;
+}
+
+/** Group an op list into unified-diff hunks (git diff -Ucontext style) and
+ *  render them as text with a/b line numbers in the @@ headers. */
+function formatUnifiedDiff(ops, a, b, { label, context }) {
+  const n = ops.length;
+  const keep = new Array(n).fill(false);
+  for (let i = 0; i < n; i++) {
+    if (ops[i].type === 'equal') continue;
+    keep[i] = true;
+    for (let k = 1; k <= context; k++) {
+      if (i - k >= 0) keep[i - k] = true;
+      if (i + k < n) keep[i + k] = true;
+    }
+  }
+  const hunkRanges = [];
+  let start = -1;
+  for (let i = 0; i <= n; i++) {
+    if (i < n && keep[i]) {
+      if (start === -1) start = i;
+    } else if (start !== -1) {
+      hunkRanges.push([start, i - 1]);
+      start = -1;
+    }
+  }
+  if (!hunkRanges.length) return `--- ${label}\n+++ ${label}\n(no changes)`;
+
+  const out = [`--- ${label}`, `+++ ${label}`];
+  for (const [s, e] of hunkRanges) {
+    let aLine = 1;
+    let bLine = 1;
+    for (let i = 0; i < s; i++) {
+      if (ops[i].type !== 'insert') aLine++;
+      if (ops[i].type !== 'delete') bLine++;
+    }
+    let aCount = 0;
+    let bCount = 0;
+    const body = [];
+    for (let i = s; i <= e; i++) {
+      const op = ops[i];
+      if (op.type === 'equal') {
+        body.push(` ${a[op.a]}`);
+        aCount++;
+        bCount++;
+      } else if (op.type === 'delete') {
+        body.push(`-${a[op.a]}`);
+        aCount++;
+      } else {
+        body.push(`+${b[op.b]}`);
+        bCount++;
+      }
+    }
+    out.push(`@@ -${aLine},${aCount} +${bLine},${bCount} @@`);
+    out.push(...body);
+  }
+  return out.join('\n');
+}
+
+/** Unified diff between two whole-file strings (`before` may be null — a new
+ *  file). Falls back to a one-line summary for files too large to diff cheaply. */
+function unifiedDiff(before, after, { label = 'file', context = 3 } = {}) {
+  const a = before == null ? [] : String(before).split('\n');
+  const b = after == null ? [] : String(after).split('\n');
+  if (a.length > DIFF_MAX_LINES || b.length > DIFF_MAX_LINES || a.length * b.length > DIFF_MAX_CELLS) {
+    const added = Math.max(0, b.length - a.length);
+    const removed = Math.max(0, a.length - b.length);
+    return `--- ${label}\n+++ ${label}\n@@ file too large to preview — approx +${added}/-${removed} lines @@`;
+  }
+  return formatUnifiedDiff(diffLines(a, b), a, b, { label, context });
+}
+
+/** Build the {before, after, diff, hash} preview for a writeFile call without
+ *  touching disk. `hash` is the sha256 of the CURRENT on-disk content (null
+ *  for a not-yet-existing file) — the snapshot applyWriteChecked re-verifies
+ *  against before actually writing. */
+function previewWriteFile({ file_path, content } = {}) {
+  if (!file_path) return { ok: false, error: 'file_path is required' };
+  const read = readForPreview(file_path);
+  if (!read.ok) return { ok: false, error: read.error };
+  const before = read.exists ? read.content : null;
+  const after = String(content == null ? '' : content);
+  return {
+    ok: true,
+    before,
+    after,
+    diff: unifiedDiff(before, after, { label: file_path }),
+    hash: before == null ? null : sha256(before),
+  };
+}
+
+/** Same shape as previewWriteFile, for editFile — shares its validation with
+ *  the executor above so there is exactly one place that knows how to apply
+ *  an edit. */
+function previewEditFile({ file_path, old_string, new_string, replace_all } = {}) {
+  if (!file_path) return { ok: false, error: 'file_path is required' };
+  if (old_string === undefined || old_string === '') {
+    return { ok: false, error: 'old_string is required and must be non-empty' };
+  }
+  const read = readForPreview(file_path);
+  if (!read.ok) return { ok: false, error: read.error };
+  if (!read.exists) return { ok: false, error: `${file_path} does not exist` };
+  const before = read.content;
+  const count = before.split(old_string).length - 1;
+  if (count === 0) return { ok: false, error: `old_string not found in ${file_path}` };
+  if (count > 1 && !replace_all) {
+    return { ok: false, error: `old_string is not unique (${count} matches) — use replace_all or more context` };
+  }
+  const after = replace_all
+    ? before.split(old_string).join(new_string == null ? '' : new_string)
+    : before.replace(old_string, new_string == null ? '' : new_string);
+  return {
+    ok: true,
+    before,
+    after,
+    diff: unifiedDiff(before, after, { label: file_path }),
+    hash: sha256(before),
+    count,
+  };
+}
+
+/** Dispatch a preview by tool name. Only writeFile/editFile have one — exec
+ *  has nothing to diff, and the approval gate skips this call for it. */
+function previewMutation(name, args) {
+  if (name === 'writeFile') return previewWriteFile(args);
+  if (name === 'editFile') return previewEditFile(args);
+  return { ok: false, error: `no diff preview for ${name}` };
+}
+
+/** Apply a writeFile the user has approved, but only if the file on disk
+ *  still matches the hash captured at preview time — otherwise something
+ *  else changed it while the approval card was open, and applying blind
+ *  would silently clobber that change. */
+function applyWriteChecked({ file_path, content } = {}, expectedHash) {
+  try {
+    if (!file_path) return fail('file_path is required');
+    const read = readForPreview(file_path);
+    if (!read.ok) return fail(read.error);
+    const currentHash = read.exists ? sha256(read.content) : null;
+    if (currentHash !== expectedHash) {
+      return fail(
+        `${file_path} changed on disk since the diff was shown — refusing to apply a stale write. Re-run writeFile to get an updated diff.`
+      );
+    }
+    fs.mkdirSync(path.dirname(file_path), { recursive: true });
+    fs.writeFileSync(file_path, String(content == null ? '' : content), 'utf8');
+    return ok(`Wrote ${String(content == null ? '' : content).length} bytes to ${file_path}`);
+  } catch (e) {
+    return fail(e && e.message ? e.message : String(e));
+  }
+}
+
+/** Same guard as applyWriteChecked, for an already-computed editFile result
+ *  (`after` — the preview's replacement, not recomputed here since a hash
+ *  match means the source it was computed from is still exactly on disk). */
+function applyEditChecked({ file_path, after } = {}, expectedHash) {
+  try {
+    if (!file_path) return fail('file_path is required');
+    const read = readForPreview(file_path);
+    if (!read.ok) return fail(read.error);
+    const currentHash = read.exists ? sha256(read.content) : null;
+    if (currentHash !== expectedHash) {
+      return fail(
+        `${file_path} changed on disk since the diff was shown — refusing to apply a stale edit. Re-run editFile to get an updated diff.`
+      );
+    }
+    fs.writeFileSync(file_path, after, 'utf8');
+    return ok(`Edited ${file_path}`);
+  } catch (e) {
+    return fail(e && e.message ? e.message : String(e));
+  }
+}
+
+/** Apply an approved writeFile/editFile call using the hash captured in its
+ *  `preview` (see previewMutation) — the single entry point engine.js calls
+ *  once the user has said yes. */
+function applyChecked(name, args, preview) {
+  if (name === 'writeFile') return applyWriteChecked(args, preview.hash);
+  return applyEditChecked({ file_path: args.file_path, after: preview.after }, preview.hash);
 }
 
 const IGNORED_DIRS = new Set(['node_modules', '.git', 'dist', '.aegiscode']);
@@ -626,6 +864,10 @@ module.exports = {
   executeTool,
   isTool,
   toolResultText,
+  // approval gate (desktop/lib/local/engine.js gatedExecuteTool)
+  MUTATING_TOOLS,
+  previewMutation,
+  applyChecked,
   // limits (unit tests assert against them instead of hard-coding numbers)
   OUTPUT_CAP,
   READ_LINE_CAP,
@@ -635,4 +877,6 @@ module.exports = {
   EXEC_TIMEOUT_DEFAULT,
   EXEC_TIMEOUT_CAP,
   EXEC_MAX_BUFFER,
+  DIFF_MAX_CELLS,
+  DIFF_MAX_LINES,
 };

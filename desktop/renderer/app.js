@@ -1088,6 +1088,14 @@ async function spawnPath(card, spec) {
 
   let streamed = '';
   const onDelta = (chunk) => {
+    if (chunk && chunk.approval) {
+      if (card.classList.contains('pending')) {
+        card.classList.remove('pending');
+        state.textContent = 'needs approval';
+      }
+      renderApprovalCard(card, chunk.approval, '.flow-body');
+      return;
+    }
     if (chunk && chunk.tool) {
       if (card.classList.contains('pending')) {
         card.classList.remove('pending');
@@ -1267,6 +1275,107 @@ function appendToolActivity(row, tool, containerClass, beforeSelector) {
   line.textContent = toolActivityLabel(tool);
   toolsEl.appendChild(line);
   return toolsEl;
+}
+
+/** The one-line summary shown above an approval card's diff (or alone, for
+ *  exec, which has none). */
+function approvalSummary(tool, args) {
+  const a = args || {};
+  if (tool === 'exec') return a.description ? `${a.command} — ${a.description}` : a.command || '';
+  return a.file_path || '';
+}
+
+/**
+ * Render one +/- colored line of a unified diff. `@@` hunk headers and the
+ * `---`/`+++` file headers get their own class; everything else falls back
+ * to a plain context line.
+ */
+function diffLineClass(line) {
+  if (line.startsWith('@@')) return 'diff-hunk';
+  if (line.startsWith('+++') || line.startsWith('---')) return 'diff-file';
+  if (line.startsWith('+')) return 'diff-add';
+  if (line.startsWith('-')) return 'diff-del';
+  return 'diff-ctx';
+}
+
+/**
+ * Render one tool-call approval card (`onDelta`'s `{ approval: {id, tool,
+ * args, diff} }` chunk — see desktop/lib/local/engine.js requestApproval)
+ * into `row`, before it runs. The three buttons resolve the main process's
+ * pending promise via models.respondApproval; the card disables itself the
+ * instant one is clicked so a double-click can't send two decisions for the
+ * same id.
+ */
+function renderApprovalCard(row, approval, beforeSelector) {
+  if (!row || !approval) return;
+
+  const card = document.createElement('div');
+  card.className = 'approval-card';
+  card.dataset.approvalId = approval.id;
+
+  const title = document.createElement('div');
+  title.className = 'approval-title';
+  title.textContent = `${approval.tool} wants to run — review before it executes`;
+  card.appendChild(title);
+
+  const summary = approvalSummary(approval.tool, approval.args);
+  if (summary) {
+    const summaryEl = document.createElement('div');
+    summaryEl.className = 'approval-summary';
+    summaryEl.textContent = summary;
+    card.appendChild(summaryEl);
+  }
+
+  if (approval.diff) {
+    const diffEl = document.createElement('pre');
+    diffEl.className = 'approval-diff';
+    for (const line of approval.diff.split('\n')) {
+      const lineEl = document.createElement('div');
+      lineEl.className = diffLineClass(line);
+      lineEl.textContent = line;
+      diffEl.appendChild(lineEl);
+    }
+    card.appendChild(diffEl);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'approval-actions';
+
+  const decide = (decision) => {
+    for (const btn of actions.querySelectorAll('button')) btn.disabled = true;
+    card.classList.add('resolved');
+    const tag = document.createElement('div');
+    tag.className = 'approval-decision';
+    tag.textContent =
+      decision === 'deny' ? 'Denied' : decision === 'session' ? 'Allowed for this session' : 'Allowed once';
+    card.appendChild(tag);
+    models.respondApproval(approval.id, decision);
+  };
+
+  const mkButton = (label, cls, decision) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `approval-btn ${cls}`;
+    btn.textContent = label;
+    btn.addEventListener('click', () => decide(decision));
+    return btn;
+  };
+
+  actions.appendChild(mkButton('Allow once', 'allow', 'once'));
+  actions.appendChild(mkButton('Allow for this session', 'allow-session', 'session'));
+  actions.appendChild(mkButton('Deny', 'deny', 'deny'));
+  card.appendChild(actions);
+
+  let slot = row.querySelector('.approval-slot');
+  if (!slot) {
+    slot = document.createElement('div');
+    slot.className = 'approval-slot';
+    const before = beforeSelector ? row.querySelector(beforeSelector) : null;
+    if (before) row.insertBefore(slot, before);
+    else row.appendChild(slot);
+  }
+  slot.appendChild(card);
+  return card;
 }
 
 function classLabel(cls) {
@@ -1743,6 +1852,12 @@ function openSession(id) {
 
 function newChat() {
   abortBranches();
+  // A fresh thread must never inherit the outgoing one's "allow for this
+  // session" tool grants (desktop/lib/local/engine.js sessionAllowlists is
+  // keyed by this exact id) — best-effort, never blocks starting the chat.
+  if (currentSessionId) {
+    models.clearApprovals(currentSessionId).catch(() => {});
+  }
   renderWelcome();
   els.sessionsHint.textContent = '';
   pendingEl = null;
@@ -1807,6 +1922,14 @@ async function send() {
   let streamedText = '';
   const toolLog = [];
   const onDelta = (chunk) => {
+    if (chunk && chunk.approval) {
+      if (pendingEl) {
+        pendingEl.classList.remove('pending');
+        renderApprovalCard(pendingEl, chunk.approval, '.body');
+        els.messages.scrollTop = els.messages.scrollHeight;
+      }
+      return;
+    }
     if (chunk && chunk.tool) {
       toolLog.push(chunk.tool);
       if (pendingEl) {

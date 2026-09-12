@@ -1264,6 +1264,128 @@ label {
   cursor: default;
 }
 
+/* ------------------------------------------------- tool-call approval gate
+   desktop/lib/local/engine.js requestApproval sends an `{ approval }` chunk
+   for every first-time exec/writeFile/editFile call; renderApprovalCard()
+   (renderer/app.js) renders it here, before the call runs. */
+.approval-slot {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.approval-card {
+  border: 1px solid var(--amber);
+  border-radius: 8px;
+  background: rgba(255, 145, 0, 0.08);
+  padding: 8px 10px;
+}
+
+.approval-card.resolved {
+  border-color: var(--border2);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.approval-title {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--amber);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 4px;
+}
+
+.approval-card.resolved .approval-title {
+  color: var(--text2);
+}
+
+.approval-summary {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  word-break: break-word;
+  margin-bottom: 6px;
+}
+
+.approval-diff {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.4;
+  max-height: 220px;
+  overflow-y: auto;
+  overflow-x: auto;
+  white-space: pre;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+}
+
+.diff-add {
+  color: var(--green);
+}
+
+.diff-del {
+  color: var(--red);
+}
+
+.diff-hunk {
+  color: var(--purple);
+}
+
+.diff-file {
+  color: var(--text2);
+}
+
+.diff-ctx {
+  color: var(--text2);
+}
+
+.approval-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.approval-btn {
+  border-radius: 6px;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  background: transparent;
+}
+
+.approval-btn.allow {
+  border: 1px solid var(--green);
+  color: var(--green);
+}
+
+.approval-btn.allow-session {
+  border: 1px solid var(--teal);
+  color: var(--teal);
+}
+
+.approval-btn.deny {
+  border: 1px solid var(--red);
+  color: var(--red);
+}
+
+.approval-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.approval-decision {
+  margin-top: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text2);
+}
+
 /* ------------------------------------------------------- settings pane */
 .setting-row {
   border: 1px solid var(--border);

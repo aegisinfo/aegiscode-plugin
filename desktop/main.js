@@ -458,6 +458,14 @@ function createModelDispatch(engine) {
     'settings.remove': (payload) =>
       engine.settings.remove(payload && payload.provider),
     cancel: (payload) => engine.cancel(payload && payload.sessionId),
+    // Tool-call approval gate (desktop/lib/local/engine.js gatedExecuteTool):
+    // the renderer's approval card answers a pending exec/writeFile/editFile
+    // request here; newChat() clears a conversation's "allow for this
+    // session" grants so a fresh thread never inherits a prior one's.
+    respondApproval: (payload) =>
+      engine.respondApproval(payload && payload.approvalId, payload && payload.decision),
+    clearApprovals: (payload) =>
+      engine.clearSessionApprovals(payload && payload.sessionId),
   };
 }
 

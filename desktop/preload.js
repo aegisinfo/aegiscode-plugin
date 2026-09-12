@@ -148,6 +148,14 @@ const models = {
     remove: (provider) => invokeModel('settings.remove', { provider }),
   },
   cancel: (sessionId) => invokeModel('cancel', { sessionId }),
+  // Tool-call approval gate: the renderer's approval card calls this to
+  // answer a pending exec/writeFile/editFile request (the approval itself
+  // arrives as a `{ approval }` chunk on the same chat() delta stream — see
+  // deltaListener above). clearApprovals wipes a conversation's "allow for
+  // this session" grants; newChat() calls it so a fresh thread starts clean.
+  respondApproval: (approvalId, decision) =>
+    invokeModel('respondApproval', { approvalId, decision }),
+  clearApprovals: (sessionId) => invokeModel('clearApprovals', { sessionId }),
 };
 
 // Session sync surface (plan P1 §5.3 / P3 §7): local persistence now, cloud
