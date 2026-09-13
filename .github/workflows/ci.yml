@@ -139,10 +139,26 @@ jobs:
           fi
           echo "Thin-shell guard clean."
 
-      # --- 5. Smoke test: boot the MCP server, validate tools/list -----------
+      # --- 5. Unit tests: every test/**/*.test.mjs ---------------------------
+      # Discovered by glob rather than enumerated, so a new test file is picked
+      # up automatically. Enumerating is how most of these silently never ran.
+      - name: Unit tests
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find test -name '*.test.mjs' | sort)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::No test/**/*.test.mjs files found"
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            echo "--- $f"
+            node "$f"
+          done
+
+      # --- 6. Smoke test: boot the MCP server, validate tools/list -----------
       - name: MCP smoke test
         run: node test/smoke.mjs
 
-      # --- 6. Desktop host smoke test: IPC surface, no Electron binary -------
+      # --- 7. Desktop host smoke test: IPC surface, no Electron binary -------
       - name: Desktop shell smoke test
         run: node test/desktop-shell.mjs

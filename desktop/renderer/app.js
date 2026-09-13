@@ -249,6 +249,95 @@ function abortBranches() {
   activeBranches.clear();
 }
 
+// ----------------------------------------------------------------- streaming
+// Two problems share a root: a running turn owns the transcript. It scrolls
+// the view on every chunk and repaints on every chunk, so the user can neither
+// read earlier turns nor stay responsive enough to hit "stop". Both are fixed
+// by giving the reader veto over the scroll and batching the paints.
+
+/** Set while the reader has deliberately scrolled away from the tail. */
+let userScrolledUp = false;
+/**
+ * Set when the user asks the running turn to stop. The abort comes back as a
+ * rejected IPC call, which does not preserve `err.name`, so this flag — not an
+ * AbortError check — is what distinguishes a stop the user asked for from a
+ * genuine failure.
+ */
+let userStopped = false;
+
+/** Current transcript scroll metrics, or null when there is no transcript. */
+function scrollMetrics() {
+  if (!els.messages) return null;
+  return {
+    scrollHeight: els.messages.scrollHeight,
+    scrollTop: els.messages.scrollTop,
+    clientHeight: els.messages.clientHeight,
+  };
+}
+
+/**
+ * Auto-scroll only while the reader is still at the tail. A streaming turn
+ * must never yank the view back down once someone has scrolled up to read —
+ * that was why the transcript felt unscrollable while a model was working.
+ * `force` is for the cases where the view genuinely must follow: a message the
+ * user just sent, or a card they just opened. The decision itself lives in
+ * stream-policy.js so it is unit-testable.
+ */
+function stickToBottom({ force } = {}) {
+  if (!els.messages) return;
+  if (!shouldFollow(scrollMetrics(), { force, userScrolledUp })) return;
+  if (force) userScrolledUp = false;
+  els.messages.scrollTop = els.messages.scrollHeight;
+}
+
+/**
+ * Coalesce high-frequency stream updates to one paint per frame. A cloud brain
+ * fan-out emits dozens of chunks a second, and each repaint read scrollHeight
+ * (forcing a synchronous layout) — that thrash is what made the window feel
+ * frozen mid-turn. Only the latest payload is painted; dropped frames are
+ * invisible because the text is cumulative.
+ */
+function rafPainter(paint) {
+  let queued = false;
+  return () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      paint();
+    });
+  };
+}
+
+/**
+ * Stop the turn running right now. The transport already honours the abort all
+ * the way down (engine.cancel -> AbortController -> the cloud client's fetch),
+ * so this only has to reach it — the button in the bubble and Escape are two
+ * doors onto the same call.
+ */
+function stopPendingTurn() {
+  if (!pendingSessionId) return false;
+  // Recorded before the abort lands: `send()`'s catch reads it to tell a
+  // deliberate stop from a real error.
+  userStopped = true;
+  try {
+    models.cancel(pendingSessionId);
+  } catch {
+    /* a dead controller is not an error */
+  }
+  // The abort is not instantaneous. Marking the button is all the feedback that
+  // survives the trip: `setBusy(false)` deletes the entire pending bubble on
+  // the way out, so anything written into it would vanish a moment later.
+  if (pendingEl) {
+    const btn = pendingEl.querySelector('.cancel-btn');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'stopping…';
+    }
+  }
+  return true;
+}
+
 function exploreEnabled() {
   const box = els.exploreToggle;
   return Boolean(box && box.checked);
@@ -1196,7 +1285,10 @@ function addMessage(role, text, meta, sessionId, toolLog) {
   }
 
   els.messages.appendChild(row);
-  els.messages.scrollTop = els.messages.scrollHeight;
+  // Follows only when the reader is still at the tail — see stickToBottom.
+  // A discrete new message must not drag the view away from someone reading
+  // history; the send path forces the follow explicitly instead.
+  stickToBottom();
   return row;
 }
 
@@ -1440,9 +1532,9 @@ function setBusy(busy, { cancellable } = {}) {
       cancelBtn.type = 'button';
       cancelBtn.className = 'cancel-btn';
       cancelBtn.textContent = 'cancel';
-      cancelBtn.addEventListener('click', () => {
-        if (pendingSessionId) models.cancel(pendingSessionId);
-      });
+      // One path for both doors: the button and Escape must produce identical
+      // feedback, including the salvage `send()` performs.
+      cancelBtn.addEventListener('click', () => stopPendingTurn());
       pendingEl.appendChild(cancelBtn);
     }
   } else if (pendingEl) {
@@ -2166,6 +2258,9 @@ async function send() {
   }
 
   els.prompt.value = '';
+  // Clear the stop flag a previous turn may have left set, so a stale `true`
+  // can never make an unrelated failure look like a deliberate stop.
+  userStopped = false;
   addMessage('user', prompt);
 
   const ceiling = applyMaxTokensClamp(model);
@@ -2190,6 +2285,9 @@ async function send() {
   threadMessages.push({ role: 'user', content: prompt });
 
   setBusy(true, { cancellable: true });
+  // Sending is an explicit act, so it always returns the view to the tail.
+  // This is the single moment the auto-scroll overrides the reader's scroll.
+  stickToBottom({ force: true });
 
   // Persist the user turn locally (best-effort — never blocks chat).
   try {
@@ -2201,24 +2299,38 @@ async function send() {
   let streamedText = '';
   let reasoningText = '';
   const toolLog = [];
+
+  // Text arrives in dozens of small chunks per second; painting each one is
+  // what made the window feel locked up. One paint per frame, off the latest
+  // cumulative text.
+  const paintStream = rafPainter(() => {
+    if (!pendingEl) return;
+    pendingEl.classList.remove('pending');
+    if (reasoningText) {
+      const rEl = ensureReasoningEl(pendingEl);
+      if (rEl.textContent !== reasoningText) rEl.textContent = reasoningText;
+    }
+    const bodyEl = pendingEl.querySelector('.body');
+    if (bodyEl && bodyEl.textContent !== streamedText) bodyEl.textContent = streamedText;
+    stickToBottom();
+  });
+
   const onDelta = (chunk) => {
     // Extended-reasoning trace from a pooled brain turn: the fan-out's worker
     // findings, streamed before the synthesis pass writes the answer. Shown so
     // "work autonomously" doesn't look idle for the whole worker phase.
     if (chunk && typeof chunk.reasoning === 'string' && chunk.reasoning) {
       reasoningText += chunk.reasoning;
-      if (pendingEl) {
-        pendingEl.classList.remove('pending');
-        ensureReasoningEl(pendingEl).textContent = reasoningText;
-        els.messages.scrollTop = els.messages.scrollHeight;
-      }
+      paintStream();
       return;
     }
     if (chunk && chunk.approval) {
       if (pendingEl) {
         pendingEl.classList.remove('pending');
         renderApprovalCard(pendingEl, chunk.approval, '.body');
-        els.messages.scrollTop = els.messages.scrollHeight;
+        // Forced on purpose: the turn is blocked until this is answered, so
+        // the card has to be brought into view even if the reader scrolled up.
+        stickToBottom({ force: true });
       }
       return;
     }
@@ -2227,7 +2339,7 @@ async function send() {
       if (pendingEl) {
         pendingEl.classList.remove('pending');
         appendToolActivity(pendingEl, chunk.tool, 'tool-activity', '.body');
-        els.messages.scrollTop = els.messages.scrollHeight;
+        stickToBottom();
       }
       return;
     }
@@ -2235,11 +2347,7 @@ async function send() {
       chunk && (typeof chunk.delta === 'string' ? chunk.delta : chunk.content);
     if (!delta) return;
     streamedText += delta;
-    if (!pendingEl) return;
-    pendingEl.classList.remove('pending');
-    const bodyEl = pendingEl.querySelector('.body');
-    if (bodyEl) bodyEl.textContent = streamedText;
-    els.messages.scrollTop = els.messages.scrollHeight;
+    paintStream();
   };
 
   try {
@@ -2279,11 +2387,27 @@ async function send() {
       addFlowLane({ prompt, cls, model, maxTokens, parentSessionId: sessionId });
     }
   } catch (err) {
-    addMessage(
-      'assistant',
-      `Error: ${err && err.message ? err.message : err}`,
-      'request failed'
-    );
+    // A stop is not a failure. The transport rethrows on abort — the SSE read
+    // rejects and the loop re-raises — so the naive path here would discard
+    // everything already streamed and answer with a red "aborted" error,
+    // destroying the partial reply at the exact moment the user asked to keep
+    // it. Salvage the partial turn and label it honestly instead.
+    if (isCancellation(err, { userStopped })) {
+      const text = streamedText || reasoningText || '(stopped before any output)';
+      threadMessages.push({ role: 'assistant', content: text });
+      addMessage('assistant', text, 'stopped by you', sessionId, toolLog);
+      try {
+        await sync.append(sessionId, { role: 'assistant', content: text });
+      } catch {
+        /* persistence is non-fatal */
+      }
+    } else {
+      addMessage(
+        'assistant',
+        `Error: ${err && err.message ? err.message : err}`,
+        'request failed'
+      );
+    }
   } finally {
     setBusy(false);
     pendingSessionId = null;
@@ -2452,8 +2576,34 @@ async function init() {
       renderMemoryOverlay();
     });
   }
+  // The reader's veto over the streaming auto-scroll. This fires on every
+  // scroll frame, so it is `passive` and only records position. Without it
+  // `userScrolledUp` can never become true, leaving the transcript pinned to
+  // the tail no matter how far up you read while a model is working.
+  if (els.messages) {
+    els.messages.addEventListener(
+      'scroll',
+      () => {
+        userScrolledUp = !nearBottom(scrollMetrics());
+      },
+      { passive: true }
+    );
+  }
+
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && overlayOpen()) closeMemoryOverlay();
+    if (e.key !== 'Escape') return;
+    // The memory overlay wins: while it is open, Escape closes it rather than
+    // reaching past it to cancel a turn the user may not be looking at.
+    if (overlayOpen()) {
+      closeMemoryOverlay();
+      return;
+    }
+    // Keyboard twin of the cancel button, for the window that is too busy to
+    // aim at it.
+    if (pendingSessionId) {
+      e.preventDefault();
+      stopPendingTurn();
+    }
   });
 
   // Auto-update banner: `?`-guarded like the memory inspector above, since
