@@ -4,7 +4,7 @@
  * The CLI application: session state, the ask/stream path, and the command
  * dispatcher.
  *
- * Split from `bin/aegis-term.js` so the whole app is constructible with injected
+ * Split from `bin/aegiscode.js` so the whole app is constructible with injected
  * IO (`out`, `err`, `readline`) and a stub client — the tests drive real turns,
  * real streaming and real command dispatch without a TTY and without a child
  * process. Bin entry = argument parsing and process lifecycle; everything else
@@ -13,7 +13,7 @@
 
 const readline = require('node:readline');
 const { createTools, createClient, usageTokens } = require('./deps.js');
-const { GLYPH, VERBS, themeOf, RESET } = require('./theme.js');
+const { GLYPH, VERBS, themeOf, RESET, BOLD } = require('./theme.js');
 const { LiveRegion, termWidth, EC, w } = require('./screen.js');
 const { parseLine, findCommand, COMMANDS } = require('./commands.js');
 const render = require('./render.js');
@@ -289,21 +289,67 @@ function createApp(options = {}) {
     emit(render.renderToolResult(ctx(), name, text, width()));
   }
 
-  function printHelp() {
-    emit([render.renderHeading(ctx(), 'commands', width())]);
-    const rows = COMMANDS.map((c) => {
-      const usage = `/${c.name}${c.args ? ' ' + c.args : ''}`;
-      return { usage, help: c.help, aliases: (c.aliases || []).map((a) => `/${a}`).join(' ') };
-    });
-    const widest = rows.reduce((m, r) => Math.max(m, r.usage.length), 0);
-    const t = themeOf(ctx());
-    for (const r of rows) {
-      const alias = r.aliases ? render.fg(t, t.dim) + `  (${r.aliases})` + RESET : '';
-      emit([`  ${render.fg(t, t.plasma)}${'/' + r.usage.slice(1)}` +
-        ' '.repeat(Math.max(1, widest - r.usage.length + 2)) +
-        render.fg(t, t.text) + r.help + RESET + alias]);
+  // Category order and labels, matching aegiscodex-dev's palette.
+  const CATEGORY_ORDER = ['aegis', 'model', 'session', 'data', 'auth', 'support', 'workspace'];
+  const CATEGORY_LABEL = {
+    aegis: 'Aegis plugin',
+    model: 'Model & behavior',
+    session: 'Session & context',
+    data: 'Data',
+    auth: 'Auth',
+    support: 'Support',
+    workspace: 'Workspace',
+  };
+
+  /**
+   * The nearest routable name to a mistyped one: a prefix of it, or a name it
+   * is a prefix of. Deliberately simple — `cli/src/fuzzy.js` is a separate
+   * workstream and may not exist, so this must not depend on it.
+   */
+  function nearest(name) {
+    const n = String(name || '').toLowerCase();
+    if (!n) return null;
+    let best = null;
+    for (const c of COMMANDS) {
+      for (const cand of [c.name, ...(c.aliases || [])]) {
+        if (cand === n) continue;
+        if (cand.startsWith(n) || n.startsWith(cand)) {
+          if (best == null || Math.abs(cand.length - n.length) < Math.abs(best.length - n.length)) {
+            best = cand;
+          }
+        }
+      }
     }
-    emit(['', render.renderNotice(ctx(), 'info', `plain text is a prompt ${GLYPH.bullet} /quit exits`)]);
+    return best;
+  }
+
+  function printHelp() {
+    const t = themeOf(ctx());
+    emit([render.renderHeading(ctx(), 'commands', width())]);
+    const rows = COMMANDS.filter((c) => !c.unavailable).map((c) => ({
+      cat: c.category || 'other',
+      usage: `/${c.name}${c.args ? ' ' + c.args : ''}`,
+      desc: c.desc,
+      aliases: (c.aliases || []).map((a) => `/${a}`).join(' '),
+    }));
+    const widest = rows.reduce((m, r) => Math.max(m, r.usage.length), 0);
+    for (const cat of CATEGORY_ORDER) {
+      const group = rows.filter((r) => r.cat === cat);
+      if (!group.length) continue;
+      emit(['', `${t.dim}${BOLD}${CATEGORY_LABEL[cat] || cat}${RESET}`]);
+      for (const r of group) {
+        const alias = r.aliases ? `${t.dim}  (${r.aliases})${RESET}` : '';
+        emit([
+          `  ${t.gold}${r.usage}${RESET}${' '.repeat(Math.max(1, widest - r.usage.length + 2))}` +
+            `${t.white}${r.desc}${RESET}${alias}`,
+        ]);
+      }
+    }
+    const unavail = COMMANDS.filter((c) => c.unavailable).map((c) => `/${c.name}`);
+    if (unavail.length) {
+      emit(['', `${t.dim}not available in this client: ${unavail.join(' ')}${RESET}`]);
+    }
+    emit(['', render.renderNotice(ctx(), 'info', `plain text is a prompt ${GLYPH.bullet} /exit exits`)]);
   }
 
   /** Handle one line of input. Returns false when the session should end. */
@@ -316,7 +362,24 @@ function createApp(options = {}) {
       return true;
     }
     if (parsed.kind === 'unknown') {
-      emit(render.renderNotice(ctx(), 'error', `unknown command: /${parsed.name} — try /help`));
+      const alt = nearest(parsed.name);
+      emit(
+        render.renderNotice(
+          ctx(),
+          'error',
+          `unknown command: /${parsed.name}${alt ? ` — did you mean /${alt}?` : ` — try /help`}`
+        )
+      );
+      return true;
+    }
+    if (parsed.kind === 'unavailable') {
+      const c = parsed.command;
+      emit(render.renderNotice(ctx(), 'warn', `/${c.name} is not available in aegiscode — ${c.why}`));
+      if (c.alt) emit(render.renderNotice(ctx(), 'info', `try ${c.alt} instead`));
+      else {
+        const alt = nearest(c.name);
+        if (alt) emit(render.renderNotice(ctx(), 'info', `try /${alt} instead`));
+      }
       return true;
     }
 
@@ -325,14 +388,26 @@ function createApp(options = {}) {
 
     if (cmd.local) {
       switch (cmd.local) {
-        case 'quit':
+        case 'exit':
           return false;
         case 'clear':
           out.write(EC.clearScreen);
+          // aegiscodex-dev's /clear starts a new session with empty context, so
+          // the session tallies reset too (the transcript is not persisted here).
+          session.turns = 0;
+          session.calls = 0;
+          session.tokens = 0;
+          session.inputTokens = 0;
+          session.outputTokens = 0;
+          session.cost = 0;
+          session.startedAt = Date.now();
           emit(bannerLines());
           return true;
         case 'help':
           printHelp();
+          return true;
+        case 'version':
+          emit(render.renderNotice(ctx(), 'info', `aegiscode v${VERSION}`));
           return true;
         case 'model':
           if (!arg) {
@@ -353,13 +428,14 @@ function createApp(options = {}) {
           opts.light = arg ? /^light/i.test(arg) : !opts.light;
           emit(render.renderNotice(ctx(), 'ok', `theme: ${opts.light ? 'light' : 'dark'}`));
           return true;
-        case 'cost': {
+        case 'cost':
+        case 'tokens': {
           const t = themeOf(ctx());
           emit([render.renderHeading(ctx(), 'session', width())]);
           emit([
-            `  tokens   ${render.fg(t, t.text)}${fmtTokens(session.tokens)}${RESET}  ` +
-              render.fg(t, t.muted) + `(${fmtTokens(session.inputTokens)} in / ${fmtTokens(session.outputTokens)} out)` + RESET,
-            `  spend    ${render.fg(t, t.pulse)}${fmtEur(session.cost)}${RESET}`,
+            `  tokens   ${t.white}${fmtTokens(session.tokens)}${RESET}  ` +
+              t.gray + `(${fmtTokens(session.inputTokens)} in / ${fmtTokens(session.outputTokens)} out)` + RESET,
+            `  spend    ${t.green}${fmtEur(session.cost)}${RESET}`,
             `  calls    ${session.calls}`,
             `  balance  ${session.balance == null ? 'unknown' : fmtEur(session.balance)}`,
             `  elapsed  ${fmtElapsed(Date.now() - session.startedAt)}`,
@@ -397,7 +473,7 @@ function createApp(options = {}) {
         }
         args = { ...args, api_key: key };
       }
-      if (cmd.name === 'ask') return await runPrompt(args.prompt);
+      if (cmd.tool === 'aegis_ask') return await runPrompt(args.prompt);
       await runTool(cmd.tool, args);
     } catch (e) {
       emit(render.renderNotice(ctx(), 'error', e.message));
@@ -412,7 +488,7 @@ function createApp(options = {}) {
     }
     return new Promise((resolve) => {
       const t = themeOf(ctx());
-      out.write(render.fg(t, t.muted) + promptText + RESET);
+      out.write(t.gray + promptText + RESET);
       const stdin = process.stdin;
       let buf = '';
       stdin.setRawMode(true);
@@ -450,7 +526,7 @@ function createApp(options = {}) {
   /** Non-interactive: one prompt, plain output, exit code. */
   async function runOnce(prompt, { json = false } = {}) {
     if (!client.apiKey) {
-      err.write('aegis-term: no AEGIS_API_KEY set. Export your key first (https://aegiscloud.org).\n');
+      err.write('aegiscode: no AEGIS_API_KEY set. Export your key first (https://aegiscloud.org).\n');
       return 2;
     }
     const res = await ask(prompt);
@@ -477,9 +553,9 @@ function createApp(options = {}) {
       if (tokens != null) {
         const t = themeOf(ctx());
         out.write(
-          render.fg(t, t.dim) + GLYPH.spend + ' ' + render.fg(t, t.beam) + (res.model || 'aegis') + RESET +
-            render.fg(t, t.dim) + ' ' + GLYPH.bullet + ' ' + RESET +
-            render.fg(t, t.text) + `${fmtTokens(tokens)} tok` + RESET + '\n'
+          t.dim + GLYPH.hook + '  ' + t.blue + (res.model || 'aegis') + RESET +
+            t.dim + ' ' + GLYPH.bullet + ' ' + RESET +
+            t.white + `${fmtTokens(tokens)} tok` + RESET + '\n'
         );
       }
     }
@@ -493,7 +569,7 @@ function createApp(options = {}) {
     out.write('\n');
 
     const rl = options.readline || readline.createInterface({ input: process.stdin, output: out, terminal: true });
-    const promptStr = render.fg(themeOf(ctx()), themeOf(ctx()).plasma) + GLYPH.prompt + ' ' + RESET;
+    const promptStr = themeOf(ctx()).gold + GLYPH.cursor + ' ' + RESET;
     rl.setPrompt(promptStr);
     rl.prompt();
 

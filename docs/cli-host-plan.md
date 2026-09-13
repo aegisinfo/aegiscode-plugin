@@ -7,7 +7,7 @@ has one transport and one tool registry; this is the third host over them.
 
 The Claude Code plugin only exists inside an editor's agent loop, and the
 desktop app only exists in a window. Neither is usable from a shell script, a
-remote box over SSH, or `git commit && aegis-term "review this diff"`. The CLI is
+remote box over SSH, or `git commit && aegiscode "review this diff"`. The CLI is
 the same account, the same tools and the same billing, reachable from a prompt.
 
 It is also the cheapest host to keep honest: an MCP server answers a model, a
@@ -34,7 +34,7 @@ Forbidden, exactly as in `desktop/`:
 
 ```
 cli/
-  bin/aegis-term.js      arg parsing, process lifecycle, exit codes
+  bin/aegiscode.js       arg parsing, process lifecycle, exit codes
   src/theme.js          palette + glyphs (the divergence claim lives here)
   src/art.js            the sigil
   src/screen.js         cell width, wrapping, the live region
@@ -55,8 +55,11 @@ files possible without a TTY.
 
 | Test | Guarantees |
 |---|---|
-| `cli-identity.test.mjs` | No Claude Code palette/glyph/art fingerprint; the theme contract is complete and wired up |
+| `cli-conformance.test.mjs` | The aegiscodex-dev design is present and exact: every palette RGB, glyph, spinner frame, verb and art row, and that the theme is wired up rather than dead |
 | `cli-render.test.mjs` | Width safety, the token-beside-€ accounting line, live-region escape arithmetic |
+| `cli-overlays.test.mjs` | The `/` palette filters and stays in width; model/effort pickers and the resume list |
+| `cli-fuzzy.test.mjs` | Palette ranking tiers and match positions |
+| `cli-markdown.test.mjs` | Span-line markdown shape `{t,s,w}` and cell-accurate widths |
 | `cli-tools.test.mjs` | The CLI's registry is byte-identical to the real MCP server's `tools/list`; commands and tools are mutually reachable |
 | `cli-run.test.mjs` | The real binary: one-shot, `--json`, `--no-stream`, stdin, arg errors, exit codes, wire shape |
 | `cli-package.test.mjs` | The published layout resolves its own modules and runs, with no repo present |

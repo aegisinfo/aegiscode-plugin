@@ -1,8 +1,8 @@
-# aegis-terminal — the AEGIS terminal host
+# aegiscode — the terminal host
 
-AEGIS in your shell. The same tool surface the Claude Code plugin exposes over
-MCP, plus a terminal instead of an editor — built on the same two shared pieces
-and no others:
+`aegiscode` in your shell — the command-line version of AEGIS Desktop. The same
+tool surface the Claude Code plugin exposes over MCP, plus a terminal instead of
+an editor — built on the same two shared pieces and no others:
 
 | Shared piece | What it is |
 |---|---|
@@ -12,28 +12,29 @@ and no others:
 
 Routing, model tiers, memory and billing all stay behind aegiscloud.org.
 
-## Names: why `aegis-terminal` / `aegis-term`
+## Names: one name, `aegiscode`
 
-Two names were checked against the registry rather than assumed, and both were
-already taken — by this project's own packages:
+This host and the CLI used to be two names for two packages. They are one
+product, so they are one name now:
 
 | Name | Status |
 |---|---|
-| `aegiscode-cli` | taken: 4.0.3, the full coding-assistant CLI (`aegisinfo/aegiscode`) |
-| `aegis-cli` | taken: 0.4.8 (unrelated) |
-| `aegis` (bin) | claimed **twice already** — by `aegiscode-cli` (→ `bin/cli.js`) and by `aegis-desktop` (→ `bin/aegis.js`) |
+| `aegiscode` | **this host**, v6.0.0. Installs a single binary, `aegiscode`. |
+| `aegis-terminal` | deprecated — the 0.1.x spelling of this package, folded into `aegiscode`. |
+| `aegiscode-cli` | 4.0.3, an earlier name of the full `aegisinfo/aegiscode` coding-assistant CLI. Untouched. |
+| `aegis-cli` | 0.4.8 (unrelated). |
+| `aegis` (bin) | claimed **twice already** — by `aegiscode-cli` (→ `bin/cli.js`) and by `aegis-desktop` (→ `bin/aegis.js`). Pre-existing; whichever installs last wins. |
 
-So this host publishes as **`aegis-terminal`** and installs a single binary,
-**`aegis-term`**, which collides with neither. (The double claim on `aegis` is
-pre-existing and worth resolving separately — whichever package installs last
-wins.)
+Publishing this host as `aegiscode` moves the `latest` dist-tag for that name
+onto it. The previous line (`aegiscode@5.x`, the `aegisinfo/aegiscode` agent) is
+still installable and immutable on the registry — pin `aegiscode@5` for it.
 
 ## Install
 
 ```bash
-npm install -g aegis-terminal        # after publish
+npm install -g aegiscode
 # or, from a source checkout — no install needed:
-node cli/bin/aegis-term.js
+node cli/bin/aegiscode.js
 ```
 
 Requires Node 18+. Set your key once:
@@ -45,11 +46,11 @@ export AEGIS_API_KEY="aegis_..."
 ## Use
 
 ```bash
-aegis-term                        # interactive session
-aegis-term "why is the sky blue"  # one-shot, prints the answer and the tokens
-aegis-term -p "..." --json        # machine-readable
-echo "q" | aegis-term -p -        # prompt on stdin
-aegis-term -m deepseek/deepseek-v4-flash -p "..."   # pin a model
+aegiscode                        # interactive session
+aegiscode "why is the sky blue"  # one-shot, prints the answer and the tokens
+aegiscode -p "..." --json        # machine-readable
+echo "q" | aegiscode -p -        # prompt on stdin
+aegiscode -m deepseek/deepseek-v4-flash -p "..."   # pin a model
 ```
 
 In a session, plain text is a prompt. `/help` lists commands:
@@ -71,42 +72,60 @@ Every command above that talks to AEGIS names a tool from `mcp/tools.js`, and
 the test suite asserts both directions: no command points at a tool that does
 not exist, and no tool is unreachable from the prompt.
 
+Command names, aliases and categories follow `aegiscodex-dev`'s registry, so the
+vocabulary matches the other terminal host: the AEGIS family is spelled
+`/aegis-ask`, `/aegis-status`, `/aegis-recall`, `/aegis-remember`, `/aegis-import`
+(with `/ask`, `/status`, `/recall`, `/remember` kept as aliases), and the session
+and model controls are its `help`/`?`/`h`, `exit`/`quit`, `clear`/`cls`,
+`theme`/`t`, `version`/`v` and `model`/`m`. Commands that need a local agent loop
+this client deliberately does not have — `/login`, `/doctor`, `/permissions`,
+`/mcp`, `/skills`, `/hooks`, `/agents`, `/resume` and a few more — are listed but
+answer honestly with the reason and the nearest working alternative rather than
+pretending to work.
+
 ## What it looks like
 
 ```
-                                     ▄▄▄▄▄▄▄
-                                     ▟███████▙
-                                     ▜███▀███▛
-                                      ▜█████▛
-                                       ▜███▛
-                                        ▜▛
+━────────────────────────────────────────────────────────────────────────────━
 
-                                     A E G I S
-                             Cloud brain in your shell.
+            ✦               █████▓▓░      ▓▓▓▓▓▓▓▓▓ ✦       ▒▒▒▒▒▒▒▒▒▒▒▒ 
+                 ✦        ███▓░     ░░    ▓▓▓▓▓▓▓░░░       ▒▒▒▒▒▒▒▒▒▒▒▒▒ 
+             ░░░░         ███▓░           ▓▓▓▓░░░░░░     ██▒▒▒▒▒▒▒▒▒▒▒▒▓▓
+           ░░░░░░░░       ███▓░             ░░░░░░       ██▒▒▒▒▒▒▒▒▒▒▒▒▓ 
+         ░░░░░░░░░░░░     ███▓░           ✦   ·   ·       ▒▒▒▒▒▒▒▒▒▒▒▒▒▒ 
+                  ██▓░░      ▓                             ░░░░░░░░░░░░  
+                  ░▓▓███▓▓░                                              
+     ▐▛███▜▌                                                             
+    ▝▜█████▛▘                                                            
+      ▘▘ ▝▝                                                              
 
-┏━ AEGIS terminal ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ version  v0.1.0                                              ┃
-┃ model    nexus-brain                                         ┃
-┃ base     https://aegiscloud.org                              ┃
-┃ key      aegis_••••4f2a                                      ┃
-┃ render   streaming                                           ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
- type /help for commands ∙ /quit to exit
+                            Welcome to AEGIS Code
+                     v6.1.0 · Cloud brain in your shell.
 
-┃» you
-┃ summarise what changed in the token accounting
-┃⬢ aegis
-┃ Three things changed, and one of them was costing you money:
-┃
-┃ ∙ the pool merges worker usage instead of overwriting it
-┃ ∙ cache reads and writes are billed, not ignored
-┃ ∙ a zero-token call no longer refunds its reservation
-┃
-┃   merge_usage({input_tokens: 1250}, {output_tokens: 312})
-┃   => 1562 total
-┣─ ∅ nexus-brain ∙ 1,562 tok ∙ 1,250/312 ∙ €0.0007 ∙ 4.2s ∙ 4 calls
+───────────────────────────────── aegiscode ──────────────────────────────────
+  version v6.1.0
+  model   nexus-brain
+  base    https://aegiscloud.org
+  key     aegis_••••4f2a
+  render  streaming
 
- ⬢ aegis ∙ nexus-brain ∙ 1,562 tok ∙ €0.0007 ∙ stream          ctrl+c quit
+ type /help for commands · /quit to exit
+
+❯ summarise what changed in the token accounting
+● Three things changed, and one of them was costing you money:
+
+  - the pool merges worker usage instead of overwriting it
+  - cache reads and writes are billed, not ignored
+  - a zero-token call no longer refunds its reservation
+
+  merge_usage({input_tokens: 1250}, {output_tokens: 312})
+  => 1562 total
+
+Use /balance to see tokens beside € on every row.
+⎿  nexus-brain · 1,562 tok · 1,250/312 · €0.0007 · 4.2s · 4 calls
+
+* Consulting… (2.1s)  esc to interrupt
+ aegis · nexus-brain · 1,562 tok · €0.0007 · stream               ctrl+c quit 
 ```
 
 Render it yourself, with no key and no network:
@@ -118,12 +137,15 @@ node cli/scripts/demo.mjs            # from a source checkout
 
 ## Design notes
 
-**It is not a Claude Code look-alike.** Violet-and-cyan on ink; a hexagonal
-shield sigil rather than a mascot; a `»` prompt and a `┃` transcript rail rather
-than `❯` and `✻`; heavy box corners rather than rounded ones. This is a
-deliberate divergence, not an accident of taste: `test/cli-identity.test.mjs`
-fails if any of Claude Code's exact RGB triples, glyphs, spinner frames or art
-rows appear in this host.
+**It looks like `aegiscodex-dev` on purpose.** The gold/coral/lavender palette,
+the `✦`-studded welcome mark (mascot, crescent moon and diving whale), the `❯`
+prompt, the `⎿` hook rows and the `✻` spinner line are the `aegiscodex-dev`
+design system, adopted wholesale rather than approximated: the palette, glyphs,
+welcome art, working verbs and command vocabulary all come from it, and
+`test/cli-conformance.test.mjs` pins every RGB triple, glyph, spinner frame, verb
+and art row to that source so the two hosts cannot drift apart. (An earlier
+revision of this CLI was a deliberate divergence — a violet/cyan "Signal" theme
+with a test asserting it. That direction is gone.)
 
 **A linear transcript, not a full-screen TUI.** Finished turns are written once
 to the scrollback; only the one live line (spinner, elapsed time) is redrawn.
@@ -138,12 +160,15 @@ free usage next to a token count.
 ## Tests
 
 ```bash
-node ../../test/cli-identity.test.mjs   # the divergence guard
-node ../../test/cli-render.test.mjs     # width safety, accounting, live region
-node ../../test/cli-tools.test.mjs      # registry parity with the MCP host + dispatch
-node ../../test/cli-run.test.mjs        # the real binary against a real backend
-node ../../test/cli-package.test.mjs    # the published layout, isolated from the repo
-npm test                                # all of the above
+node ../../test/cli-conformance.test.mjs # the design guard: palette, glyphs, art, verbs
+node ../../test/cli-render.test.mjs      # width safety, accounting, live region
+node ../../test/cli-overlays.test.mjs    # the / palette, model + effort pickers, resume list
+node ../../test/cli-fuzzy.test.mjs       # palette ranking and match positions
+node ../../test/cli-markdown.test.mjs    # span-line markdown, cell widths
+node ../../test/cli-tools.test.mjs       # registry parity with the MCP host + dispatch
+node ../../test/cli-run.test.mjs         # the real binary against a real backend
+node ../../test/cli-package.test.mjs     # the published layout, isolated from the repo
+npm test                                 # all of the above
 ```
 
 `npm run predist` stages `client/`, `mcp/tools.js` and the desktop's `usage.js`

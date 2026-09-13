@@ -111,17 +111,24 @@ never returned in full (only a masked preview).
 
 ---
 
-## AEGIS Terminal (CLI)
+## aegiscode (CLI)
 
 The same tools in a shell — third host over the shared transport and tool
-registry, no editor and no Electron required:
+registry, no editor and no Electron required. Published to npm as
+[`aegiscode`](https://www.npmjs.com/package/aegiscode) (`npm i -g aegiscode`),
+which is also the command-line version of AEGIS Desktop:
 
 ```bash
+npm i -g aegiscode
 export AEGIS_API_KEY="aegis_your_key_here"
-aegis-term                 # interactive session
-aegis-term "explain this stack trace"   # one-shot
-echo "q" | aegis-term -p - # prompt on stdin
+aegiscode                 # interactive session
+aegiscode "explain this stack trace"   # one-shot
+echo "q" | aegiscode -p - # prompt on stdin
 ```
+
+From a source checkout, `node cli/bin/aegiscode.js` runs the same code with no
+install. The older `aegis-terminal` / `aegis-term` spelling is deprecated: it was
+the 0.1.x name of this same package, now folded into `aegiscode`.
 
 Plain text is a prompt; `/help` lists commands (`/balance` shows tokens beside
 € on every ledger row, `/model` pins an id, `/byok-set` stores your own provider
@@ -129,8 +136,11 @@ key without echoing it). `--json` gives machine-readable output with the usage
 object, the token total and the balance. See
 [cli/README.md](cli/README.md) and [docs/cli-host-plan.md](docs/cli-host-plan.md).
 
-It is deliberately **not** a Claude Code look-alike — its own palette, sigil,
-prompt glyph and layout, pinned by `test/cli-identity.test.mjs`.
+It carries the `aegiscodex-dev` design — palette, welcome art, prompt glyphs and
+command vocabulary — pinned by `test/cli-conformance.test.mjs`; `test/cli-render.test.mjs`,
+`test/cli-overlays.test.mjs`, `test/cli-fuzzy.test.mjs` and `test/cli-markdown.test.mjs`
+cover the rest of the surface. Its turns are written once to the scrollback rather
+than into a full-screen TUI, so its output stays pipeable.
 
 ---
 

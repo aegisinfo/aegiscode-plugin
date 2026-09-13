@@ -3,11 +3,13 @@
  * The terminal host's rendering surface, driven directly (no TTY, no child
  * process).
  *
- * What it pins: width safety (a line never exceeds the terminal — a wrapped
- * escape sequence corrupts every line after it), the accounting line (tokens
- * beside €, which is the whole reason the CLI exists), and the ephemeral live
- * region's escape arithmetic (an off-by-one there leaves spinner rows in the
- * scrollback after every turn).
+ * What it pins: the aegiscode-dev welcome frame (a gold full-width rule over the
+ * two-tone mark, the coral-bold title, a version line), width safety (a line
+ * never exceeds the terminal — a wrapped escape sequence corrupts every line
+ * after it), the accounting line (tokens beside €, which is the whole reason the
+ * CLI exists), the glyph fidelity (`❯` prompt, `⎿` hook, `✻` done) and the
+ * ephemeral live region's escape arithmetic (an off-by-one there leaves spinner
+ * rows in the scrollback after every turn).
  */
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -28,6 +30,16 @@ const render = require(join(cliDir, 'src', 'render.js'));
 const theme = require(join(cliDir, 'src', 'theme.js'));
 const { stripAnsi } = screen;
 const plain = (lines) => (Array.isArray(lines) ? lines : [lines]).map((l) => stripAnsi(l));
+
+// Platform-aware expected glyphs (theme.js swaps a couple for fonts that lack
+// them — the fidelity target is the token, not one terminal's font).
+const HOOK = process.platform === 'win32' || process.platform === 'darwin' ? '_|' : '⎿';
+const BLOOM = process.platform === 'win32' ? '*' : '✻';
+
+// ── glyph fidelity ──────────────────────────────────────────────────────────
+eq(theme.GLYPH.cursor, '❯', 'the prompt/cursor glyph is ❯');
+eq(theme.GLYPH.hook, HOOK, 'the hook glyph is ⎿');
+eq(theme.GLYPH.bloom, BLOOM, 'the done glyph is ✻');
 
 // ── number formatting: the €4dp rule is the fix the CLI must not lose ───────
 eq(format.fmtTokens(1500), '1,500', 'tokens are grouped');
@@ -52,6 +64,18 @@ const wrapped = screen.wrapLine('alpha beta gamma delta', 11);
 assert(wrapped.length > 1, 'long lines wrap');
 assert(wrapped.every((l) => screen.w(l) <= 11), 'every wrapped line fits the width');
 assert(screen.wrapLine('x'.repeat(50), 10).every((l) => screen.w(l) <= 10), 'unbreakable tokens hard-split');
+// A styled line measures as its visible text (ANSI is transparent to w()).
+eq(screen.w(`${theme.C.gold}abc${theme.RESET}`), 3, 'w() ignores ANSI escapes');
+
+// ── span / line render model (adopted from aegiscode-dev) ───────────────────
+const sp = screen.span(theme.C.gold, '日本');
+assert(sp.t === '日本' && sp.s === theme.C.gold && sp.w === 4, 'span() is { t, s, w } with a cell width');
+eq(screen.lineWidth([sp, screen.span('', 'ab')]), 6, 'lineWidth sums span widths');
+const paddedLine = screen.padLine([screen.span('', '日')], 4);
+eq(screen.lineWidth(paddedLine), 4, 'padLine pads a span line to exact width');
+const clippedLine = screen.padLine([screen.span('', '日本語')], 3);
+eq(clippedLine[0].t, '日', 'padLine truncates on whole wide glyphs, never splitting a 2-cell char');
+eq(screen.lineWidth(clippedLine), 3, 'padLine pads the truncated line to exact width');
 
 // ── the accounting line ────────────────────────────────────────────────────
 const meta = plain(render.renderMeta({}, { model: 'deepseek/deepseek-v4-flash', tokens: 1562, usage: { input: 1250, output: 312 }, eur: 0.0007, ms: 2400 }, 80)).join('\n');
@@ -60,6 +84,7 @@ assert(meta.includes('1,250/312'), 'and the input/output split');
 assert(meta.includes('€0.0007'), 'and what those tokens cost');
 assert(meta.includes('deepseek/deepseek-v4-flash'), 'and which model answered');
 assert(meta.includes('2.4s'), 'and how long it took');
+assert(meta.includes(HOOK), 'the meta line hangs off the ⎿ hook row');
 eq(plain(render.renderMeta({}, {}, 80)).join(''), '', 'a turn with no accounting renders no meta line');
 
 // A usage object in the Anthropic wire spelling must still total correctly —
@@ -72,15 +97,25 @@ const anthropicMeta = plain(render.renderMeta({}, { tokens: usageTokens({ input_
 assert(anthropicMeta.includes('1,562 tok'), 'an anthropic-shaped usage still renders a token count');
 
 // ── turns ──────────────────────────────────────────────────────────────────
-const turn = plain(render.renderTurn({}, { role: 'user', text: 'hello there' }, 80));
-assert(turn[0].includes(theme.GLYPH.prompt), 'a user turn is marked with the prompt glyph');
-assert(turn[0].includes('you'), 'and labelled');
-assert(turn.every((l) => l.startsWith(theme.GLYPH.rail)), 'every turn line hangs off the rail');
+const userTurn = plain(render.renderTurn({}, { role: 'user', text: 'hello there' }, 80));
+assert(userTurn[0].startsWith(theme.GLYPH.cursor), 'a user turn is prefixed with the ❯ prompt glyph');
+assert(userTurn.join('\n').includes('hello there'), 'and shows the prompt text');
+
 const asst = plain(render.renderTurn({}, { role: 'assistant', text: 'a **bold** word and `code`', meta: { tokens: 10 } }, 80));
-assert(asst[0].includes(theme.GLYPH.sigil), 'an assistant turn is marked with the sigil');
+assert(asst[0].includes(theme.GLYPH.block), 'an assistant turn carries the ● marker');
 assert(asst.join('\n').includes('a bold word and code'), 'inline markup is stripped to its text, not dropped');
+assert(asst.join('\n').includes(`${HOOK}  10 tok`), 'the accounting line sits under the answer');
+
+const streaming = plain(render.renderTurn({}, { role: 'assistant', text: 'streaming now', streaming: true }, 80));
+assert(streaming[streaming.length - 1].includes(theme.GLYPH.block), 'a streaming answer shows the ● cursor');
+
+const toolTurn = plain(render.renderTurn({}, { role: 'tool', label: 'Ran 1 shell command', args: { command: 'ls' } }, 80));
+assert(toolTurn.join('\n').includes(`${HOOK}  $`), 'a tool turn renders its ⎿ hook row');
+
 const wrappedTurn = plain(render.renderTurn({}, { role: 'assistant', text: 'word '.repeat(60) }, 40));
 assert(wrappedTurn.every((l) => screen.w(l) <= 40), 'turn lines respect the render width');
+const wrappedUser = plain(render.renderTurn({}, { role: 'user', text: 'x'.repeat(120) }, 40));
+assert(wrappedUser.every((l) => screen.w(l) <= 40), 'a long user turn respects the render width');
 
 // Markdown-lite: fences are treated as code, not rendered as bullets.
 const md = plain(render.mdLines('- one\n- two\n\n```\nconst x = 1;\n```\n# Title', 60, {}));
@@ -97,18 +132,38 @@ for (const bit of ['nexus-brain', '1,500 tok', '€0.0007', 'stream']) {
   assert(barPlain.includes(bit), `the status bar shows ${bit}`);
 }
 eq(screen.w(render.renderStatus({}, {}, 20)), 20, 'a narrow bar is clipped, not wrapped');
+assert(!bar.includes('\x1b[48;2;'), 'the status bar paints no background (the CLI stays pipeable)');
 
-// ── banner ─────────────────────────────────────────────────────────────────
+// ── banner: the aegiscode-dev welcome frame ────────────────────────────────
 const banner = render.renderBanner({}, { width: 76, version: '0.1.0', model: 'nexus-brain', base: 'https://aegiscloud.org', key: 'aegis_••••abcd' });
 const bannerPlain = plain(banner);
+// The header rule is a full-width gold ━…━ line.
+const rule = bannerPlain[0];
+eq(screen.w(rule), 76, 'the header rule spans the terminal width');
+assert(rule.startsWith('━') && rule.endsWith('━'), 'the header rule is capped with ━');
+assert(rule.includes('─'), 'and filled with ─');
+assert(banner[0].includes(theme.C.gold), 'and painted in the gold token');
+// The art is present, and every art row is the same display width.
+const artRows = bannerPlain.filter((l) => /[█▓▒░]/.test(l));
+assert(artRows.length >= 5, 'the banner contains the welcome mark');
+const artWidths = new Set(artRows.map((l) => screen.w(l)));
+eq(artWidths.size, 1, `every art row is the same display width (got ${[...artWidths].join('/')})`);
+// Both ink halves are used: mascot gold + whale blue/lavender/dim.
+assert(banner.some((l) => l.includes(theme.C.gold)) && banner.some((l) => l.includes(theme.C.lavender)), 'the mark is two-tone (gold mascot, whale ink)');
+// Title + version line.
+assert(bannerPlain.some((l) => l.includes('Welcome to AEGIS Code')), 'the banner shows the welcome title');
 assert(bannerPlain.some((l) => l.includes('v0.1.0')), 'the banner states the version');
 assert(bannerPlain.some((l) => l.includes('nexus-brain')), 'the banner states the model');
 assert(bannerPlain.some((l) => l.includes('aegiscloud.org')), 'the banner states the base');
-assert(bannerPlain.some((l) => l.includes('A E G I S')), 'the banner shows the wordmark');
-assert(banner.some((l) => l.includes(theme.GLYPH.box.tl)), 'the banner draws the heavy frame');
 assert(!banner.some((l) => /[╭╮╰╯]/.test(stripAnsi(l))), 'the banner never draws a rounded frame');
-const narrow = render.renderBanner({}, { width: 24, version: '0.1.0' });
-assert(narrow.every((l) => screen.w(l) <= 24), 'a narrow banner stays inside the terminal');
+// "Welcome back!" on a returning run.
+const back = plain(render.renderBanner({}, { width: 76, version: '0.1.0', firstRun: false })).join('\n');
+assert(back.includes('Welcome back!'), 'a returning run shows the back title');
+// Narrow terminals stay inside their width.
+for (const width of [24, 40, 60, 72, 110]) {
+  const b = render.renderBanner({}, { width, version: '0.1.0' });
+  assert(b.every((l) => screen.w(l) <= width), `a ${width}-col banner stays inside the terminal`);
+}
 
 // ── the live region's escape arithmetic ────────────────────────────────────
 class FakeOut {
@@ -144,16 +199,22 @@ eq(live.active, false, 'a cleared region is inactive');
 live.clear();
 eq(out.buf.length, beforeClear + afterClear.length, 'clearing twice is a no-op');
 
-// The working line has to say what it is doing and how long for.
+// ── the working line and the done line ─────────────────────────────────────
 const working = plain(render.renderWorking({}, { tick: 3, verb: 'Consulting', elapsedMs: 4200 })).join('');
 assert(working.includes('Consulting'), 'the working line names the phase');
 assert(working.includes('4.2s'), 'and shows elapsed time');
 assert(working.includes('esc to interrupt'), 'and offers the interrupt');
 assert(theme.GLYPH.spin.includes(plain(render.renderWorking({}, { tick: 0 })).join('')[0]), 'the spinner frame comes from the theme');
+const doneChat = plain(render.renderWorking({}, { done: true, secs: 4 })).join('');
+assert(doneChat === `${BLOOM} Churned for 4s`, `a chat turn completes with "✻ Churned for Ns" (got ${JSON.stringify(doneChat)})`);
+const doneTools = plain(render.renderWorking({}, { done: true, secs: 6, tools: true })).join('');
+assert(doneTools === `${BLOOM} Worked for 6s`, `a tool turn completes with "✻ Worked for Ns" (got ${JSON.stringify(doneTools)})`);
 
 // ── notices and tool results ───────────────────────────────────────────────
-assert(stripAnsi(render.renderNotice({}, 'error', 'boom')).startsWith(theme.GLYPH.err), 'errors carry the error mark');
-assert(stripAnsi(render.renderNotice({}, 'ok', 'done')).startsWith(theme.GLYPH.ok), 'success carries the check mark');
+assert(stripAnsi(render.renderNotice({}, 'error', 'boom')).startsWith('✗'), 'errors carry the ✗ mark');
+assert(stripAnsi(render.renderNotice({}, 'ok', 'done')).startsWith(theme.GLYPH.check), 'success carries the check mark');
+assert(stripAnsi(render.renderNotice({}, 'warn', 'careful')).startsWith('⚠'), 'warnings carry the ⚠ mark');
+assert(stripAnsi(render.renderNotice({}, 'info', 'fyi')).startsWith(theme.GLYPH.bullet), 'info carries the · mark');
 const toolOut = plain(render.renderToolResult({}, 'aegis_balance', 'Balance: €3.50', 60));
 assert(toolOut[0].includes('aegis_balance'), 'tool output is headed by the tool name');
 assert(toolOut.some((l) => l.includes('€3.50')), 'and shows the body');
@@ -161,4 +222,5 @@ assert(toolOut.every((l) => screen.w(l) <= 60), 'tool output respects the width'
 
 console.log('CLI render test passed');
 console.log('  accounting: 1,562 tok · 1,250/312 · €0.0007 · grouped + 4dp verified');
-console.log(`  geometry: status bar exact-width, ${screen.w('日本')}-cell wide chars safe, wrap bounded`);
+console.log(`  glyphs: prompt ${theme.GLYPH.cursor} · hook ${theme.GLYPH.hook} · done ${theme.GLYPH.bloom}`);
+console.log('  banner: gold ━ rule at full width, two-tone art rows equal width, coral title');

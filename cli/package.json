@@ -1,8 +1,8 @@
 {
-  "name": "aegis-terminal",
-  "productName": "AEGIS Terminal",
-  "version": "0.1.2",
-  "description": "AEGIS terminal host — the shared tool surface in your shell, over the same thin transport and tool registry as the MCP plugin and the desktop app. Ships transport + UI only; no brain.",
+  "name": "aegiscode",
+  "productName": "AEGIS Code",
+  "version": "6.1.1",
+  "description": "aegiscode — the command-line version of AEGIS Desktop. The shared tool surface in your shell, over the same thin transport and tool registry as the MCP plugin and the desktop app. Ships transport + UI only; no brain.",
   "author": {
     "name": "AEGIS Code",
     "email": "nborneklint@gmail.com"
@@ -15,7 +15,7 @@
     "directory": "cli"
   },
   "bin": {
-    "aegis-term": "bin/aegis-term.js"
+    "aegiscode": "bin/aegiscode.js"
   },
   "files": [
     "bin",
@@ -28,14 +28,15 @@
     "node": ">=18.0.0"
   },
   "scripts": {
-    "start": "node bin/aegis-term.js",
+    "start": "node bin/aegiscode.js",
     "predist": "node scripts/predist.mjs",
     "prepublishOnly": "npm run predist",
-    "check": "node --check bin/aegis-term.js && node --check src/theme.js && node --check src/art.js && node --check src/screen.js && node --check src/format.js && node --check src/render.js && node --check src/commands.js && node --check src/deps.js && node --check src/app.js && node --check scripts/predist.mjs",
+    "check": "node --check bin/aegiscode.js && node --check src/theme.js && node --check src/art.js && node --check src/screen.js && node --check src/format.js && node --check src/fuzzy.js && node --check src/markdown.js && node --check src/render.js && node --check src/overlays.js && node --check src/commands.js && node --check src/deps.js && node --check src/app.js && node --check scripts/predist.mjs",
     "test": "for f in ../../test/cli-*.test.mjs; do node \"$f\" || exit 1; done"
   },
   "keywords": [
     "aegis",
+    "aegiscode",
     "aegiscloud",
     "cli",
     "terminal",

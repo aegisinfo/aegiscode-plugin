@@ -1,13 +1,17 @@
 'use strict';
 
 /**
- * AEGIS terminal theme — "Signal".
+ * Design tokens — the aegiscodex-dev design system, adopted wholesale.
  *
- * This CLI is deliberately NOT a Claude Code look-alike. The palette below is
- * the whole point of the file: violet/cyan on ink, not the warm gold/coral
- * scheme every Claude Code derivative ships. `test/cli-identity.test.mjs` pins
- * that divergence — it fails if any of Claude Code's exact RGB triples, or its
- * prompt/spinner glyphs, reappear here.
+ * Every value below is copied verbatim from `aegiscodex-dev/src/theme.js`, which
+ * extracted them from the live ANSI stream of Claude Code: gold 255,193,7 ·
+ * coral 215,119,87 · lavender 177,185,249 · blue 120,160,250 · green 78,186,101
+ * · red 220,90,90 · gray 153,153,153 · dim 80,80,80.
+ *
+ * `test/cli-conformance.test.mjs` pins these to aegiscodex-dev's source, so the
+ * CLI cannot drift away from the design it is meant to match. (The previous
+ * revision of this file was the inverse: a violet/cyan "Signal" palette with a
+ * test asserting divergence. That theme is gone.)
  *
  * Zero dependencies: SGR escapes are hand-built, like the rest of this repo.
  */
@@ -26,76 +30,107 @@ const RESET_BG = '\x1b[49m';
 const RGB = (r, g, b) => `\x1b[38;2;${r};${g};${b}m`;
 const BG = (r, g, b) => `\x1b[48;2;${r};${g};${b}m`;
 
-/**
- * Dark theme (default). Every value is a truecolor triple; the palette leans
- * cool, and `ink`/`panel` are blue-black rather than neutral grey so the
- * transcript reads as a different product at a glance.
- */
-const SIGNAL = {
-  plasma: [124, 92, 255], // brand accent — sigil, prompts, active states
-  beam: [34, 211, 238], // secondary — structure, model ids, code
-  pulse: [52, 211, 153], // success
-  alert: [251, 113, 133], // warning
-  fault: [255, 99, 99], // error
-  muted: [148, 163, 184], // secondary text
-  dim: [71, 85, 105], // rails, rules, disabled
-  text: [226, 232, 240], // body
-  ink: [10, 12, 18], // deepest background (status bar, inverse)
-  panel: [22, 25, 34], // raised surface (banner box)
+/** The dark palette. Role names match aegiscodex-dev exactly. */
+const C = {
+  gold: RGB(255, 193, 7), // header line, accents, welcome frame
+  coral: RGB(215, 119, 87), // "Welcome to ..." title
+  lavender: RGB(177, 185, 249), // selection cursor ❯, links, focused option
+  blue: RGB(120, 160, 250), // selected palette row
+  green: RGB(78, 186, 101), // checkmarks, success, diff additions
+  red: RGB(220, 90, 90), // diff removals, errors
+  gray: RGB(153, 153, 153), // secondary text, menu numbers, hints
+  dim: RGB(80, 80, 80), // ╌ divider lines
+  white: RGB(255, 255, 255), // primary text, spinner glyphs
+  black: RGB(30, 30, 30), // code-block background
+  darkBg: RGB(20, 20, 20), // theme card background
 };
 
-/** Light theme — same roles, daylight values. Never a Claude Code palette. */
-const SIGNAL_LIGHT = {
-  plasma: [79, 55, 200],
-  beam: [8, 122, 145],
-  pulse: [5, 122, 85],
-  alert: [190, 55, 90],
-  fault: [185, 28, 28],
-  muted: [71, 85, 105],
-  dim: [148, 163, 184],
-  text: [15, 23, 42],
-  ink: [248, 250, 252],
-  panel: [241, 245, 249],
+/** Light-theme approximations, true to the dark palette's hue mapping. */
+const LIGHT = {
+  gold: RGB(180, 130, 0),
+  coral: RGB(190, 100, 70),
+  lavender: RGB(120, 130, 220),
+  blue: RGB(70, 110, 220),
+  green: RGB(60, 150, 80),
+  red: RGB(200, 60, 60),
+  gray: RGB(110, 110, 110),
+  dim: RGB(170, 170, 170),
+  white: RGB(40, 40, 40),
+  black: RGB(245, 245, 245),
+  darkBg: RGB(255, 255, 255),
 };
 
 /**
- * Glyphs. Chosen to share no character with Claude Code's prompt (`❯`),
- * spinner (`✢ · ✻ * ✽ ✶`), block cursor (`●`), hook (`⎿`) or quote bar (`▎`).
+ * Glyphs, copied from aegiscodex-dev's `GLYPH` including its platform passes.
+ * A few of these are missing from non-Linux terminal fonts (⎿ U+23BF, ⏸ U+23F8)
+ * or render as double-width emoji (✦ U+2726, ✻/✢/✽/✶), which breaks row
+ * alignment exactly like the welcome art — those platforms get single-width
+ * stand-ins instead.
  */
-const GLYPH = {
-  prompt: '»', // input prompt
-  sigil: '⬢', // AEGIS mark / assistant turns
-  rail: '┃', // heavy vertical gutter, both transcript roles
-  railEnd: '┣', // gutter corner where a turn's meta line attaches
-  spend: '∅', // money readout
-  ok: '✓',
-  err: '✗',
-  warn: '!',
-  bullet: '∙', // U+2219, not Claude's U+00B7
-  pointer: '▶', // selected row
-  divider: '─',
-  rule: '━',
-  spin: ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█', '▇', '▆', '▅', '▄', '▃', '▂'],
-  box: { tl: '┏', tr: '┓', bl: '┗', br: '┛', h: '━', v: '┃' }, // heavy, not rounded
-};
+const GLYPH = (() => {
+  const base = {
+    cursor: '❯', // menu selection marker, prompt prefix
+    check: '✔', // selected / completed
+    divider: '╌', // menu separators
+    bullet: '·', // inline separators
+    hint: '❯', // "Try ..." suggestion marker
+    pause: '⏸', // bottom status line (manual mode)
+    star: '✦', // own-session marker, decorations
+    leftarrow: '←', // hints on the status line
+    pointer: '▸', // tips list bullets
+    hook: '⎿', // inline command / tip rows (tool commands, usage hints)
+    block: '●', // streaming cursor / assistant answer marker
+    bloom: '✻', // "done" spinner glyph (✻ Brewed for 2s)
+    spin: ['✢', '·', '✻', '*', '✽', '✶'], // working spinner
+    ellipse: '…',
+  };
+  if (process.platform === 'win32') {
+    return {
+      ...base,
+      pause: '❚❚', // ⏸ U+23F8 missing from many Windows fonts
+      hook: '_|', // ⎿ U+23BF almost never present in Windows fonts
+      star: '*', // ✦ U+2726 renders wide/emoji
+      bloom: '*', // ✻ U+273B
+      spin: ['|', '/', '-', '\\', '*', '-'],
+    };
+  }
+  if (process.platform === 'darwin') {
+    return {
+      ...base,
+      pause: '❚❚', // ⏸ has an emoji presentation on Apple fonts
+      star: '*', // ✦ renders as a double-width emoji in Terminal.app
+      hook: '_|', // ⎿ U+23BF not in Apple monospace fonts
+    };
+  }
+  return base;
+})();
 
-/** Verbs for the working line — plain, no Claude Code whimsy. */
+/** Working-line verbs, verbatim from the capture-backed table. */
 const VERBS = [
-  'Consulting',
-  'Routing',
-  'Pooling',
-  'Reasoning',
-  'Drafting',
-  'Checking',
-  'Settling',
+  'Incubating',
+  'Tempering',
+  'Determining',
+  'Beboppin\'',
+  'Julienning',
+  'Inferring',
+  'Simmering',
+  'Twisting',
+  'Fermenting',
+  'Fiddle-faddling',
+  'Orbiting',
+  'Prestidigitating',
 ];
 
-const THEMES = { dark: SIGNAL, light: SIGNAL_LIGHT };
+/** Completion verbs: "✻ Churned for 3s" after a chat turn, "✻ Worked for 3s"
+ *  after one that used tools. */
+const DONE_VERBS = ['Churned', 'Worked'];
 
-/** The palette object for a context, per the rule that colours are always
- *  derived from one of the two theme objects — never typed inline. */
+const THEMES = { dark: C, light: LIGHT };
+
+/** The palette object for a context. Colours are always derived from one of the
+ *  two theme objects — never typed inline. */
 function themeOf(ctx) {
-  return ctx && ctx.light ? SIGNAL_LIGHT : SIGNAL;
+  return ctx && ctx.light ? LIGHT : C;
 }
 
 module.exports = {
@@ -111,10 +146,11 @@ module.exports = {
   UNDER_OFF,
   RESET_FG,
   RESET_BG,
-  SIGNAL,
-  SIGNAL_LIGHT,
+  C,
+  LIGHT,
   THEMES,
   GLYPH,
   VERBS,
+  DONE_VERBS,
   themeOf,
 };

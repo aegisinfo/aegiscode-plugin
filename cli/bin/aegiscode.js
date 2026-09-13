@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * `aegis-term` — the AEGIS terminal host.
+ * `aegiscode` — the AEGIS terminal host.
  *
  * Third host over the same two shared pieces the other two use: the thin
  * transport (client/aegis.js) and the tool registry (mcp/tools.js). The MCP
@@ -16,13 +16,13 @@
 
 const path = require('node:path');
 
-const HELP = `aegis-term — AEGIS in your shell.
+const HELP = `aegiscode — AEGIS in your shell.
 
 Usage:
-  aegis-term                     interactive session
-  aegis-term "question"          one-shot, then exit
-  aegis-term -p "question"       same, explicit
-  echo "q" | aegis-term -p -     read the prompt from stdin
+  aegiscode                     interactive session
+  aegiscode "question"          one-shot, then exit
+  aegiscode -p "question"       same, explicit
+  echo "q" | aegiscode -p -     read the prompt from stdin
 
 Options:
   -m, --model <id>        pin a model id (see /models; default: server choice)
@@ -130,7 +130,7 @@ async function main(argv = process.argv.slice(2)) {
   try {
     opts = parseArgs(argv);
   } catch (e) {
-    process.stderr.write(`aegis-term: ${e.message}\n\n${HELP}`);
+    process.stderr.write(`aegiscode: ${e.message}\n\n${HELP}`);
     return 2;
   }
 
@@ -155,12 +155,12 @@ async function main(argv = process.argv.slice(2)) {
   let prompt = opts.prompt;
   if (prompt === '-') {
     if (process.stdin.isTTY) {
-      process.stderr.write('aegis-term: -p - expects a prompt on stdin\n');
+      process.stderr.write('aegiscode: -p - expects a prompt on stdin\n');
       return 2;
     }
     prompt = await readStdin();
     if (!prompt) {
-      process.stderr.write('aegis-term: empty stdin\n');
+      process.stderr.write('aegiscode: empty stdin\n');
       return 2;
     }
   }
@@ -178,7 +178,7 @@ async function main(argv = process.argv.slice(2)) {
 
   if (!process.stdin.isTTY) {
     process.stderr.write(
-      'aegis-term: no terminal and no prompt. Use `aegis-term -p "question"` or pipe a prompt in.\n'
+      'aegiscode: no terminal and no prompt. Use `aegiscode -p "question"` or pipe a prompt in.\n'
     );
     return 2;
   }
@@ -189,7 +189,7 @@ if (require.main === module) {
   main()
     .then((code) => process.exit(code || 0))
     .catch((e) => {
-      process.stderr.write(`aegis-term: ${e && e.message ? e.message : e}\n`);
+      process.stderr.write(`aegiscode: ${e && e.message ? e.message : e}\n`);
       process.exit(1);
     });
 }

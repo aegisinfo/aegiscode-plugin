@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Pre-publish staging for the `aegis-terminal` package.
+ * Pre-publish staging for the `aegiscode` package.
  *
  * The CLI is a host, not a fork: it consumes the repo's shared modules
  * (`client/aegis.js` transport, `mcp/tools.js` registry, the desktop's pure

@@ -37,7 +37,7 @@ function resolveShared(relPath) {
     if (fs.existsSync(candidate)) return candidate;
   }
   throw new Error(
-    `aegis-term: cannot find ${relPath}. Expected it beside cli/ (in the repo) or ` +
+    `aegiscode: cannot find ${relPath}. Expected it beside cli/ (in the repo) or ` +
       'under cli/vendor/ (installed package). Reinstall the package, or run ' +
       '`node scripts/predist.mjs` from cli/ if this is a source checkout.'
   );

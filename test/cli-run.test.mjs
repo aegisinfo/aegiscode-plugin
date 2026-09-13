@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * End-to-end: the real `aegis-term` binary, against a real HTTP backend.
+ * End-to-end: the real `aegiscode` binary, against a real HTTP backend.
  *
  * The unit tests drive `createApp` with an injected client; this one proves the
  * wiring the user actually touches — argument parsing, the signal handling, the
@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const bin = join(__dirname, '..', 'cli', 'bin', 'aegis-term.js');
+const bin = join(__dirname, '..', 'cli', 'bin', 'aegiscode.js');
 
 function assert(cond, msg) {
   if (!cond) throw new Error(`ASSERT FAILED: ${msg}`);
@@ -161,7 +161,7 @@ try {
 
   const help = await run(['--help']);
   assert(help.code === 0, '--help exits 0');
-  assert(help.stdout.includes('aegis-term — AEGIS in your shell'), '--help prints usage');
+  assert(help.stdout.includes('aegiscode — AEGIS in your shell'), '--help prints usage');
   assert(help.stdout.includes('--no-stream'), '--help lists the options');
 
   const badFlag = await run(['--nope']);
@@ -184,7 +184,7 @@ try {
   // ── a failing backend is reported, not swallowed ─────────────────────────
   const badBase = await run(['-p', 'hi'], { env: { AEGIS_API_BASE: 'http://127.0.0.1:1' } });
   assert(badBase.code === 1, `a dead backend exits non-zero (got ${badBase.code})`);
-  assert(badBase.stderr.includes('aegis-term:'), `and reports the failure (${JSON.stringify(badBase.stderr)})`);
+  assert(badBase.stderr.includes('aegiscode:'), `and reports the failure (${JSON.stringify(badBase.stderr)})`);
 
   console.log('CLI run test passed');
   console.log(`  one-shot: exit 0, "Hello" + "1,500 tok" on stdout, ${seen.chat.length} backend calls seen`);

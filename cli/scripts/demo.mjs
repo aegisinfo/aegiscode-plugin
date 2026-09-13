@@ -87,6 +87,6 @@ push(render.renderStatus(ctx, { model: 'nexus-brain', tokens: 1562, spend: 0.000
 process.stdout.write((plain ? out.map(stripAnsi) : out).join('\n') + '\n\n');
 if (!plain) {
   process.stdout.write(
-    stripAnsi(`${art.WORDMARK} — ${out.length} lines rendered at ${width} cols${ctx.light ? ' (light)' : ''}\n`)
+    stripAnsi(`${art.WELCOME_TITLE} — ${out.length} lines rendered at ${width} cols${ctx.light ? ' (light)' : ''}\n`)
   );
 }

@@ -6,7 +6,7 @@
  * (client/, mcp/, desktop/) or under `cli/vendor/`, staged at publish time. The
  * repo layout is what every other test exercises; this one copies the staged
  * tree somewhere with no repo around it and runs the real binary there, so the
- * path an `npm install -g aegis-terminal` user gets is proven before publishing —
+ * path an `npm install -g aegiscode` user gets is proven before publishing —
  * not after.
  */
 import { spawn } from 'node:child_process';
@@ -117,12 +117,12 @@ try {
   }
 
   // 6. …and it must run a real turn from there.
-  const version = await sh(process.execPath, [join(pkgDir, 'bin', 'aegis-term.js'), '--version'], { cwd: tmp });
+  const version = await sh(process.execPath, [join(pkgDir, 'bin', 'aegiscode.js'), '--version'], { cwd: tmp });
   assert(version.code === 0, `packaged --version exits 0 (${version.err})`);
   const pkgVersion = JSON.parse(fs.readFileSync(join(cliDir, 'package.json'), 'utf8')).version;
   assert(version.out.trim() === pkgVersion, `packaged --version prints ${pkgVersion} (got ${version.out.trim()})`);
 
-  const run = await sh(process.execPath, [join(pkgDir, 'bin', 'aegis-term.js'), '-p', 'hi'], {
+  const run = await sh(process.execPath, [join(pkgDir, 'bin', 'aegiscode.js'), '-p', 'hi'], {
     cwd: tmp,
     env: { ...process.env, AEGIS_API_KEY: 'aegis_placeholder_for_pkg_test', AEGIS_API_BASE: base },
   });
@@ -140,10 +140,10 @@ try {
   if (readme.includes('cli/scripts/demo.mjs')) {
     assert(manifest.files.includes('scripts'), 'the README points at scripts/demo.mjs, so scripts/ must ship');
   }
-  for (const referenced of ['bin/aegis-term.js', 'scripts/demo.mjs', 'scripts/predist.mjs']) {
+  for (const referenced of ['bin/aegiscode.js', 'scripts/demo.mjs', 'scripts/predist.mjs']) {
     assert(fs.existsSync(join(cliDir, referenced)), `README/packaging references a missing file: ${referenced}`);
   }
-  assert(manifest.bin && manifest.bin['aegis-term'] === 'bin/aegis-term.js', 'the bin entry must point at the CLI');
+  assert(manifest.bin && manifest.bin['aegiscode'] === 'bin/aegiscode.js', 'the bin entry must point at the CLI');
   assert(manifest.scripts && manifest.scripts.prepublishOnly, 'publishing must run predist (prepublishOnly)');
 
   // 8. The demo — the thing a human uses to eyeball the UI — must report the
@@ -151,7 +151,7 @@ try {
   const demo = await sh(process.execPath, [join(cliDir, 'scripts', 'demo.mjs'), '--plain', '--width', '72'], { cwd: tmp });
   assert(demo.code === 0, `the demo must render (${demo.err})`);
   assert(demo.out.includes(`v${pkgVersion}`), `the demo must print v${pkgVersion} (got: ${demo.out.match(/v\d+\.\d+\.\d+/)}` + ')');
-  assert(demo.out.includes('A E G I S'), 'the demo renders the banner');
+  assert(demo.out.includes('AEGIS Code'), 'the demo renders the banner');
   assert(demo.out.includes('tok'), 'the demo renders the accounting line');
 
   console.log('CLI package test passed');
