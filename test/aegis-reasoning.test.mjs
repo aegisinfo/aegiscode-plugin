@@ -24,8 +24,37 @@
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { createClient } = require('../desktop/vendor/aegis.js');
+const { readFileSync, existsSync } = require('node:fs');
+const { join, dirname } = require('node:path');
+const { fileURLToPath } = require('node:url');
+
+/**
+ * Import the TRACKED source, not `desktop/vendor/aegis.js`.
+ *
+ * `desktop/vendor/` is gitignored (.gitignore:8) — it is a staged copy that
+ * `desktop/scripts/predist.mjs` regenerates from this file on every build. A
+ * test that imports the copy therefore passes only on a machine that happens
+ * to hold a generated one, and fails to load on a fresh clone. Worse, when the
+ * transport fix was first written into `vendor/` alone, the next `predist` run
+ * silently reverted it.
+ */
+const { createClient } = require('../client/aegis.js');
 const { createLocalEngine } = require('../desktop/lib/local/engine.js');
+
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+// The generated copy must stay byte-identical to the tracked source, or a
+// build would ship a transport without the fixes this file covers. Skipped
+// when predist has not run yet (vendor/ absent) — that is not a failure.
+const vendorPath = join(repoRoot, 'desktop', 'vendor', 'aegis.js');
+if (existsSync(vendorPath)) {
+  const src = readFileSync(join(repoRoot, 'client', 'aegis.js'), 'utf8');
+  const vendor = readFileSync(vendorPath, 'utf8');
+  assert(
+    src === vendor,
+    'desktop/vendor/aegis.js has drifted from client/aegis.js — re-run predist.mjs',
+  );
+}
 
 function assert(cond, msg) {
   if (!cond) throw new Error(`ASSERT FAILED: ${msg}`);

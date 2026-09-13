@@ -273,6 +273,11 @@ function createClient(opts = {}) {
    *   - `messages`  full OpenAI-format history (supersedes prompt/system)
    *   - `extra`     extra body fields merged verbatim (e.g. { aegis_memory,
    *                 session } for the online host's synced-memory writeback)
+   *   - `onReasoning`  receives `delta.reasoning_content` text as it streams
+   *                 (pool-brain worker findings). Kept off the answer channel
+   *                 so a reasoning-only stream still counts as unanswered.
+   *   - `idleTimeoutMs`  override the stalled-stream watchdog for this call
+   *                 (a worker fan-out is legitimately silent between passes)
    */
   async function chatCompletion({
     prompt,
@@ -283,6 +288,8 @@ function createClient(opts = {}) {
     maxTokens,
     stream = false,
     onStream,
+    onReasoning,
+    idleTimeoutMs,
     signal,
     extra,
   } = {}) {
@@ -300,7 +307,10 @@ function createClient(opts = {}) {
     if (!stream || typeof onStream !== 'function') {
       return apiPost('/api/v1/chat/completions', { ...body, stream: false });
     }
-    return postStream('/api/v1/chat/completions', body, authHeaders(), onStream, signal);
+    return postStream('/api/v1/chat/completions', body, authHeaders(), onStream, signal, {
+      onReasoning,
+      idleTimeoutMs,
+    });
   }
 
   /**
@@ -359,7 +369,8 @@ function createClient(opts = {}) {
    *    text as a single delta and resolve the parsed JSON, unchanged.
    * This keeps streaming purely additive for hosts that opt in.
    */
-  async function postStream(path, body, headers, onStream, signal) {
+  async function postStream(path, body, headers, onStream, signal, streamOpts) {
+    const { onReasoning, idleTimeoutMs } = streamOpts || {};
     let res;
     try {
       res = await fetch(`${apiBase}${path}`, {
@@ -416,12 +427,17 @@ function createClient(opts = {}) {
     // hangs with no way out but force-quit. Cap the gap between chunks —
     // not the whole response — so a slow-but-alive generation is untouched.
     const SSE_IDLE_TIMEOUT_MS = 60_000;
+    // A pooled brain call may set its own, larger budget: the fan-out yields a
+    // header chunk and then stays silent until the FIRST worker pass returns,
+    // which is a full reasoning-model call and can outlast the 60s default.
+    const idleMs =
+      Number(idleTimeoutMs) > 0 ? Number(idleTimeoutMs) : SSE_IDLE_TIMEOUT_MS;
     async function readWithIdleTimeout() {
       let timer;
       const timeout = new Promise((_, reject) => {
         timer = setTimeout(() => {
-          reject(new Error(`stream stalled - no data for ${SSE_IDLE_TIMEOUT_MS / 1000}s`));
-        }, SSE_IDLE_TIMEOUT_MS);
+          reject(new Error(`stream stalled - no data for ${idleMs / 1000}s`));
+        }, idleMs);
       });
       try {
         return await Promise.race([reader.read(), timeout]);
@@ -469,6 +485,20 @@ function createClient(opts = {}) {
         if (json.usage) usage = json.usage;
         const choice = json.choices && json.choices[0];
         if (choice && choice.finish_reason) finishReason = choice.finish_reason;
+        // Extended-reasoning trace: the pool's worker findings (and any
+        // provider CoT) arrive as `delta.reasoning_content` *before* the
+        // synthesis pass writes the visible answer. Deliberately kept out of
+        // `fullText` — deliberation is not an answer, and counting it would
+        // make a no-answer turn look answered to every caller's empty-check.
+        const reasoning =
+          (choice &&
+            ((choice.delta && choice.delta.reasoning_content) ||
+              (choice.message && choice.message.reasoning_content))) ||
+          '';
+        if (reasoning) {
+          if (typeof onReasoning === 'function') onReasoning(reasoning);
+          else onStream({ reasoning });
+        }
         const delta =
           (choice &&
             ((choice.delta && choice.delta.content) ||
