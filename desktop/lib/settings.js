@@ -35,10 +35,21 @@ const AEGIS_KEY_NAMESPACE = '__aegis';
  *  migrateLegacyAegisKey() relocates it (and list() hides it meanwhile). */
 const LEGACY_AEGIS_NAMESPACE = 'aegis';
 
+/** Reserved namespace for the global quick-launcher shortcut config
+ *  ({ enabled, shortcut }) — app-level settings, not a provider, so it must
+ *  stay out of the provider CRUD surface for the same reason the AEGIS key
+ *  does (see AEGIS_KEY_NAMESPACE above). */
+const QUICK_LAUNCHER_NAMESPACE = '__quickLauncher';
+
+/** Default global shortcut: rare enough on both major platforms to avoid
+ *  fighting existing app/OS bindings, memorable enough to type once. */
+const DEFAULT_QUICK_LAUNCHER_SHORTCUT = 'CmdOrCtrl+Shift+Space';
+
 /** Namespaces the provider-config surface must never see or mutate. */
 const RESERVED_NAMESPACES = Object.freeze([
   AEGIS_KEY_NAMESPACE,
   LEGACY_AEGIS_NAMESPACE,
+  QUICK_LAUNCHER_NAMESPACE,
 ]);
 
 /** True for the AEGIS-key namespace(s) — provider CRUD must refuse these. */
@@ -199,6 +210,32 @@ function createSettingsStore({ dir, safeStorage } = {}) {
     }
   }
 
+  // --- Quick launcher: reserved namespace, plain (unencrypted) config ------
+  // No secret lives here — just a bool and a shortcut string — so unlike the
+  // AEGIS key above there is nothing to encrypt/decrypt.
+
+  function quickLauncherConfig() {
+    const cfg = load()[QUICK_LAUNCHER_NAMESPACE] || {};
+    const shortcut =
+      typeof cfg.shortcut === 'string' && cfg.shortcut.trim()
+        ? cfg.shortcut.trim()
+        : DEFAULT_QUICK_LAUNCHER_SHORTCUT;
+    return { enabled: Boolean(cfg.enabled), shortcut };
+  }
+
+  function setQuickLauncherConfig({ enabled, shortcut } = {}) {
+    const data = load();
+    data[QUICK_LAUNCHER_NAMESPACE] = {
+      enabled: Boolean(enabled),
+      shortcut:
+        typeof shortcut === 'string' && shortcut.trim()
+          ? shortcut.trim()
+          : DEFAULT_QUICK_LAUNCHER_SHORTCUT,
+    };
+    save(data);
+    return quickLauncherConfig();
+  }
+
   return {
     file,
     get,
@@ -211,6 +248,8 @@ function createSettingsStore({ dir, safeStorage } = {}) {
     aegisRawKey,
     setAegisKey,
     migrateLegacyAegisKey,
+    quickLauncherConfig,
+    setQuickLauncherConfig,
   };
 }
 
@@ -218,6 +257,8 @@ module.exports = {
   SETTINGS_FILE,
   AEGIS_KEY_NAMESPACE,
   LEGACY_AEGIS_NAMESPACE,
+  QUICK_LAUNCHER_NAMESPACE,
+  DEFAULT_QUICK_LAUNCHER_SHORTCUT,
   RESERVED_NAMESPACES,
   isReservedNamespace,
   maskKey,

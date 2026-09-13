@@ -31,6 +31,7 @@
 const aegis = window.aegis;
 const models = window.models;
 const sync = window.sync;
+const quickLauncher = window.quickLauncher;
 
 if (!aegis || !models) {
   document.body.textContent =
@@ -76,6 +77,10 @@ const ELEMENT_IDS = {
   modelHint: 'model-hint',
   settingsList: 'settings-list',
   settingsHint: 'settings-hint',
+  quickLauncherEnabled: 'quick-launcher-enabled',
+  quickLauncherShortcut: 'quick-launcher-shortcut',
+  quickLauncherSave: 'quick-launcher-save',
+  quickLauncherHint: 'quick-launcher-hint',
   sessionsRefresh: 'sessions-refresh',
   sessionsExport: 'sessions-export',
   sessionsList: 'sessions-list',
@@ -404,6 +409,74 @@ async function verifyAegisKey() {
   } finally {
     els.apiKeyVerify.disabled = false;
   }
+}
+
+// --------------------------------------------------------- quick launcher
+
+/** Render a `{ enabled, shortcut, packaged, active, reason }` status (see
+ *  main.js createQuickLauncherDispatch) into the settings card. */
+function renderQuickLauncherStatus(status) {
+  if (!status) return;
+  els.quickLauncherEnabled.checked = Boolean(status.enabled);
+  els.quickLauncherShortcut.value = status.shortcut || '';
+  els.quickLauncherShortcut.placeholder = status.shortcut || 'CmdOrCtrl+Shift+Space';
+  const bits = [];
+  if (status.packaged) bits.push('always on in this packaged build');
+  bits.push(status.active ? `active — press ${status.shortcut} anywhere` : 'inactive');
+  if (status.reason) bits.push(status.reason);
+  els.quickLauncherHint.textContent = bits.join(' · ');
+}
+
+async function loadQuickLauncherSettings() {
+  if (!quickLauncher) return;
+  try {
+    renderQuickLauncherStatus(await quickLauncher.status());
+  } catch (err) {
+    els.quickLauncherHint.textContent =
+      `status failed: ${err && err.message ? err.message : err}`;
+  }
+}
+
+async function saveQuickLauncherSettings() {
+  if (!quickLauncher) return;
+  els.quickLauncherSave.disabled = true;
+  els.quickLauncherHint.textContent = 'saving…';
+  try {
+    renderQuickLauncherStatus(
+      await quickLauncher.setConfig({
+        enabled: els.quickLauncherEnabled.checked,
+        shortcut: els.quickLauncherShortcut.value.trim(),
+      })
+    );
+  } catch (err) {
+    els.quickLauncherHint.textContent =
+      `save failed: ${err && err.message ? err.message : err}`;
+  } finally {
+    els.quickLauncherSave.disabled = false;
+  }
+}
+
+/**
+ * Land a quick-launcher answer (main.js QUICK_LAUNCHER_PUSH_CHANNEL, see
+ * preload.js onQuickLauncherPush) as a real turn in the open thread — same
+ * "renderer owns the state, main.js just pings" split every other menu
+ * channel in this file uses (onMenuNewChat, onMenuSearch, …). Starts a fresh
+ * thread first if none is open yet, exactly like send() does for a first
+ * message, then persists both turns via sync.append — the same call send()
+ * makes — so the pushed Q&A survives exactly like one typed in this window.
+ */
+function handleQuickLauncherPush(payload) {
+  const prompt = payload && payload.prompt;
+  const response = payload && payload.response;
+  if (!prompt || !response) return;
+  if (!currentSessionId) currentSessionId = newSessionId();
+  const sessionId = currentSessionId;
+  addMessage('user', prompt);
+  addMessage('assistant', response, undefined, sessionId);
+  threadMessages.push({ role: 'user', content: prompt });
+  threadMessages.push({ role: 'assistant', content: response });
+  sync.append(sessionId, { role: 'user', content: prompt }).catch(() => {});
+  sync.append(sessionId, { role: 'assistant', content: response }).catch(() => {});
 }
 
 // ----------------------------------------------------------------- memory
@@ -2253,6 +2326,9 @@ async function init() {
   // window has finished loading, so registering it here at boot is in time
   // for both a cold-launch link and one that arrives while running.
   if (aegis.onDeepLink) aegis.onDeepLink(handleDeepLink);
+  // Quick launcher "add to chat" push (main.js pushQuickLauncherResult) —
+  // same ping/act split as the channels above.
+  if (aegis.onQuickLauncherPush) aegis.onQuickLauncherPush(handleQuickLauncherPush);
   els.sessionsRefresh.addEventListener('click', loadSessions);
   els.syncNow.addEventListener('click', syncNow);
   els.sessionsExport.addEventListener('click', () => exportSession('markdown'));
@@ -2263,6 +2339,14 @@ async function init() {
     if (e.key === 'Enter') {
       e.preventDefault();
       saveApiKey();
+    }
+  });
+
+  els.quickLauncherSave.addEventListener('click', saveQuickLauncherSettings);
+  els.quickLauncherShortcut.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      saveQuickLauncherSettings();
     }
   });
 
@@ -2342,6 +2426,7 @@ async function init() {
 
   await loadClasses();
   await loadSettings();
+  await loadQuickLauncherSettings();
   await loadSessions();
   await refreshSyncStatus();
   loadAccountInfo();

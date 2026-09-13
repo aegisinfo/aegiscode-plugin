@@ -57,6 +57,7 @@ const sessionStore = require('./lib/sync/sessions.js');
 const memoryQueue = require('./lib/sync/memory-queue.js');
 const windowState = require('./lib/window-state.js');
 const deepLink = require('./lib/deep-link.js');
+const quickLauncherLib = require('./lib/quick-launcher.js');
 // Foreign-memory scanner (shared with client/foreign-memory.js). Same
 // resolution rule as the transport above: the canonical file inside the repo,
 // the predist-staged copy in a packaged app. Never forked logic — so it needs
@@ -77,6 +78,7 @@ const IPC_PREFIX = 'aegis:';
 const MODEL_PREFIX = 'model:';
 const SYNC_PREFIX = 'sync:';
 const TOOLS_PREFIX = 'tools:';
+const QUICK_PREFIX = 'quick:';
 
 /**
  * Main -> renderer push channel for chat SSE deltas (D2.1 streaming render).
@@ -103,6 +105,15 @@ const MENU_EXPORT_JSON_CHANNEL = `${IPC_PREFIX}menuExportJson`;
  * before it arrives.
  */
 const DEEP_LINK_CHANNEL = `${IPC_PREFIX}deepLink`;
+
+/**
+ * Main -> renderer push for a quick-launcher answer the user chose to keep
+ * (D? quick launcher §4). Carries `{ prompt, response, model }`; the main
+ * window's renderer already owns "add a turn to the open thread" (send()'s
+ * addMessage + sync.append), so — same "menu pings, renderer acts" pattern as
+ * MENU_NEW_CHAT_CHANNEL etc. — this just delivers the payload.
+ */
+const QUICK_LAUNCHER_PUSH_CHANNEL = `${IPC_PREFIX}quickLauncherPush`;
 
 /**
  * Address one SSE delta to the stream that produced it (D2.2 multi-stream).
@@ -534,6 +545,63 @@ function registerExportIpc(ipcMain, sessions, dir, showSaveDialog, writeFile) {
   const dispatch = createExportDispatch(sessions, dir, showSaveDialog, writeFile);
   for (const [name, handler] of Object.entries(dispatch)) {
     ipcMain.handle(`${IPC_PREFIX}${name}`, (_event, payload) => handler(payload));
+  }
+  return dispatch;
+}
+
+/**
+ * Pure mapping: `quick:<name>` -> quick-launcher state. `opts.isPackaged`,
+ * `opts.applyConfig` and `opts.pushToMain` are injected (default no-ops) so
+ * this is unit-testable in plain Node, same pattern as createExportDispatch's
+ * injected showSaveDialog/writeFile — bootstrap() wires the real
+ * globalShortcut-backed applyConfig and window-relaying pushToMain.
+ *
+ * `applyConfig(cfg)` is expected to (re)register or unregister the global
+ * shortcut for the given `{ enabled, shortcut }` and resolve/return
+ * `{ active, reason }` — `reason` carries a human-readable cause the one time
+ * registration fails (e.g. the accelerator is already claimed by another
+ * app), so the renderer's settings card can show it instead of a silent
+ * no-op. This module never throws on a failed registration; it degrades to
+ * `active:false` and surfaces `reason`.
+ */
+function createQuickLauncherDispatch(settings, opts = {}) {
+  const isPackaged = Boolean(opts.isPackaged);
+  const applyConfig = opts.applyConfig || (() => ({ active: false, reason: null }));
+  const pushToMain = opts.pushToMain || (() => ({ ok: false, reason: 'no main window' }));
+  let state = { active: false, reason: null };
+
+  function status() {
+    return { ...settings.quickLauncherConfig(), packaged: isPackaged, ...state };
+  }
+
+  function setConfig(payload) {
+    const saved = settings.setQuickLauncherConfig({
+      enabled: payload && payload.enabled,
+      shortcut: payload && payload.shortcut,
+    });
+    state = applyConfig(saved) || { active: false, reason: null };
+    return { ...saved, packaged: isPackaged, ...state };
+  }
+
+  return {
+    status,
+    setConfig,
+    pushToMain: (payload, event) => pushToMain(payload, event),
+  };
+}
+
+/** Register quick:<name> on ipcMain. `pushToMain` needs the raw IPC `event`
+ *  (to hide the launcher window that sent it — see bootstrap()'s
+ *  pushQuickLauncherResult), so it is special-cased exactly like
+ *  aegis:chatCompletion is in registerIpc(); every other method drops the
+ *  event, matching the rest of this file's convention. */
+function registerQuickLauncherIpc(ipcMain, dispatch) {
+  for (const [name, handler] of Object.entries(dispatch)) {
+    if (name === 'pushToMain') {
+      ipcMain.handle(`${QUICK_PREFIX}${name}`, (event, payload) => handler(payload, event));
+      continue;
+    }
+    ipcMain.handle(`${QUICK_PREFIX}${name}`, (_event, payload) => handler(payload));
   }
   return dispatch;
 }
@@ -1085,7 +1153,7 @@ function buildAppMenu({ app, Menu, BrowserWindow, updateManager }) {
 // ---------------------------------------------------------------------------
 
 function bootstrap() {
-  const { app, BrowserWindow, ipcMain, safeStorage, shell, Menu, Notification, screen, dialog } = electron;
+  const { app, BrowserWindow, ipcMain, safeStorage, shell, Menu, Notification, screen, dialog, globalShortcut } = electron;
 
   // A second launch (double-clicking the icon again, `aegis` from a second
   // terminal, …) must focus the existing window, not spawn a second process
@@ -1174,6 +1242,161 @@ function bootstrap() {
     notifyReplyIfUnfocused
   );
   registerModelIpc(ipcMain, engine, sessionsDir, aegis, notifyReplyIfUnfocused);
+
+  // ---------------------------------------------------------------------
+  // Global quick-launcher (D? quick launcher): a frameless, always-on-top,
+  // taskbar-hidden popup toggled by a systemwide shortcut, for a one-shot
+  // question without switching to (or even seeing) the main window.
+  // ---------------------------------------------------------------------
+
+  // Set by createWindow() below once the main window exists; read by
+  // pushQuickLauncherResult() to know where a "add to chat" push should land.
+  // `let` (not `const`) because createWindow() can run more than once
+  // (macOS 'activate' with no windows open, a 'second-instance' relaunch).
+  let mainWindowRef = null;
+  let quickWin = null;
+
+  function getOrCreateQuickLauncherWindow() {
+    if (quickWin && !quickWin.isDestroyed()) return quickWin;
+    quickWin = new BrowserWindow({
+      width: 560,
+      height: 320,
+      show: false,
+      frame: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      resizable: false,
+      movable: true,
+      fullscreenable: false,
+      minimizable: false,
+      maximizable: false,
+      backgroundColor: '#0d1117',
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    });
+    quickWin.setMenuBarVisibility(false);
+    quickWin.loadFile(path.join(__dirname, 'renderer', 'quick.html'));
+
+    // Escape hides it. Caught at the Electron input-event level (rather than
+    // a renderer keydown -> IPC round trip) so there is exactly one place —
+    // here — that decides what "hide" means, matching the blur handler right
+    // below: plain win.hide(), nothing more. Neither path ever calls
+    // mainWindowRef.focus() or otherwise touches the main window, so hiding
+    // the launcher — by Escape, by blur, or by pressing the toggle shortcut
+    // again — can never steal focus from whatever window had it before the
+    // launcher opened.
+    quickWin.webContents.on('before-input-event', (_event, input) => {
+      if (input.type === 'keyDown' && input.key === 'Escape' && !quickWin.isDestroyed()) {
+        quickWin.hide();
+      }
+    });
+    // Click-away / Alt-Tab away hides it too — a launcher that stays pinned
+    // on screen after the user's attention has moved on is just clutter.
+    quickWin.on('blur', () => {
+      if (!quickWin.isDestroyed() && quickWin.isVisible()) quickWin.hide();
+    });
+    quickWin.on('closed', () => {
+      quickWin = null;
+    });
+    return quickWin;
+  }
+
+  function toggleQuickLauncher() {
+    const win = getOrCreateQuickLauncherWindow();
+    if (win.isVisible()) {
+      win.hide();
+      return;
+    }
+    const cursor = screen.getCursorScreenPoint();
+    const displays = screen.getAllDisplays();
+    const current = win.getBounds();
+    const bounds = quickLauncherLib.computeQuickLauncherBounds({
+      cursor,
+      displays,
+      size: { width: current.width, height: current.height },
+    });
+    win.setBounds(bounds);
+    win.show();
+    win.focus();
+  }
+
+  /**
+   * (Re)register the global shortcut for `{ enabled, shortcut }`, or
+   * unregister it when this build/config doesn't want one active (dev run,
+   * flag off). `globalShortcut.unregisterAll()` is safe here — this app
+   * registers no other global accelerators (the menu's Cmd/Ctrl+N etc. are
+   * plain Electron Menu roles, local to the focused window, not
+   * globalShortcut). Never throws: a taken accelerator or an invalid
+   * accelerator string both degrade to `{ active: false, reason }` with a
+   * console.warn, exactly per the "gracefully degrading" requirement — a
+   * bad shortcut must never crash the app or block it from starting.
+   */
+  function applyQuickLauncherConfig(cfg) {
+    globalShortcut.unregisterAll();
+    if (!quickLauncherLib.shouldEnableGlobalShortcut({ isPackaged: app.isPackaged, enabled: cfg.enabled })) {
+      return { active: false, reason: null };
+    }
+    try {
+      const ok = globalShortcut.register(cfg.shortcut, toggleQuickLauncher);
+      if (!ok) {
+        const reason = `"${cfg.shortcut}" could not be registered — it may already be in use by another application.`;
+        console.warn(`[quick-launcher] ${reason}`);
+        return { active: false, reason };
+      }
+      return { active: true, reason: null };
+    } catch (err) {
+      const reason = errorText(err);
+      console.warn(`[quick-launcher] failed to register shortcut "${cfg.shortcut}": ${reason}`);
+      return { active: false, reason };
+    }
+  }
+
+  /**
+   * `quick:pushToMain` — the launcher's "add to chat" keystroke. Hides the
+   * launcher window that sent the request (never the reverse: the main
+   * window is never hidden), delivers the payload to the main window over
+   * QUICK_LAUNCHER_PUSH_CHANNEL (whose handler in renderer/app.js owns
+   * actually building the chat turn — same "renderer owns the state" split
+   * as every other menu-ping channel in this file), then brings the main
+   * window forward so the user lands where the new turn appeared.
+   */
+  function pushQuickLauncherResult(payload, event) {
+    const senderWin = event && event.sender && BrowserWindow.fromWebContents(event.sender);
+    if (senderWin && !senderWin.isDestroyed()) senderWin.hide();
+    const target =
+      mainWindowRef && !mainWindowRef.isDestroyed()
+        ? mainWindowRef
+        : BrowserWindow.getAllWindows().find((w) => w !== senderWin) || null;
+    if (!target) return { ok: false, reason: 'no main window is open' };
+    target.webContents.send(QUICK_LAUNCHER_PUSH_CHANNEL, payload || {});
+    if (target.isMinimized()) target.restore();
+    if (!target.isVisible()) target.show();
+    target.focus();
+    return { ok: true };
+  }
+
+  const quickLauncherDispatch = createQuickLauncherDispatch(settings, {
+    isPackaged: app.isPackaged,
+    applyConfig: applyQuickLauncherConfig,
+    pushToMain: pushQuickLauncherResult,
+  });
+  registerQuickLauncherIpc(ipcMain, quickLauncherDispatch);
+  // Apply whatever was last saved (or the default) right away: ship the
+  // shortcut only when app.isPackaged || the settings flag is on — see
+  // shouldEnableGlobalShortcut — so a plain `electron .` dev run never grabs
+  // a systemwide hotkey unless the developer opted in from Settings.
+  quickLauncherDispatch.setConfig(settings.quickLauncherConfig());
+
+  // A held global shortcut outlives this app if not released — every quit
+  // path (explicit quit, window-all-closed on non-mac, OS shutdown) must
+  // free it.
+  app.on('will-quit', () => {
+    globalShortcut.unregisterAll();
+  });
 
   // electron-updater touches the network and expects a build-time
   // app-update.yml that only exists in a packaged app; requiring it is safe
@@ -1288,7 +1511,11 @@ function bootstrap() {
 
     win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
     openWindows.add(win);
-    win.on('closed', () => openWindows.delete(win));
+    mainWindowRef = win;
+    win.on('closed', () => {
+      openWindows.delete(win);
+      if (mainWindowRef === win) mainWindowRef = null;
+    });
     return win;
   }
 
@@ -1371,4 +1598,8 @@ module.exports = {
   registerExportIpc,
   safeExportBasename,
   sendDeepLinkToWindow,
+  QUICK_PREFIX,
+  QUICK_LAUNCHER_PUSH_CHANNEL,
+  createQuickLauncherDispatch,
+  registerQuickLauncherIpc,
 };

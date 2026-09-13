@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:"
+  />
+  <title>AEGIS Quick Launcher</title>
+  <link rel="stylesheet" href="quick.css" />
+</head>
+<body>
+  <form id="ql-form" class="ql-shell">
+    <div class="ql-head">
+      <span class="ql-badge">AEGIS</span>
+      <span class="ql-model" id="ql-model-label">Aegis Cloud</span>
+      <select id="ql-model-select" class="ql-model-select" title="Model" hidden></select>
+      <div class="ql-spacer"></div>
+      <button type="button" id="ql-stop" class="ql-stop" hidden>Stop</button>
+    </div>
+    <textarea
+      id="ql-prompt"
+      class="ql-prompt"
+      rows="2"
+      placeholder="Ask AEGIS… (Enter to ask, Esc to close)"
+      autocomplete="off"
+    ></textarea>
+    <div class="ql-response" id="ql-response" aria-live="polite"></div>
+    <div class="ql-foot">
+      <span class="ql-hint" id="ql-status">Enter to ask · Esc to close</span>
+      <div class="ql-spacer"></div>
+      <button type="button" id="ql-push" class="ql-push" hidden>
+        Add to chat (⌘/Ctrl+⏎)
+      </button>
+    </div>
+  </form>
+  <script src="quick.js"></script>
+</body>
+</html>

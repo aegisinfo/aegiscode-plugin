@@ -16,6 +16,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 const IPC_PREFIX = 'aegis:';
 const MODEL_PREFIX = 'model:';
 const SYNC_PREFIX = 'sync:';
+const QUICK_PREFIX = 'quick:';
 const CHAT_DELTA_CHANNEL = `${IPC_PREFIX}chatDelta`;
 const UPDATE_STATUS_CHANNEL = `${IPC_PREFIX}updateStatus`;
 const MENU_NEW_CHAT_CHANNEL = `${IPC_PREFIX}menuNewChat`;
@@ -23,6 +24,7 @@ const MENU_SEARCH_CHANNEL = `${IPC_PREFIX}menuSearch`;
 const MENU_EXPORT_MARKDOWN_CHANNEL = `${IPC_PREFIX}menuExportMarkdown`;
 const MENU_EXPORT_JSON_CHANNEL = `${IPC_PREFIX}menuExportJson`;
 const DEEP_LINK_CHANNEL = `${IPC_PREFIX}deepLink`;
+const QUICK_LAUNCHER_PUSH_CHANNEL = `${IPC_PREFIX}quickLauncherPush`;
 
 function invoke(name, payload) {
   return ipcRenderer.invoke(
@@ -41,6 +43,13 @@ function invokeModel(name, payload) {
 function invokeSync(name, payload) {
   return ipcRenderer.invoke(
     SYNC_PREFIX + name,
+    payload === undefined ? undefined : payload
+  );
+}
+
+function invokeQuick(name, payload) {
+  return ipcRenderer.invoke(
+    QUICK_PREFIX + name,
     payload === undefined ? undefined : payload
   );
 }
@@ -174,6 +183,14 @@ const api = {
     ipcRenderer.on(DEEP_LINK_CHANNEL, listener);
     return () => ipcRenderer.removeListener(DEEP_LINK_CHANNEL, listener);
   },
+  // Quick launcher "add to chat" (main.js pushQuickLauncherResult): fires
+  // with { prompt, response, model } once the user pushes a launcher answer
+  // into the main window — see renderer/app.js's handler for what it builds.
+  onQuickLauncherPush: (onPush) => {
+    const listener = (_event, payload) => onPush(payload);
+    ipcRenderer.on(QUICK_LAUNCHER_PUSH_CHANNEL, listener);
+    return () => ipcRenderer.removeListener(QUICK_LAUNCHER_PUSH_CHANNEL, listener);
+  },
 };
 
 // Model-class surface (plan P1 §5.3): backed by the `model:` channels in
@@ -238,6 +255,27 @@ const sync = {
   status: () => invokeSync('status'),
 };
 
+// Quick launcher surface: loaded by BOTH renderer/index.html (the settings
+// card that configures the global shortcut) and renderer/quick.html (the
+// launcher popup itself, which calls pushToMain when the user keeps an
+// answer) — one bridge, two consumers, same whitelist-only shape as
+// aegis/models/sync above.
+const quickLauncher = {
+  // { enabled, shortcut, packaged, active, reason } — see main.js
+  // createQuickLauncherDispatch. `active` reflects whether the shortcut is
+  // actually registered right now; `reason` explains a failed registration.
+  status: () => invokeQuick('status'),
+  setConfig: (cfg) =>
+    invokeQuick('setConfig', {
+      enabled: cfg && cfg.enabled,
+      shortcut: cfg && cfg.shortcut,
+    }),
+  // Called by renderer/quick.js once an answer exists; resolves
+  // { ok, reason? }.
+  pushToMain: (payload) => invokeQuick('pushToMain', payload || {}),
+};
+
 contextBridge.exposeInMainWorld('aegis', Object.freeze(api));
 contextBridge.exposeInMainWorld('models', Object.freeze(models));
 contextBridge.exposeInMainWorld('sync', Object.freeze(sync));
+contextBridge.exposeInMainWorld('quickLauncher', Object.freeze(quickLauncher));

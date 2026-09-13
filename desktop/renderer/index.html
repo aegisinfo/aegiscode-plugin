@@ -125,6 +125,28 @@
       </section>
 
       <section class="card">
+        <h2>Quick Launcher</h2>
+        <label
+          class="flow-toggle"
+          for="quick-launcher-enabled"
+          title="Register a systemwide keyboard shortcut that opens a small always-on-top prompt window from anywhere on the desktop, even when AEGIS Desktop isn't focused. Packaged builds always have it on; this toggle is for a dev run."
+        >
+          <input type="checkbox" id="quick-launcher-enabled" />
+          <span>enable global shortcut</span>
+        </label>
+        <div class="api-key-row">
+          <input
+            type="text"
+            id="quick-launcher-shortcut"
+            placeholder="CmdOrCtrl+Shift+Space"
+            autocomplete="off"
+          />
+          <button type="button" id="quick-launcher-save" class="ghost-btn">Save</button>
+        </div>
+        <p class="hint" id="quick-launcher-hint"></p>
+      </section>
+
+      <section class="card">
         <h2>Sessions</h2>
         <button type="button" id="sessions-refresh" class="ghost-btn">Refresh</button>
         <button type="button" id="sync-now" class="ghost-btn">Sync now</button>
