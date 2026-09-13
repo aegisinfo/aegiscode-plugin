@@ -17,6 +17,9 @@ Status:
 - [x] Phase 5 — P2 metadata-driven per-model output ceiling
 - [x] Phase 6 — P3 cloud conversation sync (replace the push stub)
 - [x] Phase 7 — P3 memory-follows-user from any model class
+- [ ] Phase 8 — P3.5 renderer testability: prove the DOM paths, not just pure policy
+- [ ] Phase 9 — P3.6 headless Electron smoke in CI (scroll-hold + interrupt)
+- [ ] Phase 10 — P3.7 stream lifecycle hardening (abort re-entrancy, partial salvage)
 
 ---
 
@@ -196,3 +199,88 @@ aegis1 — this phase is client-side only.
 aegis1 server work that unblocks Phases 5–6 is tracked in the **aegis1** repo's
 own `PLAN.md` (P4.2 catalog metadata → Phase 5; P4.5 conversation-sync endpoint →
 Phase 6). Phase 7 is unblocked today (memory sync already shipped).
+
+---
+
+## Phase 8 — P3.5 renderer testability: prove the DOM paths, not just pure policy
+
+Scope. The renderer's decision logic now lives in `desktop/renderer/*.js` sibling
+classic scripts (`max-tokens.js`, `stream-policy.js`) with guarded
+`module.exports`, loaded by an entry point and unit-tested from
+`test/*.test.mjs`. That convention is good and should hold — but it only covers
+**pure** functions. `rafPainter`, `stickToBottom`, and `stopPendingTurn` touch
+the DOM, so the two symptoms this phase exists to prevent —
+*the transcript snapping to the bottom while you read* and *Escape not
+interrupting* — cannot be proven by the suite today. A broken scroll path can
+ship green, which is precisely how `stream-policy.js` once shipped unwired.
+
+- Add a jsdom harness (or extract the remaining DOM-touching policy into pure
+  functions) so `rafPainter` coalescing, the follow-only-at-tail rule, and the
+  Escape → `stopPendingTurn` path are asserted behaviorally.
+- Keep `test/renderer-wiring.test.mjs`: it guards the
+  `ReferenceError` class that `node --check` provably cannot see (a module
+  loaded by no entry point, or a global used before its script tag). Add any
+  new renderer script to it.
+- The suite must fail when a script tag is missing, when the scroll veto is
+  removed, and when Escape is unbound.
+
+Exit criteria:
+- Removing the script tag, the `userScrolledUp` veto, or the Escape handler
+  each fails a test — verified by actually removing each in a worktree.
+- `npm run check` + the `test/**/*.test.mjs` glob run in CI (already wired);
+  no test file may depend on being run by hand.
+
+## Phase 9 — P3.6 headless Electron smoke in CI (scroll-hold + interrupt)
+
+Scope. Every claim about the scroll/interrupt fix in this repo is so far
+unproven at runtime: the pure policy is unit-tested, the DOM behaviour is not,
+and no one has run a live turn. This phase makes the acceptance criterion
+executable instead of manual.
+
+- Launch the real Electron host headlessly (xvfb) against a **stubbed**
+  streaming transport, so it needs no network, no key, and no provider spend.
+- Drive a streamed turn, assert the transcript holds position when the user
+  scrolls up mid-stream, assert Escape stops the stream, and assert the partial
+  answer is salvaged and labelled rather than destroyed.
+- Wire it as a CI job so the manual `npm start` ritual stops being the only
+  gate on the desktop shell.
+
+Exit criteria:
+- CI fails if scrolling up mid-stream loses the reader's position.
+- CI fails if Escape does not terminate a streamed turn.
+- The job runs with no cloud credentials and no outbound network dependency.
+
+## Phase 10 — P3.7 stream lifecycle hardening (abort re-entrancy, partial salvage)
+
+Scope. The abort path was written to make *one* interruption safe. Its edges are
+unverified, and each is reachable by an ordinary user:
+
+- **Re-entrancy.** Escape pressed twice, or Escape arriving after the stream
+  already ended: `stopPendingTurn()` must be idempotent and must not cancel a
+  *subsequent* turn.
+- **Send while cancelling.** A new turn started during teardown must not be
+  killed by the previous abort.
+- **Partial salvage.** `isCancellation` already distinguishes a deliberate stop
+  from a transport error (`ECONNABORTED` / dropped socket must **not** be
+  relabelled "stopped by you" — pinned in `test/stream-policy.test.mjs`); the
+  DOM-side salvage of `streamedText || reasoningText` needs the same treatment.
+- **Reasoning-only streams.** A turn that produced deliberation but no answer
+  text before the abort should still surface something.
+- **Tool-call streams mid-abort** — a turn cancelled between tool call and
+  result.
+
+Exit criteria:
+- Escape is idempotent; a second press never affects another turn.
+- A dropped socket surfaces as an error, never as "stopped by you".
+- Cancelling a reasoning-only or tool-call turn leaves the user with the
+  partial output instead of an empty bubble.
+
+---
+
+## Prerequisites (out of repo)
+
+aegis1 server work for Phases 8–10 is none — these are desktop-only. The
+server-side upgrade plan lives in the **aegis1** repo's own `PLAN.md`
+(Phase 4 billing integrity → no silent money loss; Phase 5 reserve pricing
+honesty → the hold that spurious-402s funded accounts; Phase 6 provider
+hygiene).
