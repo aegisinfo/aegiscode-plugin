@@ -253,10 +253,14 @@ function abortBranches() {
 // Two problems share a root: a running turn owns the transcript. It scrolls
 // the view on every chunk and repaints on every chunk, so the user can neither
 // read earlier turns nor stay responsive enough to hit "stop". Both are fixed
-// by giving the reader veto over the scroll and batching the paints.
+// by giving the reader a veto over the scroll and batching the paints.
+//
+// The decisions *and* their DOM listeners live in transcript-view.js (a
+// sibling classic script loaded before this one), so the behaviours this path
+// exists to guarantee — follow only at the tail, one paint per frame, Escape
+// interrupts — are asserted against real code in test/renderer-dom.test.mjs
+// instead of only as pure math in stream-policy.js.
 
-/** Set while the reader has deliberately scrolled away from the tail. */
-let userScrolledUp = false;
 /**
  * Set when the user asks the running turn to stop. The abort comes back as a
  * rejected IPC call, which does not preserve `err.name`, so this flag — not an
@@ -265,48 +269,28 @@ let userScrolledUp = false;
  */
 let userStopped = false;
 
-/** Current transcript scroll metrics, or null when there is no transcript. */
-function scrollMetrics() {
-  if (!els.messages) return null;
-  return {
-    scrollHeight: els.messages.scrollHeight,
-    scrollTop: els.messages.scrollTop,
-    clientHeight: els.messages.clientHeight,
-  };
-}
+/**
+ * Transcript policy, created by init(): the reader's scroll veto, the
+ * frame-coalesced painter, and the Escape→stop listener all live in it. Built
+ * in init() rather than here because #messages does not exist until the body
+ * has parsed.
+ */
+let transcript = null;
 
 /**
- * Auto-scroll only while the reader is still at the tail. A streaming turn
- * must never yank the view back down once someone has scrolled up to read —
- * that was why the transcript felt unscrollable while a model was working.
- * `force` is for the cases where the view genuinely must follow: a message the
- * user just sent, or a card they just opened. The decision itself lives in
- * stream-policy.js so it is unit-testable.
+ * Auto-scroll only while the reader is still at the tail — the rule itself is
+ * `shouldFollow` in transcript-view.js. Null-safe: a boot that failed early
+ * must not turn into a second error on the first paint.
  */
-function stickToBottom({ force } = {}) {
-  if (!els.messages) return;
-  if (!shouldFollow(scrollMetrics(), { force, userScrolledUp })) return;
-  if (force) userScrolledUp = false;
-  els.messages.scrollTop = els.messages.scrollHeight;
+function stickToBottom(opts) {
+  if (!transcript) return false;
+  return transcript.follow(opts);
 }
 
-/**
- * Coalesce high-frequency stream updates to one paint per frame. A cloud brain
- * fan-out emits dozens of chunks a second, and each repaint read scrollHeight
- * (forcing a synchronous layout) — that thrash is what made the window feel
- * frozen mid-turn. Only the latest payload is painted; dropped frames are
- * invisible because the text is cumulative.
- */
+/** One paint per frame, off the latest cumulative text — see transcript-view.js. */
 function rafPainter(paint) {
-  let queued = false;
-  return () => {
-    if (queued) return;
-    queued = true;
-    requestAnimationFrame(() => {
-      queued = false;
-      paint();
-    });
-  };
+  // Every caller runs after boot; painting directly is the safe degradation.
+  return transcript ? transcript.paint(paint) : paint;
 }
 
 /**
@@ -2576,34 +2560,26 @@ async function init() {
       renderMemoryOverlay();
     });
   }
-  // The reader's veto over the streaming auto-scroll. This fires on every
-  // scroll frame, so it is `passive` and only records position. Without it
-  // `userScrolledUp` can never become true, leaving the transcript pinned to
-  // the tail no matter how far up you read while a model is working.
-  if (els.messages) {
-    els.messages.addEventListener(
-      'scroll',
-      () => {
-        userScrolledUp = !nearBottom(scrollMetrics());
-      },
-      { passive: true }
-    );
-  }
-
-  document.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape') return;
+  // The transcript's scroll/paint/Escape policy. Both listeners are registered
+  // inside transcript-view.js so the behaviours they enforce are the ones
+  // test/renderer-dom.test.mjs drives: the passive `scroll` listener is the
+  // reader's veto over the streaming auto-scroll (without it the transcript
+  // stays pinned to the tail no matter how far up you read while a model is
+  // working), and the `keydown` listener is Escape-as-interrupt (the keyboard
+  // twin of the cancel button, for the window that is too busy to aim at it).
+  transcript = createTranscriptView({
+    messages: els.messages,
+    requestFrame: (fn) => requestAnimationFrame(fn),
+  });
+  transcript.attachScrollVeto();
+  bindEscapeInterrupt({
+    doc: document,
     // The memory overlay wins: while it is open, Escape closes it rather than
     // reaching past it to cancel a turn the user may not be looking at.
-    if (overlayOpen()) {
-      closeMemoryOverlay();
-      return;
-    }
-    // Keyboard twin of the cancel button, for the window that is too busy to
-    // aim at it.
-    if (pendingSessionId) {
-      e.preventDefault();
-      stopPendingTurn();
-    }
+    isOverlayOpen: overlayOpen,
+    onOverlayEscape: closeMemoryOverlay,
+    hasPendingTurn: () => !!pendingSessionId,
+    stopTurn: stopPendingTurn,
   });
 
   // Auto-update banner: `?`-guarded like the memory inspector above, since
