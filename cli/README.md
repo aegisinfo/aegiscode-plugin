@@ -160,14 +160,14 @@ free usage next to a token count.
 ## Tests
 
 ```bash
-node ../../test/cli-conformance.test.mjs # the design guard: palette, glyphs, art, verbs
-node ../../test/cli-render.test.mjs      # width safety, accounting, live region
-node ../../test/cli-overlays.test.mjs    # the / palette, model + effort pickers, resume list
-node ../../test/cli-fuzzy.test.mjs       # palette ranking and match positions
-node ../../test/cli-markdown.test.mjs    # span-line markdown, cell widths
-node ../../test/cli-tools.test.mjs       # registry parity with the MCP host + dispatch
-node ../../test/cli-run.test.mjs         # the real binary against a real backend
-node ../../test/cli-package.test.mjs     # the published layout, isolated from the repo
+node ../test/cli-conformance.test.mjs # the design guard: palette, glyphs, art, verbs
+node ../test/cli-render.test.mjs      # width safety, accounting, live region
+node ../test/cli-overlays.test.mjs    # the / palette, model + effort pickers, resume list
+node ../test/cli-fuzzy.test.mjs       # palette ranking and match positions
+node ../test/cli-markdown.test.mjs    # span-line markdown, cell widths
+node ../test/cli-tools.test.mjs       # registry parity with the MCP host + dispatch
+node ../test/cli-run.test.mjs         # the real binary against a real backend
+node ../test/cli-package.test.mjs     # the published layout, isolated from the repo
 npm test                                 # all of the above
 ```
 
