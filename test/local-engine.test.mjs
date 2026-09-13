@@ -508,4 +508,76 @@ const fakeTools = {
   assert(seen.length === 1, `no synthesis dispatch when tools are opted out (${seen.length})`);
 }
 
+// Confirm-mode toggle (Settings → "Confirm before running tools") gates
+// gatedExecuteTool(): on (the default, including when settings predates the
+// toggle and getConfirmMode() returns undefined) a mutating call must round
+// -trip through an approval chunk before it runs; off, it runs immediately
+// with no approval chunk at all. See lib/local/engine.js confirmModeEnabled().
+{
+  const execCalls = [];
+  const mutatingTools = {
+    SUBAGENT_TOOL: 'task',
+    MUTATING_TOOLS: new Set(['poke']),
+    toolsFor: () => [{ type: 'function', function: { name: 'poke', parameters: {} } }],
+    async executeTool(name) {
+      execCalls.push(name);
+      return { ok: true, output: 'poked' };
+    },
+    toolResultText: (r) => r.output,
+  };
+  let n = 0;
+  const prov = {
+    async openaiCompatible() {
+      n += 1;
+      if (n === 1) {
+        return {
+          model: 'x',
+          choices: [
+            {
+              message: { content: '', tool_calls: [{ id: 'c1', function: { name: 'poke', arguments: '{}' } }] },
+              finish_reason: 'tool_calls',
+            },
+          ],
+        };
+      }
+      return { model: 'x', choices: [{ message: { content: 'done' }, finish_reason: 'stop' }] };
+    },
+  };
+
+  // On (default): the call is gated behind an approval chunk; execution
+  // happens only once respondApproval() resolves it.
+  {
+    n = 0;
+    execCalls.length = 0;
+    const e = createLocalEngine({ aegis, settings, ollama, providers: prov, tools: mutatingTools });
+    let approvalId = null;
+    const onDelta = (chunk) => {
+      if (chunk && chunk.approval) {
+        approvalId = chunk.approval.id;
+        assert(execCalls.length === 0, 'the approval chunk arrives before the tool runs');
+        e.respondApproval(approvalId, 'once');
+      }
+    };
+    const res = await e.chat({ class: 'openai-compat', prompt: 'do it', model: 'x' }, onDelta);
+    assert(textOf(res) === 'done', `answer arrives once approved, got ${JSON.stringify(res)}`);
+    assert(approvalId, 'an approval chunk was sent for the mutating call');
+    assert(execCalls.length === 1 && execCalls[0] === 'poke', `tool ran exactly once after approval (${JSON.stringify(execCalls)})`);
+  }
+
+  // Off: no approval chunk at all — the tool just runs.
+  {
+    n = 0;
+    execCalls.length = 0;
+    const deltas = [];
+    const e = createLocalEngine({
+      aegis, settings, ollama, providers: prov, tools: mutatingTools,
+      getConfirmMode: () => false,
+    });
+    const res = await e.chat({ class: 'openai-compat', prompt: 'do it', model: 'x' }, (chunk) => deltas.push(chunk));
+    assert(textOf(res) === 'done', `answer arrives without approval, got ${JSON.stringify(res)}`);
+    assert(!deltas.some((c) => c && c.approval), 'confirm mode off sends no approval chunk');
+    assert(execCalls.length === 1 && execCalls[0] === 'poke', `tool still runs exactly once (${JSON.stringify(execCalls)})`);
+  }
+}
+
 console.log('engine tests passed');

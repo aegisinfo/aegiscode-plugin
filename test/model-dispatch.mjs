@@ -70,6 +70,8 @@ const MODEL_NAMES = [
   'settings.set',
   'settings.remove',
   'cancel',
+  'respondApproval',
+  'clearApprovals',
 ];
 
 const SYNC_NAMES = ['listSessions', 'open', 'save', 'append', 'delete', 'push', 'pull', 'status'];
