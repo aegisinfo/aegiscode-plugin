@@ -146,6 +146,14 @@ try {
   assert(manifest.bin && manifest.bin['aegis-term'] === 'bin/aegis-term.js', 'the bin entry must point at the CLI');
   assert(manifest.scripts && manifest.scripts.prepublishOnly, 'publishing must run predist (prepublishOnly)');
 
+  // 8. The demo — the thing a human uses to eyeball the UI — must report the
+  //    version it is actually part of.
+  const demo = await sh(process.execPath, [join(cliDir, 'scripts', 'demo.mjs'), '--plain', '--width', '72'], { cwd: tmp });
+  assert(demo.code === 0, `the demo must render (${demo.err})`);
+  assert(demo.out.includes(`v${pkgVersion}`), `the demo must print v${pkgVersion} (got: ${demo.out.match(/v\d+\.\d+\.\d+/)}` + ')');
+  assert(demo.out.includes('A E G I S'), 'the demo renders the banner');
+  assert(demo.out.includes('tok'), 'the demo renders the accounting line');
+
   console.log('CLI package test passed');
   console.log(`  staged: ${STAGED.length} modules, byte-identical, gitignored, registry loads standalone`);
   console.log(`  isolated: resolves from vendor/ · --version ${pkgVersion} · one-shot turn with tokens`);

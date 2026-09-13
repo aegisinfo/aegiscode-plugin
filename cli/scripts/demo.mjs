@@ -21,6 +21,9 @@ const src = path.join(__dirname, '..', 'src');
 const render = require(path.join(src, 'render.js'));
 const { stripAnsi } = require(path.join(src, 'screen.js'));
 const art = require(path.join(src, 'art.js'));
+// Read the version rather than hardcoding it — a demo that reports a stale
+// version is the kind of drift nobody notices until it is in the docs.
+const { version } = require(path.join(__dirname, '..', 'package.json'));
 
 const argv = process.argv.slice(2);
 const flag = (name, fallback) => {
@@ -37,7 +40,7 @@ const push = (lines) => out.push(...(Array.isArray(lines) ? lines : [lines]));
 push(
   render.renderBanner(ctx, {
     width,
-    version: '0.1.0',
+    version,
     model: 'nexus-brain',
     base: 'https://aegiscloud.org',
     key: 'aegis_••••4f2a',
