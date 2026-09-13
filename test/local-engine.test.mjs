@@ -13,18 +13,24 @@ const calls = [];
 const aegis = {
   apiKey: 'k',
   async listModels() {
-    // A realistic /api/v1/models payload: raw per-provider ids (whose keys
-    // drift in and out of validity) plus the pooled-brain tiers. The desktop
-    // collapses all of it to the single "Nexus" entry — see filterAegisCatalog.
+    // A faithful /api/v1/models payload, copied from what the live server
+    // actually serves (verified against aegiscloud.org): raw per-provider ids
+    // whose keys drift in and out of validity, plus six pooled-brain tiers.
+    // `nexus-brain` is the canonical tier (hidden:false, no alias_of); every
+    // other spelling is marked `hidden:true, alias_of:"nexus-brain"`. The
+    // desktop collapses all of it to the single "Nexus" entry.
     return {
       models: [
-        { id: 'openai' },
+        { id: 'openai', capabilities: ['tools'], context_window: 0, max_output: 0 },
         { id: 'anthropic' },
         { id: 'groq' },
         { id: 'gemini' },
-        { id: 'aegis-brain', label: 'aegis-brain' },
-        { id: 'aegis-brain-smart' },
-        { id: 'nexus-brain' },
+        { id: 'nexus-brain', label: 'NEXUS', tier: 'brain', hidden: false },
+        { id: 'aegis-brain', label: '', tier: 'brain', hidden: true, alias_of: 'nexus-brain' },
+        { id: 'nexus-brain-smart', tier: 'smart', hidden: true, alias_of: 'nexus-brain' },
+        { id: 'aegis-brain-smart', tier: 'smart', hidden: true, alias_of: 'nexus-brain' },
+        { id: 'nexus-brain-neo', tier: 'neo', hidden: true, alias_of: 'nexus-brain' },
+        { id: 'aegis-brain-neo', tier: 'neo', hidden: true, alias_of: 'nexus-brain' },
       ],
     };
   },
@@ -82,10 +88,34 @@ assert(classes.find((c) => c.class === 'ollama').configured === true, 'ollama co
 // model choice (the pool auto-routes).
 const aegisModels = (await engine.listModels('aegis')).models;
 assert(aegisModels.length === 1, `the aegis class collapses to exactly one entry, got ${aegisModels.length}`);
-assert(aegisModels[0].id === 'aegis-brain', `the collapsed entry is the aegis brain, got ${aegisModels[0].id}`);
+assert(aegisModels[0].id === 'nexus-brain', `the collapsed entry is the canonical brain tier, got ${aegisModels[0].id}`);
 assert(aegisModels[0].label === 'Nexus', `the collapsed entry is labelled Nexus, got ${aegisModels[0].label}`);
+assert(aegisModels[0].hidden === undefined, 'the collapsed entry must not carry hidden:true or the renderer filters it back out');
+assert(aegisModels[0].alias_of === undefined, 'the collapsed entry must not carry alias_of bookkeeping');
 assert(!aegisModels.some((m) => ['openai', 'anthropic', 'groq', 'gemini'].includes(m.id)), 'raw provider ids are filtered out');
+assert(!aegisModels.some((m) => /-(smart|neo)$/.test(String(m.id))), 'non-default brain tiers are filtered out');
 assert((await engine.listModels('ollama')).models[0].id === 'llama3', 'ollama models');
+
+// Regression: an older/trimmed catalog that serves *only* the alias must still
+// yield a selectable entry. The previous fixed-id lookup would return [] here,
+// leaving the Aegis class with an empty dropdown and nothing to send.
+const aliasOnlyAegis = { apiKey: 'k', async listModels() { return { models: [{ id: 'aegis-brain', label: '', hidden: true, alias_of: 'nexus-brain' }] }; } };
+const aliasOnlyModels = (await createLocalEngine({ aegis: aliasOnlyAegis, settings, ollama, providers }).listModels('aegis')).models;
+assert(aliasOnlyModels.length === 1, `alias-only catalog still yields one entry, got ${aliasOnlyModels.length}`);
+assert(aliasOnlyModels[0].id === 'aegis-brain', `alias-only catalog falls back to the alias, got ${aliasOnlyModels[0].id}`);
+assert(aliasOnlyModels[0].label === 'Nexus', 'alias-only fallback is still labelled Nexus');
+
+// Regression: a catalog where the brain is renamed but still points at the same
+// canonical id must resolve via `alias_of` rather than emptying the class.
+const renamedAegis = { apiKey: 'k', async listModels() { return { models: [{ id: 'nexus-brain-v2', hidden: true, alias_of: 'nexus-brain' }] }; } };
+const renamedModels = (await createLocalEngine({ aegis: renamedAegis, settings, ollama, providers }).listModels('aegis')).models;
+assert(renamedModels.length === 1, `renamed brain still yields one entry, got ${renamedModels.length}`);
+assert(renamedModels[0].id === 'nexus-brain-v2', `renamed brain resolves via alias_of, got ${renamedModels[0].id}`);
+
+// Regression: a catalog with no brain at all yields no entries (not a crash).
+const noBrainAegis = { apiKey: 'k', async listModels() { return { models: [{ id: 'openai' }, { id: 'groq' }] }; } };
+const noBrainModels = (await createLocalEngine({ aegis: noBrainAegis, settings, ollama, providers }).listModels('aegis')).models;
+assert(noBrainModels.length === 0, `a provider-only catalog yields no entries, got ${noBrainModels.length}`);
 
 // chat routing per class
 await engine.chat({ class: 'aegis', prompt: 'hi', model: 'm1' }, () => {});

@@ -134,12 +134,36 @@ function normalizeCatalog(models) {
  * desktop dropdown offers exactly one entry for the "aegis" class: the
  * collapsed "Nexus" brain — never the raw provider list.
  */
-const NEXUS_BRAIN_ID = 'aegis-brain';
+const NEXUS_BRAIN_IDS = Object.freeze(['nexus-brain', 'aegis-brain']);
 const NEXUS_LABEL = 'Nexus';
 
+/**
+ * Pick the one entry standing in for the pooled brain. The server serves
+ * `nexus-brain` as the canonical tier (`hidden: false`, no `alias_of`) and
+ * marks every other spelling — `aegis-brain` and the `-smart`/`-neo` tiers —
+ * as `hidden: true, alias_of: "nexus-brain"`. Prefer the canonical id so the
+ * request travels on the name the server owns; fall back to the alias, then to
+ * any tier whose `alias_of` names the brain, so a renamed or trimmed catalog
+ * still resolves to something selectable instead of silently emptying the
+ * dropdown (the previous fixed-id lookup returned [] if `aegis-brain` was ever
+ * retired, leaving the class with no model to choose).
+ */
+function selectBrainEntry(models) {
+  return (
+    models.find((m) => NEXUS_BRAIN_IDS.includes(m.id) && !m.hidden && m.alias_of === undefined)
+    || models.find((m) => NEXUS_BRAIN_IDS.includes(m.id))
+    || models.find((m) => m.alias_of && NEXUS_BRAIN_IDS.includes(m.alias_of))
+    || null
+  );
+}
+
 function filterAegisCatalog(models) {
-  const nexus = models.find((m) => m.id === NEXUS_BRAIN_ID);
-  return nexus ? [{ ...nexus, label: NEXUS_LABEL }] : [];
+  const nexus = selectBrainEntry(models);
+  if (!nexus) return [];
+  // Drop the alias bookkeeping: this entry *is* the selection, so the renderer
+  // must never treat it as a hidden alias and filter it back out.
+  const { hidden, alias_of, ...rest } = nexus;
+  return [{ ...rest, label: NEXUS_LABEL }];
 }
 
 // ── Agent-loop helpers ──────────────────────────────────────────────────────
