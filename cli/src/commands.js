@@ -1,157 +1,1257 @@
 'use strict';
 
 /**
- * Slash commands — the CLI's face on the shared tool registry, using the
- * command vocabulary of the sibling `aegiscodex-dev` client.
+ * Slash commands — the CLI's full command vocabulary, ported from the sibling
+ * `aegiscodex-dev` client (`src/registry.js`), on top of the AEGIS tool registry
+ * (`mcp/tools.js`).
  *
  * Three kinds of entry live in one table:
  *
- *   (a) tool-backed  — names a tool from `mcp/tools.js` and carries a
+ *   (a) handler      — a local `async (c, args) => bool` that runs against the
+ *       frozen command context `c` (see `cli/src/app.js`). It returns false to
+ *       end the session. This is the reference's own contract, so a handler
+ *       body reads the same here as it does in aegiscodex-dev — only the panels
+ *       and support modules it calls are this client's.
+ *   (b) tool-backed  — names a tool from `mcp/tools.js` and carries a
  *       `build(arg) -> object` that turns the typed argument into the tool's
  *       JSON. `test/cli-tools.test.mjs` asserts both directions: no command
  *       points at a tool that does not exist, and no tool in the registry is
- *       unreachable from the prompt, so a new capability added to the registry
- *       shows up here or fails the build.
- *   (b) local        — no server call; handled in `app.js` by `cmd.local`.
- *   (c) unavailable  — a `aegiscodex-dev` command whose capability this client
- *       genuinely does not have (it needs a local agent loop, Claude Code auth,
- *       or a repo tool). These carry an honest `why` and are *not* fakes:
- *       `parseLine` returns `{ kind: 'unavailable' }` and `app.js` prints the
- *       reason plus a working alternative.
+ *       unreachable from the prompt (the `/tool` escape hatch keeps the latter
+ *       true for tools with no dedicated command).
+ *   (c) unavailable  — a command whose whole premise is the Claude Code CLI's
+ *       own auth loop (`login`, `logout`). These carry an honest `unavailable`
+ *       reason and a working `alt`; `parseLine` returns `{ kind: 'unavailable' }`
+ *       and `app.js` prints the reason rather than a fake success.
  *
- * The names, aliases, categories and descriptions come from
- * `aegiscodex-dev/src/registry.js` (`COMMANDS`, `CATEGORIES`). Where our
- * capability differs from the reference's (e.g. `memory` here lists *cloud*
- * memory, not the reference's local tier store) the description says what this
- * client actually does rather than copying a sentence that would be untrue.
+ * The names, aliases, categories and descriptions come from aegiscodex-dev's
+ * `COMMANDS`/`CATEGORIES`. Where this client's capability genuinely differs from
+ * the reference's the handler says so honestly (a note, an honest panel, or a
+ * real command run through the ported support modules) rather than copying a
+ * sentence that would be untrue.
+ *
+ * Every command is defined against the FROZEN command context `c`:
+ *   c.ctx (mutable session context), c.sessionId, c.transcript,
+ *   c.push/note/panel, c.render, c.openOverlay, c.closeOverlay, c.askInput,
+ *   c.withWorking, c.runPrompt, c.ask, c.runTool, c.refreshSpend, c.state,
+ *   c.setInput, c.exit, c.client, c.TOOLS, c.saveConfig, c.showThemePicker.
  *
  * Plain text (no leading `/`) is a prompt: it goes to the pooled brain.
  */
 
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { execSync } = require('node:child_process');
+
+const { span } = require('./screen.js');
+const { C, BOLD, BOLD_OFF } = require('./theme.js');
+const panels = require('./panels.js');
+const {
+  updateConfig, loadConfig, loadPermissions, savePermissions, addPermissionRule,
+  DEFAULT_PERMISSIONS, permissionsPath, configPath,
+} = require('./config.js');
+const { copyToClipboard } = require('./clipboard.js');
+const { snapshotCheckpoint, listCheckpoints, loadCheckpoint } = require('./checkpoint.js');
+const { summarizeTranscript, recapLine } = require('./summarize.js');
+const { sessionAccounting, accountingFromUsage, estimateTokens } = require('./tokens.js');
+const { transcriptToMarkdown, transcriptToJSON, writeExportFile, lastAssistantText } = require('./export.js');
+const { detectDevCommand, runDevServer } = require('./devrun.js');
+const { openUrl, URLS } = require('./system.js');
+const { sniffProject, buildAegisMd } = require('./init.js');
+const {
+  AGENT_PRESETS, agentRoles, composeAgentPrompt, composeResearchPrompt, composeDebatePrompt,
+} = require('./agents.js');
+const {
+  aggregateSessionUsage, pruneSessionHistory, readResumeList,
+} = require('./history.js');
+
+// Guarded: a concurrent workstream owns ./markdown.js.
+let markdownModule = null;
+try {
+  // eslint-disable-next-line global-require
+  markdownModule = require('./markdown.js');
+} catch {
+  markdownModule = null;
+}
+
+const VERSION = require('../package.json').version;
+
+// ── Categories ────────────────────────────────────────────────────────────────
+
+const CATEGORIES = [
+  { id: 'session', label: 'Session & context' },
+  { id: 'workspace', label: 'Workspace' },
+  { id: 'model', label: 'Model & behavior' },
+  { id: 'data', label: 'Data' },
+  { id: 'auth', label: 'Auth' },
+  { id: 'support', label: 'Support' },
+  { id: 'fun', label: 'Fun' },
+  { id: 'aegis', label: 'Aegis plugin' },
+  { id: 'custom', label: 'Custom' },
+];
+
+const categoryLabel = (id) => (CATEGORIES.find((cat) => cat.id === id) || {}).label || id;
+
+const EFFORT_LEVELS = ['low', 'medium', 'high'];
+
+// ── Small handler helpers ─────────────────────────────────────────────────────
+
+const note = (c, text) => c.push({ role: 'note', text });
+const panel = (c, lines) => c.push({ role: 'panel', lines });
+const tip = (c, text) => c.push({ role: 'tip', text });
+const done = (c, text) => c.push({ role: 'done', text });
+const shortCwd = () => process.cwd().split('/').filter(Boolean).pop() || '~';
+
+/**
+ * The ÆGIS LLM routes are gated on the pooled brain being reachable — exactly
+ * as the reference hides its ÆGIS routes when the backend is absent. `hidden`
+ * is a function so visibility follows the environment at call time.
+ */
+const cloudReady = () => !!process.env.AEGIS_API_KEY;
+
+/** Read + merge hook config from the standard settings files. */
+function readHooks() {
+  const sources = [
+    path.join(os.homedir(), '.aegis', 'settings.json'),
+    path.join(process.cwd(), '.aegis', 'settings.json'),
+    path.join(os.homedir(), '.aegiscode', 'settings.json'),
+    path.join(process.cwd(), '.aegiscode', 'settings.json'),
+    path.join(os.homedir(), '.claude', 'settings.json'),
+  ];
+  const hooks = {};
+  const from = [];
+  for (const p of sources) {
+    try {
+      const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+      if (j && j.hooks && typeof j.hooks === 'object') {
+        from.push(p.replace(os.homedir(), '~'));
+        for (const [ev, arr] of Object.entries(j.hooks)) {
+          hooks[ev] = [...(hooks[ev] || []), ...(Array.isArray(arr) ? arr : [])];
+        }
+      }
+    } catch {}
+  }
+  return { hooks, from };
+}
+
+/** {enabled,hooks,events,byEvent} from a merged hooks map. */
+function hookStats(hooks) {
+  const events = Object.keys(hooks);
+  let count = 0;
+  const byEvent = {};
+  for (const [ev, arr] of Object.entries(hooks)) {
+    const n = Array.isArray(arr) ? arr.length : 0;
+    byEvent[ev] = n;
+    count += n;
+  }
+  return { enabled: count > 0, hooks: count, events, byEvent };
+}
+
+/** Scan the standard skill dirs for SKILL.md files. */
+function scanSkills() {
+  const dirs = [
+    path.join(os.homedir(), '.aegis', 'skills'),
+    path.join(process.cwd(), '.aegis', 'skills'),
+    path.join(os.homedir(), '.aegiscode', 'skills'),
+    path.join(process.cwd(), '.aegiscode', 'skills'),
+    path.join(os.homedir(), '.claude', 'skills'),
+  ];
+  const found = [];
+  for (const dir of dirs) {
+    const source = dir.startsWith(process.cwd()) ? 'project' : 'user';
+    let names = [];
+    try {
+      names = fs.readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
+    } catch { continue; }
+    for (const name of names) {
+      const skillPath = path.join(dir, name, 'SKILL.md');
+      try {
+        const raw = fs.readFileSync(skillPath, 'utf8');
+        const desc = (/^description:\s*(.+)$/m.exec(raw) || [])[1] || '';
+        found.push({ source, name, namespace: null, description: desc.trim(), path: skillPath, content: raw });
+      } catch {}
+    }
+  }
+  return found;
+}
+
+// ── Command definitions ───────────────────────────────────────────────────────
+// Order here is the palette order.
+
 const COMMANDS = [
-  // ── AEGIS tool-backed family (aegiscodex-dev's `aegis` category) ──────────
+  // ── session & context ───────────────────────────────────────────────────────
   {
-    name: 'aegis-ask',
-    aliases: ['ask'],
-    args: '<question>',
-    category: 'aegis',
-    desc: 'Ask ÆGIS pooled inference a question (auto-routed)',
-    tool: 'aegis_ask',
-    build: (arg) => ({ prompt: arg }),
+    name: 'run', hint: '', category: 'workspace',
+    desc: "Launch and drive this project's app to see a change working",
+    handler: async (c) => {
+      const cmd = detectDevCommand(process.cwd());
+      if (!cmd) {
+        note(c, 'No dev command detected (no package.json scripts, go.mod, Cargo.toml or Makefile). Try /init first.');
+        c.render();
+        return true;
+      }
+      note(c, `Running ${cmd} in ${shortCwd()} — output streams below.`);
+      c.push({ role: 'tool', label: 'Bash', args: cmd });
+      const job = runDevServer(cmd, {
+        cwd: process.cwd(),
+        onLine: (line) => c.push({ role: 'note', text: `  ${line}` }),
+      });
+      job.done.then(({ code, stopped }) => {
+        done(c, stopped ? `${cmd} stopped` : `${cmd} exited (code ${code})`);
+        c.render();
+      });
+      c.render();
+      return true;
+    },
   },
   {
-    // aegiscodex-dev splits this into `aegis-status` (local memory stats) and
-    // `status` (session status); this client has one account-status tool, so
-    // both spellings route to it — `status`/`st` as aliases.
-    name: 'aegis-status',
-    aliases: ['status', 'st'],
-    args: '',
-    category: 'aegis',
-    desc: 'Show account status — API key, plan, account and cloud memory',
-    tool: 'aegis_status',
-    build: () => ({}),
+    name: 'schedule', hint: '', category: 'session',
+    desc: 'Create, update, list, or run scheduled cloud agents (routines)',
+    handler: async (c) => {
+      note(c, 'Scheduled routines run on the AEGIS cloud. Sign in with `aegis login`, then manage routines at aegiscloud.org.');
+      c.render();
+      return true;
+    },
   },
   {
-    name: 'aegis-recall',
-    aliases: ['recall'],
-    args: '<topic>',
-    category: 'aegis',
-    desc: 'Recall cross-session memory about a topic',
-    tool: 'aegis_memory_search',
-    build: (arg) => ({ query: arg }),
+    name: 'build', aliases: ['forge'], args: ['task'], hint: '<description>', category: 'workspace',
+    desc: 'Build an app with the agent loop — /build <what to build>',
+    handler: async (c, args) => {
+      const task = (args._rest || args.task || '').trim();
+      if (!task) {
+        note(c, 'Usage: /build <what to build>');
+        note(c, 'Example: /build a REST API for a todo app');
+        c.render();
+        return true;
+      }
+      note(c, '⬡ AEGIS BUILD');
+      note(c, `Task: ${task}`);
+      c.render();
+      await c.runPrompt(`Build the following, creating every file it needs and running the build to verify it works: ${task}`);
+      return true;
+    },
   },
   {
-    name: 'aegis-remember',
-    aliases: ['remember'],
-    args: '<note>',
-    category: 'aegis',
-    desc: 'Save a note or decision to cross-session memory',
-    tool: 'aegis_memory_save',
-    build: (arg) => ({ content: arg }),
+    name: 'cd', args: ['path'], hint: '<path>', category: 'workspace',
+    desc: 'Move this session to a new working directory',
+    handler: async (c, args) => {
+      const dir = args.path || (args._rest || '').trim();
+      if (!dir) { note(c, 'Usage: /cd <path>'); c.render(); return true; }
+      try {
+        process.chdir(dir);
+        c.ctx.cwd = process.cwd();
+        updateConfig({ lastCwd: process.cwd() });
+        note(c, `Changed directory to ${process.cwd()}`);
+      } catch (e) {
+        note(c, `/cd: ${e.message}`);
+      }
+      c.render();
+      return true;
+    },
   },
   {
-    name: 'memory',
-    aliases: ['memories'],
-    args: '',
-    category: 'aegis',
+    name: 'copy', aliases: ['cp'], args: ['n'], hint: '[N]', category: 'data',
+    desc: "Copy the last response to the clipboard",
+    handler: async (c, args) => {
+      const n = parseInt(args.n || '1', 10) || 1;
+      const text = lastAssistantText(c.transcript, n);
+      if (!text) { note(c, 'Nothing to copy yet.'); c.render(); return true; }
+      const r = copyToClipboard(text);
+      if (r.ok) {
+        note(c, r.via.startsWith('tool:')
+          ? `Copied the last response to the clipboard (${r.via.split(':')[1]}).`
+          : `No clipboard tool found — response saved to ${r.path}`);
+      } else {
+        note(c, 'Clipboard unavailable; nothing copied.');
+      }
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'clear', aliases: ['cls'], hint: '', category: 'session',
+    desc: 'Start a new session with empty context',
+    handler: async (c) => {
+      c.transcript.length = 0;
+      // Prune the session's history rows so /cost resets with /clear.
+      pruneSessionHistory(c.sessionId);
+      note(c, 'Session cleared — transcript empty.');
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'compact', hint: '', category: 'session',
+    desc: 'Compact the conversation history',
+    handler: async (c) => {
+      const has = c.transcript.some((m) => m.role === 'user' || m.role === 'assistant');
+      if (!has) { note(c, 'Nothing to compact yet.'); c.render(); return true; }
+      note(c, 'Compacting conversation history…');
+      c.render();
+      const summary = await c.withWorking((signal) =>
+        summarizeTranscript(c.transcript, {
+          callModel: (p) => c.ask(p).then((r) => r.text),
+          model: c.ctx.model,
+          signal,
+        }));
+      if (summary === null) { note(c, 'Compaction cancelled.'); c.render(); return true; }
+      c.transcript.length = 0;
+      note(c, 'Compacted. Earlier context summarized into the message below.');
+      c.transcript.push({ role: 'user', text: summary });
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'cost', hint: '', category: 'data',
+    desc: 'Show the cost of the current session',
+    handler: async (c) => {
+      const agg = aggregateSessionUsage(c.sessionId);
+      const acct = agg.entries
+        ? accountingFromUsage(agg.usage, c.ctx.model, {
+            exchanges: agg.entries,
+            real: agg.real,
+            costUsd: agg.real && agg.costUsd ? agg.costUsd : undefined,
+          })
+        : sessionAccounting(c.transcript, c.ctx.model);
+      panel(c, panels.buildCost({ ...c.state(), contextWindow: acct.contextWindow, costEur: acct.cost }, c.ctx));
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'context', hint: '', category: 'session',
+    desc: 'Show context usage for the current session',
+    handler: async (c) => {
+      const acct = sessionAccounting(c.transcript, c.ctx.model);
+      panel(c, panels.buildContext({ ...c.state(), contextWindow: acct.contextWindow }, c.ctx));
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'effort', args: ['level'], hint: '[low|medium|high]', category: 'model',
+    desc: 'Set effort level for model usage',
+    handler: async (c, args) => {
+      const level = (args.level || '').toLowerCase();
+      if (level && !EFFORT_LEVELS.includes(level)) {
+        note(c, `Unknown effort level "${args.level}". Use ${EFFORT_LEVELS.join(', ')}.`);
+        c.render();
+        return true;
+      }
+      if (!level) {
+        c.openOverlay({ type: 'effort', sel: Math.max(0, EFFORT_LEVELS.indexOf(c.ctx.effort)) });
+        return true;
+      }
+      c.ctx.effort = level;
+      c.saveConfig({ effort: level });
+      note(c, `Effort level: ${level}`);
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'exit', aliases: ['quit'], hint: '', category: 'session',
+    desc: 'Exit the CLI',
+    handler: async () => false,
+  },
+  {
+    name: 'export', args: ['format', 'target'], hint: '[markdown|json] [file|clipboard]', category: 'data',
+    desc: 'Export the current conversation to a file or clipboard',
+    handler: async (c, args) => {
+      const fmt = (args.format || 'markdown').toLowerCase();
+      const target = (args.target || 'file').toLowerCase();
+      if (!['markdown', 'md', 'json'].includes(fmt) || !['file', 'clipboard'].includes(target)) {
+        note(c, 'Usage: /export [markdown|json] [file|clipboard]');
+        c.render();
+        return true;
+      }
+      const isJson = fmt === 'json';
+      const body = isJson ? transcriptToJSON(c.transcript) : transcriptToMarkdown(c.transcript);
+      if (target === 'clipboard') {
+        const r = copyToClipboard(body);
+        note(c, r.ok
+          ? `Exported conversation (${isJson ? 'json' : 'markdown'}) to the clipboard.`
+          : 'Clipboard unavailable; nothing copied.');
+      } else {
+        try {
+          const p = writeExportFile(body, isJson ? 'json' : 'md');
+          note(c, `Exported conversation to ${p}`);
+        } catch (e) {
+          note(c, `/export: ${e.message}`);
+        }
+      }
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'help', aliases: ['?', 'h'], hint: '', category: 'support',
+    desc: 'Show help',
+    handler: async (c) => {
+      panel(c, panels.buildHelp(visibleCommands(), c.ctx));
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'init', args: ['file'], hint: '[file]', category: 'workspace',
+    desc: 'Create an AEGIS.md file in the project',
+    handler: async (c, args) => {
+      const file = (args.file || 'AEGIS.md').trim();
+      const p = path.join(process.cwd(), file);
+      if (fs.existsSync(p)) { note(c, `${file} already exists — not overwriting.`); c.render(); return true; }
+      const sniff = sniffProject(process.cwd());
+      try {
+        fs.writeFileSync(p, buildAegisMd(sniff) + '\n');
+      } catch (e) {
+        note(c, `/init: ${e.message}`);
+        c.render();
+        return true;
+      }
+      note(c, `Created ${p} (${sniff.lang})`);
+      if (fs.existsSync(path.join(process.cwd(), 'node_modules')) && !fs.existsSync(path.join(process.cwd(), '.gitignore'))) {
+        tip(c, 'Add "node_modules/" to a .gitignore before committing.');
+      }
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'login', hint: '', category: 'auth',
+    desc: 'Sign in to Claude Code',
+    unavailable: 'sign-in uses Claude Code auth, which this client does not have — it authenticates with your AEGIS key',
+    alt: '/byok-set',
+  },
+  {
+    name: 'logout', hint: '', category: 'auth',
+    desc: 'Sign out',
+    unavailable: 'there is no Claude Code sign-in here to end — aegiscode holds no session token of its own',
+  },
+  {
+    name: 'model', aliases: ['m'], args: ['sub'], hint: '[id|-]', category: 'model',
+    desc: 'Switch AI model — pin an id ("-" clears it)',
+    handler: async (c, args) => {
+      const id = (args.sub || '').trim();
+      if (!id) {
+        note(c, `model: ${c.ctx.model || 'server default'}`);
+        c.openOverlay({ type: 'model', items: c.state().models || [], sel: 0, current: c.ctx.model });
+        return true;
+      }
+      if (id === 'list') {
+        const models = c.state().models || [];
+        if (!models.length) note(c, 'No pinnable models advertised — /models lists the server\'s ids.');
+        else panel(c, panels.buildModelList(c.ctx.model, models, c.ctx));
+        c.render();
+        return true;
+      }
+      if (id === 'add' || id === 'remove' || id === 'rm') {
+        note(c, 'Model add/remove isn\'t supported in this build — pin an existing server id with /model <id>.');
+        c.render();
+        return true;
+      }
+      if (id === '-') {
+        c.ctx.model = null;
+        // Session-scoped pin only (matches the plugin's existing /model): this
+        // never writes ~/.aegiscode/config.json, so a test run stays hermetic.
+        note(c, 'Model pin cleared — the server will choose.');
+        c.render();
+        return true;
+      }
+      c.ctx.model = id;
+      note(c, `Pinned model: ${id}`);
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'radio', hint: '', category: 'fun',
+    desc: 'Listen to AEGIS FM lo-fi radio',
+    handler: async (c) => {
+      note(c, 'Opening AEGIS FM lo-fi radio in your browser…');
+      if (!openUrl(URLS.radio)) note(c, `AEGIS FM: ${URLS.radio}`);
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'recap', hint: '', category: 'session',
+    desc: 'Generate a one-line session recap now',
+    handler: async (c) => {
+      if (!c.transcript.some((m) => m.role === 'user' || m.role === 'assistant')) {
+        note(c, 'No exchanges yet — send a prompt first.');
+        c.render();
+        return true;
+      }
+      note(c, 'Recapping session…');
+      c.render();
+      const line = await c.withWorking((signal) =>
+        recapLine(c.transcript, {
+          callModel: (p) => c.ask(p).then((r) => r.text),
+          model: c.ctx.model,
+          signal,
+        }));
+      if (line === null) { note(c, 'Recap cancelled.'); c.render(); return true; }
+      c.ctx.lastRecap = { sessionId: c.sessionId, ts: new Date().toISOString(), text: line };
+      c.saveConfig({ lastRecap: c.ctx.lastRecap });
+      note(c, `Session recap: ${line}`);
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'resume', hint: '', category: 'session',
+    desc: 'Switch to a previous session',
+    handler: async (c) => {
+      const items = readResumeList();
+      if (!items.length) { note(c, 'No previous sessions found in ~/.aegiscode/history.jsonl'); c.render(); return true; }
+      c.openOverlay({ type: 'resume', items, sel: 0 });
+      return true;
+    },
+  },
+  {
+    name: 'rewind', args: ['n'], hint: '[N]', category: 'session',
+    desc: 'Revert the conversation to a checkpoint',
+    handler: async (c, args) => {
+      const items = listCheckpoints(c.sessionId);
+      if (!args.n) {
+        if (!items.length) { note(c, 'No checkpoints yet — snapshots are taken after each exchange.'); c.render(); return true; }
+        panel(c, panels.buildRewindList(items, c.ctx));
+        c.render();
+        return true;
+      }
+      const n = parseInt(args.n, 10);
+      if (Number.isNaN(n) || n < 0 || n >= items.length) {
+        note(c, `Unknown checkpoint ${args.n}. /rewind shows the list (indices 0..${Math.max(0, items.length - 1)}).`);
+        c.render();
+        return true;
+      }
+      snapshotCheckpoint(c.sessionId, c.transcript); // make the rewind undoable
+      const restored = loadCheckpoint(c.sessionId, n);
+      if (!restored) { note(c, 'Checkpoint unreadable — nothing restored.'); c.render(); return true; }
+      c.transcript.length = 0;
+      for (const m of restored) c.transcript.push(m);
+      note(c, `Rewound to checkpoint ${n} (${restored.length} messages). /rewind N again to undo.`);
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'agents', aliases: ['sessions'], args: ['role', 'task'], hint: '[role] [task]', category: 'session',
+    desc: 'Show the agents panel, or run a sub-agent role preset — /agents <role> <task>',
+    handler: async (c, args) => {
+      const role = (args.role || '').trim().toLowerCase();
+      if (role) {
+        const task = (args._rest || '').trim().replace(/^\S+\s*/, '').trim();
+        if (!task) { note(c, `Usage: /agents <role> <task> — roles: ${agentRoles().join(', ')}`); c.render(); return true; }
+        if (!AGENT_PRESETS[role]) { note(c, `Unknown agent role "${role}". Roles: ${agentRoles().join(', ')}`); c.render(); return true; }
+        await c.runPrompt(composeAgentPrompt(role, task));
+        return true;
+      }
+      panel(c, panels.buildAgents(c.state(), c.ctx));
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'status', aliases: ['st'], hint: '', category: 'session',
+    desc: 'Show account and session status',
+    handler: async (c) => {
+      // This client's /status surface is the account-status tool (the same
+      // tool /aegis-status names) plus the local session panel below it.
+      await c.runTool('aegis_status', {});
+      panel(c, panels.buildStatus(c.state(), c.ctx));
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'teleport', hint: '', category: 'session',
+    desc: 'Resume a session from aegiscloud.org',
+    handler: async (c) => {
+      note(c, 'Teleport requires an AEGIS cloud account with sessions. Sign in with `aegis login`, then run aegiscloud.org/teleport.');
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'theme', aliases: ['t'], args: ['mode'], hint: '[dark|light]', category: 'model',
+    desc: 'Change the color theme',
+    handler: async (c, args) => {
+      const m = (args.mode || '').toLowerCase();
+      if (m === 'dark' || m === 'light') {
+        c.ctx.light = m === 'light';
+        c.ctx.themeIndex = c.ctx.light ? 0 : 1;
+      } else {
+        await c.showThemePicker();
+      }
+      c.saveConfig({ themeIndex: c.ctx.themeIndex });
+      note(c, `Theme: ${c.ctx.light ? 'light' : 'dark'}`);
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'version', aliases: ['v'], hint: '', category: 'session',
+    desc: 'Show version',
+    handler: async (c) => {
+      note(c, `aegiscode v${VERSION}`);
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'doctor', hint: '', category: 'support',
+    desc: 'Run diagnostic checks on this environment',
+    handler: async (c) => {
+      const checks = [];
+      const ok = (label, good, detail) => checks.push([good, label, detail]);
+      ok('Node', true, process.version);
+      ok('CWD', fs.existsSync(process.cwd()), process.cwd());
+      let git = false;
+      try { execSync('git rev-parse --git-dir', { cwd: process.cwd(), stdio: ['ignore', 'ignore', 'ignore'], timeout: 4000 }); git = true; } catch {}
+      ok('git repo', git, git ? 'inside a work tree' : 'not a git repository');
+      const key = process.env.AEGIS_API_KEY || '';
+      ok('AEGIS_API_KEY', !!key, key ? 'set' : 'not set — export one (https://aegiscloud.org)');
+      ok('config path', true, configPath());
+      const lines = [[span(C.gold + BOLD, 'Doctor'), span(BOLD_OFF, '')], [span(C.gray, '─'.repeat(30))]];
+      for (const [good, label, detail] of checks) {
+        lines.push([
+          span(good ? C.green : C.coral, `  ${good ? '✔' : '⚠'}`),
+          span(C.white, ` ${label}: `),
+          span(C.gray, String(detail)),
+        ]);
+      }
+      panel(c, lines);
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'vim', args: ['mode'], hint: '[on|off]', category: 'model',
+    desc: 'Toggle vim keymap',
+    handler: async (c, args) => {
+      const mode = (args.mode || '').toLowerCase();
+      if (mode && !['on', 'off'].includes(mode)) { note(c, 'Usage: /vim [on|off]'); c.render(); return true; }
+      const want = mode === 'on' ? true : mode === 'off' ? false : !c.ctx.vim;
+      c.ctx.vim = want;
+      c.saveConfig({ vim: want });
+      note(c, `Vim keymap: ${want ? 'on' : 'off'}`);
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'permissions', args: ['mode', 'pattern'],
+    hint: '[allow|deny|ask "<pattern>" | default <ask|allow|deny> | clear]', category: 'model',
+    desc: 'Set permissions for tool use',
+    handler: async (c, args) => {
+      const rules = loadPermissions();
+      const mode = (args.mode || '').toLowerCase();
+      const pattern = args.pattern;
+      if (!mode) {
+        panel(c, panels.buildPermissions({ ...rules, _path: permissionsPath() }, null, c.ctx));
+        c.render();
+        return true;
+      }
+      if (mode === 'clear') {
+        savePermissions({ ...DEFAULT_PERMISSIONS, allow: [], deny: [], ask: [] });
+        note(c, 'Permissions reset to defaults (no rules).');
+        c.render();
+        return true;
+      }
+      if (mode === 'default' && ['ask', 'allow', 'deny'].includes(pattern)) {
+        savePermissions({ ...rules, defaultMode: pattern });
+        note(c, `Default permission mode: ${pattern}`);
+        c.render();
+        return true;
+      }
+      if (['allow', 'deny', 'ask'].includes(mode) && pattern) {
+        const { added, rules: next } = addPermissionRule(mode, pattern, rules);
+        savePermissions(next);
+        note(c, added ? `Added ${mode} rule: ${pattern}` : `Rule already present: ${pattern}`);
+        c.render();
+        return true;
+      }
+      note(c, 'Usage: /permissions [allow|deny|ask "<pattern>" | default <ask|allow|deny> | clear]');
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'hooks', args: ['sub'], hint: '[status|list]', category: 'model',
+    desc: 'View hooks configuration status and configured hook list',
+    handler: async (c, args) => {
+      const sub = (args.sub || '').toLowerCase();
+      const { hooks, from } = readHooks();
+      if (sub === 'list') {
+        panel(c, panels.buildHooksList({ hooks }, c.ctx));
+        c.render();
+        return true;
+      }
+      if (sub === '' || sub === 'status') {
+        panel(c, panels.buildHooksStatus({ ...hookStats(hooks), fromPaths: from }, c.ctx));
+        c.render();
+        return true;
+      }
+      note(c, `unknown subcommand: ${args.sub}`);
+      note(c, 'available: status, list');
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'credentials', hint: '', category: 'model',
+    desc: 'Show where credentials are stored',
+    handler: async (c) => {
+      const p = path.join(os.homedir(), '.claude', '.credentials.json');
+      const loc = p.replace(os.homedir(), '~');
+      if (!fs.existsSync(p)) {
+        note(c, 'No credential file found. The Claude Code CLI manages auth (OS keychain or ~/.claude/.credentials.json).');
+      } else {
+        note(c, `Credentials live in ${loc} (managed by the Claude Code CLI). aegiscode reads them but never writes them.`);
+      }
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'install-github-app', hint: '', category: 'model',
+    desc: 'Install the GitHub App for PR workflows',
+    handler: async (c) => {
+      note(c, 'The GitHub App is installed through the Claude Code CLI: run `claude --install-github-app` once.');
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'troubleshooting', hint: '', category: 'support',
+    desc: 'Troubleshoot common issues',
+    handler: async (c) => {
+      panel(c, panels.buildTroubleshooting(c.state(), c.ctx));
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'feedback', hint: '', category: 'support',
+    desc: 'Send feedback to the AEGIS team',
+    handler: async (c) => {
+      note(c, 'Opening the feedback form…');
+      if (!openUrl(URLS.feedback)) note(c, `Feedback: ${URLS.feedback}`);
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'bug', hint: '', category: 'support',
+    desc: 'Report a bug (opens a GitHub issue)',
+    handler: async (c) => {
+      note(c, `Opening a GitHub issue… (aegiscode v${VERSION}, ${process.version}, ${os.platform()})`);
+      if (!openUrl(URLS.issues)) note(c, `Issues: ${URLS.issues}`);
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'issue', aliases: ['bugs'], hint: '', category: 'support',
+    desc: 'Report an issue',
+    handler: async (c) => {
+      note(c, 'Opening a GitHub issue…');
+      if (!openUrl(URLS.issues)) note(c, `Issues: ${URLS.issues}`);
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'onboarding', hint: '', category: 'support',
+    desc: 'Show getting-started tips',
+    handler: async (c) => {
+      panel(c, panels.buildOnboarding(c.state(), c.ctx));
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'shell-completion', hint: '', category: 'support',
+    desc: 'Set up shell completion',
+    handler: async (c) => {
+      panel(c, panels.buildShellCompletion(c.state(), c.ctx));
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'terminal-setup', hint: '', category: 'support',
+    desc: 'Check and fix terminal setup',
+    handler: async (c) => {
+      panel(c, panels.buildTerminalSetup(c.state(), c.ctx));
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'pr-comments', hint: '', category: 'support',
+    desc: 'Review and reply to pull request comments',
+    handler: async (c) => {
+      note(c, 'PR comments need GitHub auth. Run /prs to check connectivity, then use the `gh` CLI or the GitHub web UI.');
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'prs', hint: '', category: 'support',
+    desc: 'List pull requests in this repo',
+    handler: async (c) => {
+      try {
+        const out = execSync('gh pr list --limit 8', { encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'] });
+        panel(c, panels.buildPRs(out.toString(), c.ctx));
+      } catch {
+        note(c, 'gh not authenticated (or not installed) — run `gh auth login` first.');
+      }
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'review', hint: '', category: 'support',
+    desc: 'Review a pull request',
+    handler: async (c) => {
+      note(c, '/review needs GitHub auth via gh. Run /prs to list open PRs, then open one in the browser.');
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'benchmark', hint: '', category: 'support',
+    desc: 'Run in-app micro-benchmarks',
+    handler: async (c) => {
+      const t = (fn) => {
+        const s = process.hrtime.bigint();
+        fn();
+        return (Number(process.hrtime.bigint() - s) / 1e6).toFixed(2);
+      };
+      const sample = '# Heading\n\nSome **bold** and `code` with a [link](https://x.test).\n\n- a\n- b\n- c\n';
+      const results = [
+        ['2,000 span() calls', t(() => { for (let i = 0; i < 2000; i++) span(C.white, 'x'); })],
+        ['estimateTokens × 20 (500 chars)', t(() => { for (let i = 0; i < 20; i++) estimateTokens('x'.repeat(500)); })],
+      ];
+      if (markdownModule && typeof markdownModule.renderMarkdown === 'function') {
+        results.push(['renderMarkdown × 200', t(() => { for (let i = 0; i < 200; i++) markdownModule.renderMarkdown(sample, 80); })]);
+      }
+      panel(c, panels.buildBenchmark(results, c.ctx));
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'waifu', hint: '', category: 'fun',
+    desc: 'Summon a waifu',
+    handler: async (c) => {
+      panel(c, panels.buildWaifu(c.ctx));
+      c.render();
+      return true;
+    },
+  },
+
+  // ── Phase 6 (part 2) families ─────────────────────────────────────────────
+  {
+    name: 'new', aliases: ['start'], hint: '', category: 'session',
+    desc: 'Start a new session (clears the transcript, fresh session id)',
+    handler: async (c) => {
+      c.transcript.length = 0;
+      const id = 'aegis-' + Math.random().toString(36).slice(2, 10);
+      c.sessionId = id;
+      c.ctx.sessionId = id;
+      note(c, `New session started (${id}) — earlier context cleared.`);
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'tokens', aliases: ['tok'], hint: '', category: 'data',
+    desc: 'Show token usage breakdown and estimated spend',
+    handler: async (c) => {
+      const acct = sessionAccounting(c.transcript, c.ctx.model);
+      panel(c, panels.buildTokens({ ...c.state(), contextWindow: acct.contextWindow, costEur: acct.cost }, c.ctx));
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'skills', aliases: ['sk'], args: ['sub'], hint: '[name|refresh]', category: 'session',
+    desc: 'List skills (SKILL.md in the standard skill dirs)',
+    handler: async (c, args) => {
+      const sub = (args.sub || '').trim().toLowerCase();
+      const found = scanSkills();
+      const dirs = [
+        path.join(os.homedir(), '.aegis', 'skills'),
+        path.join(process.cwd(), '.aegis', 'skills'),
+        path.join(os.homedir(), '.aegiscode', 'skills'),
+        path.join(process.cwd(), '.aegiscode', 'skills'),
+        path.join(os.homedir(), '.claude', 'skills'),
+      ].map((d) => d.replace(os.homedir(), '~'));
+      if (sub === 'refresh' || sub === 'reload') {
+        note(c, `Skills refreshed — ${found.length} found (${dirs.length} dirs scanned).`);
+        c.render();
+        return true;
+      }
+      if (sub) {
+        const skill = found.find((s) => s.name === sub);
+        if (!skill) { note(c, `Unknown skill "${sub}". /skills lists what exists on disk.`); c.render(); return true; }
+        panel(c, panels.buildSkillDetail(skill, c.ctx));
+        c.render();
+        return true;
+      }
+      panel(c, panels.buildSkills(found, dirs, c.ctx));
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'thinking', args: ['mode'], hint: '[on|off]', category: 'model',
+    desc: 'Toggle thinking blocks expanded/collapsed',
+    handler: async (c, args) => {
+      const mode = (args.mode || '').toLowerCase();
+      if (mode && !['on', 'off'].includes(mode)) { note(c, 'Usage: /thinking [on|off]'); c.render(); return true; }
+      const want = mode === 'on' ? true : mode === 'off' ? false : !(c.ctx.thinking === true);
+      c.ctx.thinking = want;
+      c.saveConfig({ thinking: want });
+      note(c, `Thinking blocks: ${want ? 'expanded' : 'collapsed'}`);
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'mcp', args: ['sub', 'name', 'command'], hint: '[add <name> <command> [args…]|remove <name>|<name>]', category: 'model',
+    desc: 'Show MCP server configuration',
+    handler: async (c, args) => {
+      const cfg = loadConfig();
+      const servers = cfg.mcpServers || {};
+      const sub = (args.sub || '').toLowerCase();
+      if (sub === 'add') {
+        const name = (args.name || '').trim();
+        const command = (args.command || '').trim();
+        if (!name || !command) { note(c, 'Usage: /mcp add <name> "<command with args>"'); c.render(); return true; }
+        const parts = command.split(/\s+/).filter(Boolean);
+        updateConfig({ mcpServers: { ...servers, [name]: { command: parts[0], args: parts.slice(1) } } });
+        note(c, `Added MCP server "${name}" (${parts[0]}). Configuration only — this build has no MCP runtime.`);
+        c.render();
+        return true;
+      }
+      if (sub === 'remove' || sub === 'rm') {
+        const name = (args.name || '').trim();
+        if (!name) { note(c, 'Usage: /mcp remove <name>'); c.render(); return true; }
+        if (!servers[name]) { note(c, `No MCP server "${name}". /mcp lists the configured ones.`); c.render(); return true; }
+        const next = { ...servers };
+        delete next[name];
+        updateConfig({ mcpServers: next });
+        note(c, `Removed MCP server "${name}".`);
+        c.render();
+        return true;
+      }
+      if (sub && servers[sub]) {
+        const srv = servers[sub];
+        panel(c, [
+          [span(C.gold, `MCP server: ${sub}`)],
+          [span(C.gray, '─'.repeat(30))],
+          [span(C.white, `  command: ${`${srv.command || ''} ${(srv.args || []).join(' ')}`.trim()}`)],
+          [span('', '')],
+          [span(C.gray, 'Configuration only — this build has no MCP runtime.')],
+        ]);
+        c.render();
+        return true;
+      }
+      panel(c, panels.buildMcp(servers, [configPath(), permissionsPath()], c.ctx));
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'memory', aliases: ['memories'], hint: '', category: 'model',
     desc: 'List the most recent AEGIS cloud-memory entries',
     tool: 'aegis_memory_list',
     build: () => ({}),
   },
   {
-    // No reference equivalent (the reference has no importer); the name follows
-    // the `/aegis-*` family. Keeps the `--confirm` dry-run semantics: without
-    // the flag the tool only reports what it found.
-    name: 'aegis-import',
-    aliases: ['import'],
-    args: '[--confirm]',
-    category: 'aegis',
-    desc: 'Import memory from other AI tools on this machine (dry run unless --confirm)',
-    tool: 'aegis_memory_import',
-    build: (arg) => ({ confirm: /--confirm\b/.test(arg) }),
+    name: 'confirm', aliases: ['confirmations'], args: ['mode'], hint: '[on|off]', category: 'model',
+    desc: 'Toggle tool-call confirmation prompts',
+    handler: async (c, args) => {
+      const rules = loadPermissions();
+      const mode = (args.mode || '').toLowerCase();
+      if (mode && !['on', 'off'].includes(mode)) { note(c, 'Usage: /confirm [on|off]'); c.render(); return true; }
+      const want = mode === 'on' ? true : mode === 'off' ? false : rules.defaultMode !== 'allow';
+      savePermissions({ ...rules, defaultMode: want ? 'ask' : 'allow' });
+      note(c, `Confirmation prompts: ${want ? 'on' : 'off'} (default permission mode: ${want ? 'ask' : 'allow'})`);
+      c.render();
+      return true;
+    },
   },
   {
-    // aegiscodex-dev's `model` switches the brain; this client pins a model id
-    // (local) and lists the pinnable ids with a tool. `models` is the list
-    // action — aegiscodex-dev's `/model list`, surfaced as its own command.
-    name: 'models',
-    aliases: ['model-list'],
-    args: '',
-    category: 'model',
-    desc: 'List the model ids you can pin with /model',
-    tool: 'aegis_list_models',
+    name: 'yolo', args: ['mode'], hint: '[on|off]', category: 'model',
+    desc: 'Toggle YOLO mode — auto-approve all tool executions',
+    handler: async (c, args) => {
+      const rules = loadPermissions();
+      const mode = (args.mode || '').toLowerCase();
+      if (mode && !['on', 'off'].includes(mode)) { note(c, 'Usage: /yolo [on|off]'); c.render(); return true; }
+      const want = mode === 'on' ? true : mode === 'off' ? false : rules.defaultMode !== 'allow';
+      savePermissions({ ...rules, defaultMode: want ? 'allow' : 'ask' });
+      if (want) panel(c, panels.buildYolo(c.state(), c.ctx));
+      else note(c, 'YOLO mode off — confirmations restored.');
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'multiyolo', args: ['task'], hint: '<task>', category: 'session',
+    desc: 'Multi-agent orchestration with YOLO mode — /multiyolo <task>',
+    handler: async (c, args) => {
+      const task = (args._rest || args.task || '').trim();
+      if (!task) { note(c, 'Usage: /multiyolo <task>'); c.render(); return true; }
+      const rules = loadPermissions();
+      savePermissions({ ...rules, defaultMode: 'allow' });
+      panel(c, panels.buildYolo(c.state(), c.ctx));
+      note(c, 'Composing ÆGIS /multiyolo — run it in aegis-cli (the confirmation prompt works there):');
+      panel(c, panels.buildAegisMulti(task, c.ctx));
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'router', args: ['sub', 'tier', 'modelId'], hint: '[on|off|set <tier> <modelId>|stats]', category: 'model',
+    desc: 'Show or manage the model router config',
+    handler: async (c, args) => {
+      const cfg = loadConfig();
+      const router = cfg.autoRouter || { enabled: false, tiers: {} };
+      const sub = (args.sub || '').toLowerCase();
+      const persist = (next) => updateConfig({ autoRouter: next });
+      if (sub === 'on') { persist({ ...router, enabled: true }); note(c, 'Auto-router: on.'); c.render(); return true; }
+      if (sub === 'off') { persist({ ...router, enabled: false }); note(c, 'Auto-router: off.'); c.render(); return true; }
+      if (sub === 'set') {
+        const tier = (args.tier || '').toLowerCase();
+        const modelId = (args.modelId || '').trim();
+        if (!['simple', 'medium', 'complex'].includes(tier) || !modelId) {
+          note(c, 'Usage: /router set <simple|medium|complex> <modelId>');
+          c.render();
+          return true;
+        }
+        persist({ ...router, tiers: { ...(router.tiers || {}), [tier]: modelId } });
+        note(c, `Auto-router: ${tier} -> ${modelId}`);
+        c.render();
+        return true;
+      }
+      if (sub === 'stats') {
+        panel(c, [
+          [span(C.gold + BOLD, 'Router stats'), span(BOLD_OFF, '')],
+          [span(C.gray, '─'.repeat(30))],
+          [span(C.gray, 'No learned outcomes yet — this build does not auto-route.')],
+          [span(C.gray, 'Tiers: simple/medium/complex via /router set.')],
+        ]);
+        c.render();
+        return true;
+      }
+      panel(c, panels.buildRouter(cfg, c.ctx));
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'multi', args: ['task', 'mode'], hint: '<task> [run]', category: 'session',
+    desc: 'Compose a multi-agent task (add "run" to execute)',
+    handler: async (c, args) => {
+      let task = (args._rest || args.task || '').trim();
+      let mode = (args.mode || '').toLowerCase();
+      if (mode !== 'run' && /\s+run$/i.test(task)) { mode = 'run'; task = task.replace(/\s+run$/i, '').trim(); }
+      if (!task) { note(c, 'Usage: /multi <task> [run]'); c.render(); return true; }
+      if (mode !== 'run') { panel(c, panels.buildAegisMulti(task, c.ctx)); c.render(); return true; }
+      note(c, 'Running the task through the pooled brain (single-model — the reference fans it out).');
+      await c.runPrompt(task);
+      return true;
+    },
+  },
+  {
+    name: 'research', args: ['question'], hint: '<question>', category: 'session',
+    desc: 'Research a topic with a multi-perspective council prompt',
+    handler: async (c, args) => {
+      const q = (args._rest || args.question || '').trim();
+      if (!q) { note(c, 'Usage: /research <question>'); c.render(); return true; }
+      await c.runPrompt(composeResearchPrompt(q, process.cwd()));
+      return true;
+    },
+  },
+  {
+    name: 'debate', aliases: ['db'], args: ['topic'], hint: '<topic>', category: 'session',
+    desc: 'Run a structured debate on the current model',
+    handler: async (c, args) => {
+      const topic = (args._rest || args.topic || '').trim();
+      if (!topic) { note(c, 'Usage: /debate <topic>'); c.render(); return true; }
+      await c.runPrompt(composeDebatePrompt(topic, c.ctx.model || ''));
+      return true;
+    },
+  },
+  {
+    name: 'billing', aliases: ['balance', 'spend'], hint: '', category: 'support',
+    desc: 'Show billing info — token-bank balance and recent spend',
+    handler: async (c) => {
+      // The account is the source of truth for the balance and ledger; the
+      // session panel below adds this session's spend.
+      await c.runTool('aegis_balance', {});
+      const spend = await c.refreshSpend();
+      const st = c.state();
+      panel(c, panels.buildBilling({
+        ...st,
+        balance: spend && spend.balance != null ? spend.balance : st.balance,
+      }, c.ctx));
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'cloud', args: ['sub', 'value'], hint: '[status|key <api_key>|activate|deactivate]', category: 'support',
+    desc: 'Show ÆGIS cloud sync status',
+    handler: async (c, args) => {
+      const sub = (args.sub || '').toLowerCase();
+      if (['key', 'activate', 'deactivate'].includes(sub)) {
+        note(c, 'ÆGIS cloud key/sync is managed by the aegis CLI: run `aegis login` (free) — aegiscode does not store cloud keys.');
+        c.render();
+        return true;
+      }
+      const st = c.state();
+      panel(c, panels.buildAegisStatus({ ...st, cloud: { key: st.online, sync: st.online } }, c.ctx));
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'gmail', hint: '', category: 'support',
+    desc: 'Link Gmail to conversations',
+    handler: async (c) => {
+      note(c, 'Gmail integration needs Google OAuth — not available in this build. Use /export to save conversations to files instead.');
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'clone', aliases: ['fetch-site', 'websnap'], args: ['url'], hint: '<url>', category: 'workspace',
+    desc: 'Clone a website into a local project',
+    handler: async (c, args) => {
+      const url = (args._rest || args.url || '').trim();
+      if (!url) { note(c, 'Usage: /clone <url>'); c.render(); return true; }
+      note(c, `/clone needs a web-fetch tool and a chat service — not available in this build. Use /init to scaffold a fresh project instead of ${url}.`);
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'release-notes', hint: '', category: 'support',
+    desc: "What's new",
+    handler: async (c) => {
+      panel(c, panels.buildReleaseNotes(c.state(), c.ctx));
+      c.render();
+      return true;
+    },
+  },
+
+  // ── /aegis-* family ───────────────────────────────────────────────────────
+  {
+    name: 'aegis-status', hint: '', category: 'aegis',
+    desc: 'Show account status — API key, plan, account and cloud memory',
+    tool: 'aegis_status',
     build: () => ({}),
   },
   {
-    // aegiscodex-dev has no BYOK surface; these are carried over from the
-    // registry's byok tools. `billing` below is the reference's name for the
-    // balance read the tool performs.
-    name: 'byok',
-    args: '',
-    category: 'auth',
+    name: 'aegis-ask', aliases: ['ask'], args: ['question'], hint: '<question>', category: 'aegis',
+    desc: 'Ask ÆGIS pooled inference a question (auto-routed)',
+    tool: 'aegis_ask',
+    build: (arg) => ({ prompt: arg }),
+  },
+  {
+    name: 'aegis-recall', aliases: ['recall'], args: ['topic'], hint: '<topic>', category: 'aegis',
+    desc: 'Recall cross-session memory about a topic (cloud)',
+    tool: 'aegis_memory_search',
+    build: (arg) => ({ query: arg }),
+  },
+  {
+    name: 'aegis-remember', aliases: ['remember'], args: ['note'], hint: '<note>', category: 'aegis',
+    desc: 'Save a note or decision to cross-session memory',
+    tool: 'aegis_memory_save',
+    build: (arg) => ({ content: arg }),
+  },
+  {
+    name: 'aegis-council', aliases: ['council'], args: ['question'], hint: '<question>', category: 'aegis',
+    desc: 'Put a question to the ÆGIS council (multi-perspective deliberation)',
+    hidden: () => !cloudReady(),
+    handler: async (c, args) => {
+      const q = (args._rest || args.question || '').trim();
+      if (!q) { note(c, 'Usage: /aegis-council <question>'); c.render(); return true; }
+      await c.runPrompt(composeResearchPrompt(`Deliberate as a council and vote on: ${q}`, process.cwd()));
+      return true;
+    },
+  },
+  {
+    name: 'aegis-print', args: ['question'], hint: '<question>', category: 'aegis',
+    desc: 'Ask pooled inference and print the answer cleanly',
+    hidden: () => !cloudReady(),
+    handler: async (c, args) => {
+      const q = (args._rest || args.question || '').trim();
+      if (!q) { note(c, 'Usage: /aegis-print <question>'); c.render(); return true; }
+      const res = await c.ask(q);
+      panel(c, panels.buildAegisPrint('ÆGIS', { result: res.text, model: res.model, provider: 'aegis' }, c.ctx));
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'aegis-multi', args: ['task', 'mode'], hint: '<task> [run]', category: 'aegis',
+    desc: 'Compose an ÆGIS /multi multi-agent task (add "run" to execute)',
+    hidden: () => !cloudReady(),
+    handler: async (c, args) => {
+      let task = (args._rest || args.task || '').trim();
+      let mode = (args.mode || '').toLowerCase();
+      if (mode !== 'run' && /\s+run$/i.test(task)) { mode = 'run'; task = task.replace(/\s+run$/i, '').trim(); }
+      if (!task) { note(c, 'Usage: /aegis-multi <task> [run]'); c.render(); return true; }
+      if (mode !== 'run') { panel(c, panels.buildAegisMulti(task, c.ctx)); c.render(); return true; }
+      note(c, 'Running /multi headless — this skips aegis-cli\'s confirmation step.');
+      await c.runPrompt(task);
+      return true;
+    },
+  },
+
+  // ── cloud-only additions (not in the reference vocabulary) ────────────────
+  {
+    name: 'byok', hint: '', category: 'auth',
     desc: 'Show which providers have your own key configured',
     tool: 'aegis_byok_status',
     build: () => ({}),
   },
   {
-    name: 'byok-set',
-    args: '<provider>',
-    category: 'auth',
+    name: 'byok-set', args: ['provider'], hint: '<provider>', category: 'auth',
     desc: 'Set YOUR provider key (prompted, never echoed, never in history)',
     tool: 'aegis_byok_set',
     secret: 'key',
-    build: (arg) => ({ provider: arg.trim() }),
+    build: (arg) => ({ provider: String(arg || '').trim() }),
   },
   {
-    name: 'byok-rm',
-    args: '<provider>',
-    category: 'auth',
+    name: 'byok-rm', args: ['provider'], hint: '<provider>', category: 'auth',
     desc: 'Remove a stored provider key',
     tool: 'aegis_byok_set',
-    build: (arg) => ({ provider: arg.trim() }),
+    build: (arg) => ({ provider: String(arg || '').trim() }),
   },
   {
-    // aegiscodex-dev's `billing`; `balance` and `spend` stay routable for
-    // muscle memory. Not `cost` — that name is this client's local tally below.
-    name: 'billing',
-    aliases: ['balance', 'spend'],
-    args: '',
-    category: 'support',
-    desc: 'Show billing info — token-bank balance and recent spend',
-    tool: 'aegis_balance',
+    name: 'models', aliases: ['model-list'], hint: '', category: 'model',
+    desc: 'List the model ids you can pin with /model',
+    tool: 'aegis_list_models',
     build: () => ({}),
   },
   {
-    // The escape hatch for any registry tool, including ones added later.
-    name: 'tool',
-    args: '<name> [json]',
-    category: 'aegis',
+    name: 'tool', args: ['name', 'json'], hint: '<name> [json]', category: 'aegis',
     desc: 'Call any registry tool directly (escape hatch for new tools)',
     generic: true,
     build: (arg) => {
-      const sp = arg.indexOf(' ');
-      const name = (sp === -1 ? arg : arg.slice(0, sp)).trim();
-      const rest = sp === -1 ? '' : arg.slice(sp + 1).trim();
+      const s = String(arg || '');
+      const sp = s.indexOf(' ');
+      const name = (sp === -1 ? s : s.slice(0, sp)).trim();
+      const rest = sp === -1 ? '' : s.slice(sp + 1).trim();
       let args = {};
       if (rest) {
         try {
@@ -163,57 +1263,17 @@ const COMMANDS = [
       return { tool: name, args };
     },
   },
-
-  // ── local commands: no server call, handled by app.js ─────────────────────
   {
-    name: 'model',
-    aliases: ['m'],
-    args: '[id]',
-    category: 'model',
-    desc: 'Switch AI model — pin an id (no argument shows the pin; `-` clears it)',
-    local: 'model',
+    name: 'aegis-import', aliases: ['import'], hint: '[--confirm]', category: 'aegis',
+    desc: 'Import memory from other AI tools on this machine (dry run unless --confirm)',
+    tool: 'aegis_memory_import',
+    build: (arg) => ({ confirm: /--confirm\b/.test(String(arg || '')) }),
   },
-  { name: 'stream', args: '[on|off]', category: 'model', desc: 'Toggle streaming output', local: 'stream' },
-  { name: 'theme', aliases: ['t'], args: '[dark|light]', category: 'model', desc: 'Change the color theme', local: 'theme' },
-  { name: 'version', aliases: ['v'], args: '', category: 'session', desc: 'Show version', local: 'version' },
-  { name: 'cost', args: '', category: 'data', desc: 'Show the cost of the current session', local: 'cost' },
-  {
-    name: 'tokens',
-    aliases: ['tok'],
-    args: '',
-    category: 'data',
-    desc: 'Show token usage breakdown and estimated spend',
-    local: 'tokens',
-  },
-  { name: 'clear', aliases: ['cls'], args: '', category: 'session', desc: 'Start a new session with empty context', local: 'clear' },
-  { name: 'help', aliases: ['?', 'h'], args: '', category: 'support', desc: 'Show help', local: 'help' },
-  { name: 'exit', aliases: ['quit'], args: '', category: 'session', desc: 'Exit the CLI', local: 'exit' },
-
-  // ── unavailable: aegiscodex-dev vocabulary this client cannot honour ───────
-  // Not fakes — each names why it is absent and, where one exists, the nearest
-  // working command. `parseLine` surfaces these as `kind: 'unavailable'`.
-  { name: 'login', args: '', category: 'auth', desc: 'Sign in to Claude Code', unavailable: true, why: 'sign-in uses Claude Code auth, which this client does not have — it authenticates with your AEGIS key', alt: '/byok-set' },
-  { name: 'logout', args: '', category: 'auth', desc: 'Sign out', unavailable: true, why: 'there is no Claude Code sign-in here to end' },
-  { name: 'doctor', args: '', category: 'support', desc: 'Run diagnostic checks on this environment', unavailable: true, why: 'the diagnostic suite belongs to aegiscodex-dev, not this client', alt: '/status' },
-  { name: 'permissions', args: '[mode] [pattern]', category: 'model', desc: 'Set permissions for tool use', unavailable: true, why: 'tool-permission prompts require a local agent loop this client does not run' },
-  { name: 'mcp', args: '[sub]', category: 'model', desc: 'Show MCP server configuration', unavailable: true, why: 'this CLI is itself an MCP host, so it has no MCP servers to configure', alt: '/tool' },
-  { name: 'skills', aliases: ['sk'], args: '[name|refresh]', category: 'session', desc: 'List skills (SKILL.md in the standard skill dirs)', unavailable: true, why: 'skills run inside the agent loop, which this client does not host' },
-  { name: 'hooks', args: '[status|list]', category: 'model', desc: 'View hooks configuration status and configured hook list', unavailable: true, why: 'hooks are a local agent-loop feature this client does not run' },
-  { name: 'agents', aliases: ['sessions'], args: '[role] [task]', category: 'session', desc: 'Show the agents panel, or run a sub-agent role preset — /agents <role> <task>', unavailable: true, why: 'sub-agents need a local agent loop this client does not host' },
-  { name: 'resume', args: '', category: 'session', desc: 'Switch to a previous session', unavailable: true, why: 'this client keeps no session history to resume' },
-  { name: 'rewind', args: '[N]', category: 'session', desc: 'Revert the conversation to a checkpoint', unavailable: true, why: 'checkpoints belong to a session history this client does not keep' },
-  { name: 'compact', args: '', category: 'session', desc: 'Compact the conversation history', unavailable: true, why: 'there is no local transcript to compact' },
-  { name: 'init', args: '[file]', category: 'workspace', desc: 'Create a CLAUDE.md file in the project', unavailable: true, why: 'project scaffolding is a workspace feature this client does not have', alt: '/aegis-remember' },
-  { name: 'export', args: '[markdown|json] [file|clipboard]', category: 'data', desc: 'Export the current conversation to a file or clipboard', unavailable: true, why: 'this client keeps no transcript to export' },
-  { name: 'vim', args: '[on|off]', category: 'model', desc: 'Toggle vim keymap', unavailable: true, why: 'input is your terminal readline, which has no vim keymap' },
-  { name: 'yolo', args: '[on|off]', category: 'model', desc: 'Toggle YOLO mode — auto-approve all tool executions', unavailable: true, why: 'there is no tool-approval prompt here to auto-approve' },
-  { name: 'confirm', aliases: ['confirmations'], args: '[on|off]', category: 'model', desc: 'Toggle tool-call confirmation prompts', unavailable: true, why: 'there is no tool-approval prompt here to toggle' },
 ];
 
-// ── Index + the one invariant a table like this must hold ────────────────────
+// ── Index + the one invariant a table like this must hold ─────────────────────
 // A name or alias registered twice would silently shadow the earlier entry, so
-// the collision is a module-load error rather than a runtime surprise. (The
-// reference keeps `builtinNames()` for exactly this; its test asserts the same.)
+// the collision is a module-load error rather than a runtime surprise.
 
 const BY_NAME = new Map();
 for (const c of COMMANDS) {
@@ -225,8 +1285,25 @@ for (const c of COMMANDS) {
   }
 }
 
+/** Every builtin entry, in palette order, with its category label attached. */
+function allCommands() {
+  return COMMANDS.map((entry) => ({ ...entry, categoryLabel: categoryLabel(entry.category) }));
+}
+
+/** Commands shown in the palette, /help and Tab completion. */
+function visibleCommands() {
+  return allCommands().filter((c) => !(typeof c.hidden === 'function' ? c.hidden() : c.hidden));
+}
+
+/** Find by name or alias, case-insensitive. Returns the entry or null. */
 function findCommand(name) {
   return BY_NAME.get(String(name || '').toLowerCase()) || null;
+}
+
+/** The canonical name of a command, resolving aliases. */
+function canonicalName(name) {
+  const e = findCommand(name);
+  return e ? e.name : name;
 }
 
 /**
@@ -246,12 +1323,8 @@ function parseLine(line) {
   const name = (sp === -1 ? trimmed.slice(1) : trimmed.slice(1, sp)).trim();
   const arg = sp === -1 ? '' : trimmed.slice(sp + 1).trim();
   const command = findCommand(name);
-  if (!command) {
-    return { kind: 'unknown', name, text: trimmed };
-  }
-  if (command.unavailable) {
-    return { kind: 'unavailable', command, arg };
-  }
+  if (!command) return { kind: 'unknown', name, text: trimmed };
+  if (command.unavailable) return { kind: 'unavailable', command, arg };
   return { kind: 'command', command, arg };
 }
 
@@ -260,4 +1333,15 @@ function toolBackedCommands() {
   return COMMANDS.filter((c) => c.tool);
 }
 
-module.exports = { COMMANDS, findCommand, parseLine, toolBackedCommands };
+module.exports = {
+  CATEGORIES,
+  categoryLabel,
+  EFFORT_LEVELS,
+  COMMANDS,
+  allCommands,
+  visibleCommands,
+  findCommand,
+  canonicalName,
+  parseLine,
+  toolBackedCommands,
+};

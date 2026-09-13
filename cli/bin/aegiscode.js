@@ -33,11 +33,14 @@ Options:
       --max-tokens <n>    output ceiling hint
       --light             light theme
       --width <cols>      force a render width (useful for piping/logs)
+      --yolo              skip tool-approval prompts (exec/writeFile/editFile
+                           run without asking) — same as the in-session /yolo
   -h, --help              this text
   -v, --version           print the version
 
 In-session: type /help for commands, /quit to exit, esc/ctrl+c to interrupt a
-running call. Plain text is a prompt (identical to /ask).
+running call. Plain text is a prompt (identical to /ask) — a question that
+needs a file read, a shell command, or an edit is handled the same turn.
 `;
 
 function parseArgs(argv) {
@@ -50,6 +53,7 @@ function parseArgs(argv) {
     maxTokens: undefined,
     light: false,
     width: null,
+    yolo: false,
     prompt: null,
     help: false,
     version: false,
@@ -101,6 +105,9 @@ function parseArgs(argv) {
         break;
       case '--light':
         opts.light = true;
+        break;
+      case '--yolo':
+        opts.yolo = true;
         break;
       case '--width':
         opts.width = Number(next());
@@ -172,6 +179,7 @@ async function main(argv = process.argv.slice(2)) {
     maxTokens: opts.maxTokens,
     width: opts.width ? () => opts.width : undefined,
     interactive: !prompt && Boolean(process.stdin.isTTY),
+    confirmMode: !opts.yolo,
   });
 
   if (prompt) return app.runOnce(prompt, { json: opts.json });

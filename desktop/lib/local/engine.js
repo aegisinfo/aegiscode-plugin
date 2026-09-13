@@ -535,7 +535,7 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
         model: opts.model,
         mode: opts.mode,
         maxTokens: opts.maxTokens,
-        stream: true,
+        stream: opts.stream !== false,
         // The pooled (Nexus) brain is streamed, and an OpenAI-compatible SSE
         // stream reports no token usage unless asked. Without this the Aegis
         // Cloud class — the desktop's default — was the one class that answered
@@ -699,6 +699,11 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
         workers: payload && payload.workers,
         onReasoning,
         idleTimeoutMs: autonomous ? AUTONOMOUS_IDLE_TIMEOUT_MS : undefined,
+        // A caller with no live streaming surface (a `--no-stream` CLI flag, a
+        // one-shot script) can ask for the buffered non-stream wire form
+        // instead. Undefined/anything but `false` keeps every existing caller
+        // (the desktop renderer never sets this) on the streamed path.
+        stream: payload && payload.stream === false ? false : true,
       };
 
       // No round cap: a model that keeps calling tools keeps going for as
@@ -781,6 +786,15 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
           res = await dispatch(cls, { ...opts, tools: [] });
         }
         addUsage(res);
+
+        // A cancelled turn is over. Both recoveries below exist for "the model
+        // said nothing", and an aborted request resolves with exactly that —
+        // no text — so without this guard a user pressing Esc to stop a slow
+        // turn immediately issued ANOTHER billed provider call (and, because
+        // every transport concatenates the deltas it forwards, streamed the
+        // partial answer a second time onto the same bubble). Measured before
+        // the guard: one interrupted turn == two dispatches.
+        if (signal.aborted) return withTurnUsage(res);
 
         // Budget exhausted before the answer was written. Doubling it costs
         // one request and converts a dead turn into a real one; a second

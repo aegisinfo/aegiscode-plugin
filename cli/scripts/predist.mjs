@@ -11,7 +11,8 @@
  *   cli/                        repo/
  *     vendor/mcp/tools.js   ≡     mcp/tools.js
  *     vendor/client/*.js    ≡     client/*.js
- *     vendor/desktop/...    ≡     desktop/renderer/usage.js
+ *     vendor/desktop/...    ≡     desktop/renderer/usage.js,
+ *                                 desktop/lib/local/{engine,tools,shell,agents,prompt}.js
  *
  * The shape matters: `mcp/tools.js` requires `../client/foreign-memory.js`, and
  * because the staged tree mirrors the repo, that path resolves *inside* the
@@ -39,6 +40,15 @@ const FILES = [
   'client/foreign-memory.js',
   'mcp/tools.js',
   'desktop/renderer/usage.js',
+  // The agent-loop engine (persistent shell, editFile/grep/exec, Task
+  // subagents) the desktop app already ships (desktop/lib/local/). The CLI
+  // reuses it as-is, scoped to the 'aegis' class only (see src/engine.js) —
+  // one tool loop implementation, not a second one drifting alongside it.
+  'desktop/lib/local/engine.js',
+  'desktop/lib/local/tools.js',
+  'desktop/lib/local/shell.js',
+  'desktop/lib/local/agents.js',
+  'desktop/lib/local/prompt.js',
 ];
 
 function main() {

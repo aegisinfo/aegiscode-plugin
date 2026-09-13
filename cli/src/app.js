@@ -9,15 +9,29 @@
  * real streaming and real command dispatch without a TTY and without a child
  * process. Bin entry = argument parsing and process lifecycle; everything else
  * lives here.
+ *
+ * Commands come from `./commands.js`. Each entry is either handler-backed
+ * (`cmd.handler(c, args)`, the reference aegiscodex-dev contract), tool-backed
+ * (`cmd.tool` + `cmd.build`), a generic escape hatch (`cmd.generic`, `/tool`),
+ * or `unavailable` (a Claude Code auth-loop command this client cannot honour).
+ * Handlers run against the FROZEN command context built below; the tool path
+ * and the `/tool` escape hatch are unchanged from the previous revision.
  */
 
 const readline = require('node:readline');
+const os = require('node:os');
+const { randomUUID } = require('node:crypto');
 const { createTools, createClient, usageTokens } = require('./deps.js');
-const { GLYPH, VERBS, themeOf, RESET, BOLD } = require('./theme.js');
-const { LiveRegion, termWidth, EC, w } = require('./screen.js');
-const { parseLine, findCommand, COMMANDS } = require('./commands.js');
+const { createEngine } = require('./engine.js');
+const { GLYPH, VERBS, themeOf, RESET } = require('./theme.js');
+const { LiveRegion, termWidth, w } = require('./screen.js');
+const { parseLine, COMMANDS, visibleCommands } = require('./commands.js');
+const { updateConfig, loadPermissions } = require('./config.js');
+const { readSessionTranscript } = require('./history.js');
+const chatflow = require('./chatflow.js');
+const overlays = require('./overlays.js');
 const render = require('./render.js');
-const { fmtTokens, fmtEur, maskKey, fmtElapsed } = require('./format.js');
+const { fmtTokens, fmtEur, maskKey } = require('./format.js');
 
 const VERSION = require('../package.json').version;
 
@@ -36,8 +50,56 @@ function createApp(options = {}) {
   const client = options.client || createClient();
   const { TOOLS, toolList } = options.tools || createTools(client);
 
-  const ctx = () => ({ light: opts.light });
+  // Tool-approval gate (exec/writeFile/editFile confirm before running).
+  // Read per call, so /permissions and /yolo take effect on the very next tool
+  // round rather than needing a restart. The mode is read LIVE from the
+  // permission store rather than from a boolean captured at construction:
+  // `/yolo` and `/confirm` write the store, so a captured flag made both
+  // commands cosmetic — the panel changed while the engine kept asking.
+  let confirmMode = options.confirmMode !== false;
+  const engine =
+    options.engine ||
+    createEngine({
+      client,
+      getConfirmMode: () => {
+        if (options.confirmMode !== undefined) return confirmMode;
+        try {
+          return loadPermissions().defaultMode !== 'allow';
+        } catch {
+          return confirmMode;
+        }
+      },
+    });
+  // Set by runInteractive: a question/answer channel for the engine's
+  // tool-approval requests. Left null in one-shot (-p) runs, where there is
+  // no one to ask — see the approval branch in ask() below.
+  let approvalPrompter = null;
+
   const width = () => (options.width ? options.width() : termWidth());
+
+  // ── live session/command state ─────────────────────────────────────────────
+  // `commandCtx` is the FROZEN `c.ctx` a handler receives: the mutable slice of
+  // session state a command may set (model, effort, thinking, theme, vim, stream,
+  // cwd, lastRecap). The renderers read their colours from it via ctx().
+  const commandCtx = {
+    light: opts.light,
+    model: opts.model,
+    effort: 'high',
+    thinking: false,
+    themeIndex: opts.light ? 0 : 1,
+    vim: false,
+    stream: opts.stream,
+    cwd: process.cwd(),
+    lastRecap: null,
+    sessionId: randomUUID(),
+  };
+  // The transcript rows a handler reads/pushes (user/assistant/note/panel/…).
+  // It is also the source of the engine's conversation history, so /clear and
+  // /new genuinely reset context.
+  const transcript = [];
+  let wantExit = false;
+
+  const ctx = () => ({ light: commandCtx.light });
 
   const session = {
     turns: 0,
@@ -51,7 +113,7 @@ function createApp(options = {}) {
     startedAt: Date.now(),
   };
 
-  let abortController = null;
+  let activeSessionId = null;
   let closed = false;
 
   // --- helpers --------------------------------------------------------------
@@ -86,10 +148,10 @@ function createApp(options = {}) {
     return render.renderBanner(ctx(), {
       width: width(),
       version: VERSION,
-      model: opts.model || 'server default',
+      model: commandCtx.model || 'server default',
       base: client.apiBase,
       key: maskKey(client.apiKey),
-      stream: opts.stream,
+      stream: commandCtx.stream,
     });
   }
 
@@ -106,18 +168,27 @@ function createApp(options = {}) {
   // --- the ask path ---------------------------------------------------------
 
   /**
-   * One pooled call, streamed into the live region.
+   * One turn through the agent-loop engine (persistent-shell exec,
+   * readFile/writeFile/editFile/listDir/glob/grep, Task subagents), streamed
+   * into the live region. `history` is every prior turn's user/assistant pair
+   * — never that turn's own tool-call scratchpad, which the engine keeps
+   * internally and never returns (see engine.js's `chat()`).
    * @returns {Promise<{text:string, usage:object|null, model:string|null, ms:number, interrupted:boolean}>}
    */
-  async function ask(prompt) {
+  async function ask(prompt, { history = [], presenter = null, signal = null } = {}) {
     const started = Date.now();
-    const live = opts.interactive && opts.stream && out.isTTY ? new LiveRegion(out) : null;
+    // A presenter takes over ALL presentation (the chatflow's frame paints the
+    // streaming answer into a transcript row), so the linear/inline live region
+    // is only built when there is none.
+    const live =
+      !presenter && opts.interactive && opts.stream && out.isTTY ? new LiveRegion(out) : null;
     let tick = 0;
     let chars = 0;
     let partial = '';
     let reasoning = 0;
     let verb = VERBS[Math.floor(Math.random() * VERBS.length)];
     let sawReasoning = false;
+    let usedTools = false;
 
     const paint = () => {
       if (!live) return;
@@ -135,56 +206,121 @@ function createApp(options = {}) {
     if (timer && timer.unref) timer.unref();
     paint();
 
-    abortController = new AbortController();
-    let interrupted = false;
-    const onSigint = () => {
-      interrupted = true;
-      if (abortController) abortController.abort();
+    // Presentation hooks. With no presenter these reproduce the linear
+    // behaviour exactly (live-region spinner, tool rows written to scrollback).
+    const p = presenter || {};
+    const present = {
+      text: (d) => {
+        if (p.text) return p.text(d);
+        if (live && tick % 2 === 0) paint();
+        return undefined;
+      },
+      reasoning: (r) => {
+        if (p.reasoning) return p.reasoning(r);
+        return undefined;
+      },
+      tool: (tool) => {
+        if (p.tool) return p.tool(tool);
+        if (live) live.clear();
+        emit(
+          render.renderTurn(
+            ctx(),
+            { role: 'tool', label: tool.name, args: tool.args, ok: tool.ok },
+            width()
+          )
+        );
+        paint();
+        return undefined;
+      },
     };
+
+    const sessionId = randomUUID();
+    activeSessionId = sessionId;
+    let interrupted = false;
+    // One cancel path for both callers: a SIGINT from the process, and the
+    // chatflow's Esc, which aborts the controller it handed in. Without this
+    // second source the full-screen loop's Esc had nothing listening to it —
+    // the turn kept running and billing while the UI said "stopped".
+    const cancel = () => {
+      interrupted = true;
+      engine.cancel(sessionId);
+    };
+    const onSigint = () => cancel();
     process.once('SIGINT', onSigint);
+    if (signal) {
+      if (signal.aborted) cancel();
+      else signal.addEventListener('abort', cancel, { once: true });
+    }
+
+    // A denial with no one to ask it of: -p and any other run with no
+    // approvalPrompter set. Fails safe (deny) rather than hanging the tool
+    // round forever waiting for an answer nobody can give.
+    const denyNoPrompter = (info) => {
+      err.write(
+        `aegiscode: ${info.tool} needs confirmation but this run has no prompt for it — denied ` +
+          '(pass --yolo to auto-approve mutating tools).\n'
+      );
+      return Promise.resolve('deny');
+    };
+
+    const onDelta = (chunk) => {
+      if (!chunk) return;
+      if (chunk.reasoning) {
+        reasoning += w(chunk.reasoning);
+        // The pool's worker findings arrive on the reasoning channel before
+        // the answer; say so rather than looking stalled.
+        if (!sawReasoning) {
+          sawReasoning = true;
+          verb = 'Reasoning';
+          paint();
+        }
+        present.reasoning(chunk.reasoning);
+      }
+      if (chunk.delta) {
+        chars += w(chunk.delta);
+        partial += chunk.delta;
+        present.text(chunk.delta);
+      }
+      if (chunk.tool) {
+        usedTools = true;
+        present.tool(chunk.tool);
+      }
+      if (chunk.approval) {
+        const info = chunk.approval;
+        if (live) live.clear();
+        const decide = p.approval || approvalPrompter || denyNoPrompter;
+        Promise.resolve(decide(info))
+          .catch(() => 'deny')
+          .then((decision) => engine.respondApproval(info.id, decision));
+      }
+    };
 
     try {
-      const res = await client.chatCompletion({
-        prompt,
-        model: opts.model || undefined,
-        system: opts.system,
-        maxTokens: opts.maxTokens,
-        stream: Boolean(opts.stream),
-        // Ask the server for the token count on the streaming path: an
-        // OpenAI-compatible SSE reply carries no usage unless asked, and this
-        // is the same wire form the desktop sends.
-        includeUsage: Boolean(opts.stream),
-        signal: abortController.signal,
-        onReasoning: (t) => {
-          reasoning += w(t);
-          // The pool's worker findings arrive on the reasoning channel before
-          // the answer; say so rather than looking stalled.
-          if (!sawReasoning) {
-            sawReasoning = true;
-            verb = 'Reasoning';
-          }
+      const res = await engine.chat(
+        {
+          prompt,
+          messages: history,
+          model: commandCtx.model || undefined,
+          system: opts.system,
+          maxTokens: opts.maxTokens,
+          // false asks the engine for the buffered (non-stream) wire form, so
+          // `--no-stream` and piped runs get a single body rather than SSE.
+          stream: commandCtx.stream !== false,
+          sessionId,
         },
-        onStream: ({ delta, reasoning: r }) => {
-          if (r) reasoning += w(r);
-          if (delta) {
-            chars += w(delta);
-            partial += delta;
-            // Re-paint on every delta but coalesce to ~30fps through the frame
-            // counter — a fast provider otherwise spends the CPU on escapes.
-            if (live && tick % 2 === 0) paint();
-          }
-        },
-      });
+        onDelta
+      );
 
       const choice = (res.choices && res.choices[0]) || {};
       const text = (choice.message && choice.message.content) || partial;
       return {
         text,
         usage: res.usage || null,
-        model: res.model || opts.model || null,
+        model: res.model || commandCtx.model || null,
         ms: Date.now() - started,
         interrupted,
         reasoningChars: reasoning,
+        usedTools,
       };
     } catch (e) {
       // A user interrupt is not a failure: keep what already streamed.
@@ -192,24 +328,33 @@ function createApp(options = {}) {
         return {
           text: partial,
           usage: null,
-          model: opts.model || null,
+          model: commandCtx.model || null,
           ms: Date.now() - started,
           interrupted: true,
           reasoningChars: reasoning,
+          usedTools,
         };
       }
       throw e;
     } finally {
       if (timer) clearInterval(timer);
       process.removeListener('SIGINT', onSigint);
+      if (signal) signal.removeEventListener('abort', cancel);
       if (live) live.clear();
-      abortController = null;
+      activeSessionId = null;
     }
   }
 
   /** Print a completed turn: role block, then the accounting line. */
   function printTurn(turn) {
     emit(render.renderTurn(ctx(), turn, width()));
+  }
+
+  /** Prior user/assistant pairs from the live transcript, for the engine. */
+  function historyPairs() {
+    return transcript
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .map((m) => ({ role: m.role, content: m.text }));
   }
 
   /** Ask, then account for it. Shared by plain prompts and `/ask`. */
@@ -229,25 +374,21 @@ function createApp(options = {}) {
       return;
     }
 
+    const history = historyPairs();
     printTurn({ role: 'user', text: prompt, label });
+    transcript.push({ role: 'user', text: prompt });
 
     let res;
     try {
-      res = await ask(prompt);
+      res = await ask(prompt, { history });
     } catch (e) {
       emit(render.renderTurn(ctx(), { role: 'error', text: e.message }, width()));
       return;
     }
 
-    session.turns++;
-    session.calls++;
+    if (res.text) transcript.push({ role: 'assistant', text: res.text });
 
-    const tokens = usageTokens(res.usage);
-    if (tokens != null) {
-      session.tokens += tokens;
-      session.inputTokens += Number(res.usage.input_tokens ?? res.usage.prompt_tokens ?? 0) || 0;
-      session.outputTokens += Number(res.usage.output_tokens ?? res.usage.completion_tokens ?? 0) || 0;
-    }
+    const tokens = recordTurn(res);
 
     const spend = await refreshSpend();
 
@@ -289,18 +430,6 @@ function createApp(options = {}) {
     emit(render.renderToolResult(ctx(), name, text, width()));
   }
 
-  // Category order and labels, matching aegiscodex-dev's palette.
-  const CATEGORY_ORDER = ['aegis', 'model', 'session', 'data', 'auth', 'support', 'workspace'];
-  const CATEGORY_LABEL = {
-    aegis: 'Aegis plugin',
-    model: 'Model & behavior',
-    session: 'Session & context',
-    data: 'Data',
-    auth: 'Auth',
-    support: 'Support',
-    workspace: 'Workspace',
-  };
-
   /**
    * The nearest routable name to a mistyped one: a prefix of it, or a name it
    * is a prefix of. Deliberately simple — `cli/src/fuzzy.js` is a separate
@@ -323,37 +452,199 @@ function createApp(options = {}) {
     return best;
   }
 
-  function printHelp() {
-    const t = themeOf(ctx());
-    emit([render.renderHeading(ctx(), 'commands', width())]);
-    const rows = COMMANDS.filter((c) => !c.unavailable).map((c) => ({
-      cat: c.category || 'other',
-      usage: `/${c.name}${c.args ? ' ' + c.args : ''}`,
-      desc: c.desc,
-      aliases: (c.aliases || []).map((a) => `/${a}`).join(' '),
-    }));
-    const widest = rows.reduce((m, r) => Math.max(m, r.usage.length), 0);
-    for (const cat of CATEGORY_ORDER) {
-      const group = rows.filter((r) => r.cat === cat);
-      if (!group.length) continue;
-      emit(['', `${t.dim}${BOLD}${CATEGORY_LABEL[cat] || cat}${RESET}`]);
-      for (const r of group) {
-        const alias = r.aliases ? `${t.dim}  (${r.aliases})${RESET}` : '';
-        emit([
-          `  ${t.gold}${r.usage}${RESET}${' '.repeat(Math.max(1, widest - r.usage.length + 2))}` +
-            `${t.white}${r.desc}${RESET}${alias}`,
-        ]);
+  /** Tokenize one argument string, honouring single/double quotes. */
+  function tokenize(s) {
+    const out = [];
+    let cur = '';
+    let quote = null;
+    let has = false;
+    for (const ch of String(s || '')) {
+      if (quote) {
+        if (ch === quote) quote = null;
+        else cur += ch;
+        continue;
       }
+      if (ch === '"' || ch === "'") { quote = ch; has = true; continue; }
+      if (/\s/.test(ch)) {
+        if (cur || has) { out.push(cur); cur = ''; has = false; }
+        continue;
+      }
+      cur += ch;
+      has = true;
     }
-    const unavail = COMMANDS.filter((c) => c.unavailable).map((c) => `/${c.name}`);
-    if (unavail.length) {
-      emit(['', `${t.dim}not available in this client: ${unavail.join(' ')}${RESET}`]);
-    }
-    emit(['', render.renderNotice(ctx(), 'info', `plain text is a prompt ${GLYPH.bullet} /exit exits`)]);
+    if (cur || has) out.push(cur);
+    return out;
   }
 
-  /** Handle one line of input. Returns false when the session should end. */
-  async function handleLine(line) {
+  /** Positional args keyed by the entry's `args` names, plus `_rest`. */
+  function parseArgs(cmd, arg) {
+    const raw = String(arg == null ? '' : arg);
+    const names = Array.isArray(cmd.args) ? cmd.args : [];
+    const tokens = tokenize(raw);
+    const out = { _rest: raw.trim() };
+    names.forEach((n, i) => { if (tokens[i] !== undefined) out[n] = tokens[i]; });
+    return out;
+  }
+
+  /** A fresh snapshot for panels.js (the frozen `c.state()` shape). */
+  function buildState() {
+    const rules = loadPermissions();
+    return {
+      version: VERSION,
+      model: commandCtx.model || 'server default',
+      effort: commandCtx.effort,
+      thinking: commandCtx.thinking,
+      theme: commandCtx.light ? 'light' : 'dark',
+      themeIndex: commandCtx.themeIndex,
+      vim: commandCtx.vim,
+      stream: commandCtx.stream,
+      cwd: commandCtx.cwd,
+      home: os.homedir(),
+      sessionId: commandCtx.sessionId,
+      base: client.apiBase,
+      keyMask: maskKey(client.apiKey),
+      online: !!client.apiKey,
+      turns: session.turns,
+      calls: session.calls,
+      startedAt: session.startedAt,
+      tokens: { input: session.inputTokens, output: session.outputTokens, total: session.tokens },
+      costEur: session.cost,
+      balance: session.balance,
+      plan: session.plan || null,
+      account: session.account || null,
+      permissions: { mode: rules.defaultMode, rules },
+      models: [],
+      commands: visibleCommands(),
+      transcript: transcript.slice(),
+      sessions: [],
+      memory: {},
+      lastRecap: commandCtx.lastRecap,
+      backend: 'aegis',
+      url: client.apiBase,
+    };
+  }
+
+  /** Flatten a span line (panels.js/overlays.js output) back to an ANSI row. */
+  function flattenSpans(line) {
+    if (!Array.isArray(line)) return String(line == null ? '' : line);
+    return line.map((sp) => (sp && (sp.s || '') + (sp.t == null ? '' : sp.t)) || '').join('');
+  }
+
+  /**
+   * Push one transcript row. `c.push(row)`/`c.note`/`c.panel` land here; the
+   * linear CLI prints each row once to scrollback (there is no alt-screen).
+   */
+  function pushRow(row) {
+    if (!row || typeof row !== 'object') return;
+    const W = width();
+    switch (row.role) {
+      case 'panel': {
+        const lines = Array.isArray(row.lines) ? row.lines : [];
+        for (const line of lines) emit(flattenSpans(line));
+        return;
+      }
+      case 'note': emit(render.renderNotice(ctx(), 'info', row.text)); return;
+      case 'tip': emit(render.renderNotice(ctx(), 'info', row.text)); return;
+      case 'done': emit(render.renderNotice(ctx(), 'ok', row.text)); return;
+      case 'error': emit(render.renderNotice(ctx(), 'error', row.text)); return;
+      case 'user': emit(render.renderTurn(ctx(), { role: 'user', text: row.text, label: row.label }, W)); return;
+      case 'assistant': emit(render.renderTurn(ctx(), { role: 'assistant', text: row.text }, W)); return;
+      case 'tool':
+        emit(render.renderTurn(ctx(), { role: 'tool', label: row.label || row.name, args: row.args, ok: row.ok }, W));
+        return;
+      default: emit(render.renderNotice(ctx(), 'info', row.text == null ? '' : String(row.text))); return;
+    }
+  }
+
+  /** A static (non-interactive) print of an overlay's contents. */
+  function openOverlay(o) {
+    if (!o || typeof o !== 'object') return;
+    const W = width();
+    const rows = Math.max(5, (process.stdout && process.stdout.rows) || 24);
+    let lines = null;
+    if (o.type === 'panel') lines = o.lines;
+    else if (o.type === 'palette') lines = overlays.renderPalette(visibleCommands(), { query: o.query || '', sel: o.sel || 0 }, W, rows);
+    else if (o.type === 'model') lines = overlays.renderModelPicker(o.items || [], o.sel || 0, W, rows, o.current != null ? o.current : commandCtx.model);
+    else if (o.type === 'effort') lines = overlays.renderEffortPicker(o.sel || 0, W, commandCtx.effort);
+    else if (o.type === 'resume') lines = overlays.renderResumeList(o.items || [], o.sel || 0, W, rows);
+    else if (o.type === 'confirm') lines = render.renderApproval(ctx(), o.info || {}, W).map((s) => [spanRow(s)]);
+    if (!lines) return;
+    for (const line of lines) emit(flattenSpans(line));
+  }
+
+  /** A single-span row for a pre-styled string (renderApproval output). */
+  function spanRow(s) {
+    return { t: s, s: '', w: w(s) };
+  }
+
+  /** Run `fn(signal)` with the spinner up (interactive TTY only). */
+  async function withWorking(fn) {
+    const controller = new AbortController();
+    const live = opts.interactive && out.isTTY ? new LiveRegion(out) : null;
+    let timer = null;
+    if (live) {
+      let tick = 0;
+      const started = Date.now();
+      const paint = () => live.update([render.renderWorking(ctx(), { tick: tick++, verb: VERBS[0], elapsedMs: Date.now() - started })]);
+      paint();
+      timer = setInterval(paint, 90);
+      if (timer.unref) timer.unref();
+    }
+    try {
+      return await fn(controller.signal);
+    } finally {
+      if (timer) clearInterval(timer);
+      if (live) live.clear();
+    }
+  }
+
+  async function showThemePicker() {
+    commandCtx.light = !commandCtx.light;
+    commandCtx.themeIndex = commandCtx.light ? 0 : 1;
+    emit(render.renderNotice(ctx(), 'ok', `theme: ${commandCtx.light ? 'light' : 'dark'}`));
+  }
+
+  /** Build the FROZEN command context `c` a handler runs against. */
+  function makeCommandContext() {
+    const c = {
+      ctx: commandCtx,
+      transcript,
+      push: (row) => pushRow(row),
+      note: (text) => pushRow({ role: 'note', text }),
+      panel: (lines) => pushRow({ role: 'panel', lines }),
+      render: () => {},
+      openOverlay: (o) => openOverlay(o),
+      closeOverlay: () => {},
+      askInput: () => Promise.resolve(null),
+      withWorking: (fn) => withWorking(fn),
+      runPrompt: (text) => runPrompt(text),
+      ask: (text) => ask(text),
+      runTool: (name, args) => runTool(name, args),
+      refreshSpend: () => refreshSpend(),
+      state: () => buildState(),
+      setInput: () => {},
+      exit: () => { wantExit = true; },
+      client,
+      TOOLS,
+      saveConfig: (patch) => updateConfig(patch),
+      showThemePicker: () => showThemePicker(),
+    };
+    Object.defineProperty(c, 'sessionId', {
+      enumerable: true,
+      get: () => commandCtx.sessionId,
+      set: (v) => { commandCtx.sessionId = v; },
+    });
+    return c;
+  }
+
+  /**
+   * Handle one line of input. Returns false when the session should end.
+   *
+   * `cOverride` lets the chatflow supply the context it owns (its own `push`,
+   * `render`, `openOverlay`, `askInput`, `runPrompt`) instead of the linear
+   * defaults — the handlers are identical either way, which is the point.
+   */
+  async function handleLine(line, cOverride = null) {
     const parsed = parseLine(line);
 
     if (parsed.kind === 'empty') return true;
@@ -374,7 +665,7 @@ function createApp(options = {}) {
     }
     if (parsed.kind === 'unavailable') {
       const c = parsed.command;
-      emit(render.renderNotice(ctx(), 'warn', `/${c.name} is not available in aegiscode — ${c.why}`));
+      emit(render.renderNotice(ctx(), 'warn', `/${c.name} is not available in aegiscode — ${c.unavailable}`));
       if (c.alt) emit(render.renderNotice(ctx(), 'info', `try ${c.alt} instead`));
       else {
         const alt = nearest(c.name);
@@ -386,70 +677,16 @@ function createApp(options = {}) {
     const cmd = parsed.command;
     const arg = parsed.arg;
 
-    if (cmd.local) {
-      switch (cmd.local) {
-        case 'exit':
-          return false;
-        case 'clear':
-          out.write(EC.clearScreen);
-          // aegiscodex-dev's /clear starts a new session with empty context, so
-          // the session tallies reset too (the transcript is not persisted here).
-          session.turns = 0;
-          session.calls = 0;
-          session.tokens = 0;
-          session.inputTokens = 0;
-          session.outputTokens = 0;
-          session.cost = 0;
-          session.startedAt = Date.now();
-          emit(bannerLines());
-          return true;
-        case 'help':
-          printHelp();
-          return true;
-        case 'version':
-          emit(render.renderNotice(ctx(), 'info', `aegiscode v${VERSION}`));
-          return true;
-        case 'model':
-          if (!arg) {
-            emit(render.renderNotice(ctx(), 'info', `model: ${opts.model || 'server default'}`));
-          } else if (arg === '-') {
-            opts.model = null;
-            emit(render.renderNotice(ctx(), 'ok', 'model pin cleared — the server will choose'));
-          } else {
-            opts.model = arg;
-            emit(render.renderNotice(ctx(), 'ok', `pinned model: ${arg}`));
-          }
-          return true;
-        case 'stream':
-          opts.stream = arg ? !/^off|false|0$/i.test(arg) : !opts.stream;
-          emit(render.renderNotice(ctx(), 'ok', `streaming ${opts.stream ? 'on' : 'off'}`));
-          return true;
-        case 'theme':
-          opts.light = arg ? /^light/i.test(arg) : !opts.light;
-          emit(render.renderNotice(ctx(), 'ok', `theme: ${opts.light ? 'light' : 'dark'}`));
-          return true;
-        case 'cost':
-        case 'tokens': {
-          const t = themeOf(ctx());
-          emit([render.renderHeading(ctx(), 'session', width())]);
-          emit([
-            `  tokens   ${t.white}${fmtTokens(session.tokens)}${RESET}  ` +
-              t.gray + `(${fmtTokens(session.inputTokens)} in / ${fmtTokens(session.outputTokens)} out)` + RESET,
-            `  spend    ${t.green}${fmtEur(session.cost)}${RESET}`,
-            `  calls    ${session.calls}`,
-            `  balance  ${session.balance == null ? 'unknown' : fmtEur(session.balance)}`,
-            `  elapsed  ${fmtElapsed(Date.now() - session.startedAt)}`,
-          ]);
-          return true;
-        }
-        default:
-          emit(render.renderNotice(ctx(), 'error', `/${cmd.name} is not implemented`));
-          return true;
-      }
-    }
-
+    // The generic escape hatch (/tool <name> [json]).
     if (cmd.generic) {
-      const { tool, args } = cmd.build(arg);
+      let built;
+      try {
+        built = cmd.build(arg);
+      } catch (e) {
+        emit(render.renderNotice(ctx(), 'error', e.message));
+        return true;
+      }
+      const { tool, args } = built;
       if (!tool) {
         emit(render.renderNotice(ctx(), 'error', '/tool needs a tool name — see /help'));
         return true;
@@ -460,6 +697,19 @@ function createApp(options = {}) {
         emit(render.renderNotice(ctx(), 'error', e.message));
       }
       return true;
+    }
+
+    // Handler-backed (the reference aegiscode-dev contract).
+    if (typeof cmd.handler === 'function') {
+      const args = parseArgs(cmd, arg);
+      const c = cOverride || makeCommandContext();
+      try {
+        const keep = await cmd.handler(c, args);
+        return keep === false ? false : true;
+      } catch (e) {
+        emit(render.renderNotice(ctx(), 'error', e && e.message ? e.message : String(e)));
+        return true;
+      }
     }
 
     // Tool-backed command.
@@ -562,8 +812,87 @@ function createApp(options = {}) {
     return res.interrupted ? 130 : 0;
   }
 
-  /** Interactive REPL. */
-  async function runInteractive() {
+  /** Fold one completed turn's usage into the session tallies.
+   *  @returns {number|null} the total token count for the turn, when known. */
+  function recordTurn(res) {
+    session.turns++;
+    session.calls += Number((res && res.calls) || 1) || 1;
+    const usage = res && res.usage;
+    const tokens = usageTokens(usage);
+    if (tokens != null) {
+      session.tokens += tokens;
+      session.inputTokens += Number(usage.input_tokens ?? usage.prompt_tokens ?? 0) || 0;
+      session.outputTokens += Number(usage.output_tokens ?? usage.completion_tokens ?? 0) || 0;
+    }
+    return tokens;
+  }
+
+  /** One line of session accounting, for ctrl+t and the meta row. */
+  function tokenSummary() {
+    return (
+      `${fmtTokens(session.tokens)} tok ` +
+      `(${fmtTokens(session.inputTokens)} in / ${fmtTokens(session.outputTokens)} out) · ` +
+      `${session.calls} call${session.calls === 1 ? '' : 's'} · ${fmtEur(session.cost)}` +
+      (session.balance == null ? '' : ` · balance ${fmtEur(session.balance)}`)
+    );
+  }
+
+  /** Load a stored session back into the live transcript. */
+  async function resumeSession(item) {
+    if (!item || !item.id) return;
+    const rows = readSessionTranscript(item.id);
+    if (!rows.length) {
+      emit(render.renderNotice(ctx(), 'warn', `no stored turns for ${item.id}`));
+      return;
+    }
+    // Replace, rather than append: "resume" means continue THIS conversation,
+    // and appending would put two sessions' turns in one context window.
+    transcript.length = 0;
+    for (const r of rows) transcript.push(r);
+    commandCtx.sessionId = item.id;
+    emit(render.renderNotice(ctx(), 'ok', `resumed ${item.id} — ${rows.length} turn(s)`));
+  }
+
+  /**
+   * The host the chatflow drives. Everything the loop needs from the app, with
+   * no layering of its own — the loop owns the frame and the keys, this owns
+   * the transport, the tools, the command table and the tallies.
+   */
+  function makeHost() {
+    return {
+      ctx: commandCtx,
+      version: VERSION,
+      transcript,
+      session,
+      client,
+      TOOLS,
+      ask: (prompt, o) => ask(prompt, o),
+      makeCommandContext: () => makeCommandContext(),
+      buildState: () => buildState(),
+      dispatchLine: (line, c) => handleLine(line, c),
+      refreshSpend: () => refreshSpend(),
+      updateConfig: (patch) => updateConfig(patch),
+      visibleCommands: () => visibleCommands(),
+      tokensFor: (usage) => usageTokens(usage),
+      recordTurn: (res) => recordTurn(res),
+      tokenSummary: () => tokenSummary(),
+      resumeSession: (item) => resumeSession(item),
+      requestExit: () => {
+        wantExit = true;
+      },
+      wantsExit: () => wantExit,
+      isYolo: () => {
+        try {
+          return loadPermissions().defaultMode === 'allow';
+        } catch {
+          return false;
+        }
+      },
+    };
+  }
+
+  /** The plain (non-alt-screen) REPL: readline, one turn written to scrollback. */
+  async function runLinearRepl() {
     emit(bannerLines());
     await refreshSpend();
     out.write('\n');
@@ -582,7 +911,7 @@ function createApp(options = {}) {
         } catch (e) {
           emit(render.renderNotice(ctx(), 'error', e.message));
         }
-        if (!keep) {
+        if (!keep || wantExit) {
           closed = true;
           rl.close();
           return;
@@ -597,21 +926,50 @@ function createApp(options = {}) {
     });
   }
 
+  /**
+   * Interactive entry point. On a real terminal this is the full chatflow
+   * (alternate screen, header, transcript viewport, spinner, effort line,
+   * input line, status line, overlays). Anywhere else — a pipe, a test with an
+   * injected readline, `--print` — it stays the linear loop, so output remains
+   * pipeable and scriptable.
+   */
+  async function runInteractive() {
+    const tty =
+      !options.readline &&
+      options.chatflow !== false &&
+      process.stdin.isTTY &&
+      process.stdout.isTTY;
+    if (tty) {
+      await chatflow.runSession(makeHost());
+      return 0;
+    }
+    return runLinearRepl();
+  }
+
   return {
     opts,
     session,
     client,
     TOOLS,
     toolList,
+    ctx: commandCtx,
+    transcript,
     ask,
     runPrompt,
     handleLine,
     runOnce,
     runInteractive,
+    runLinearRepl,
     refreshSpend,
     bannerLines,
+    makeHost,
+    recordTurn,
+    tokenSummary,
+    resumeSession,
+    makeCommandContext,
+    buildState,
     get aborted() {
-      return abortController != null;
+      return false;
     },
   };
 }

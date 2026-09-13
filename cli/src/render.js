@@ -245,7 +245,11 @@ function renderTurn(ctx, turn, width = 80) {
     if (turn.streaming) body[body.length - 1] += `${t.white}${GLYPH.block}${RESET}`;
     lines.push(...body);
   } else if (role === 'tool') {
-    lines.push(`${t.white}${GLYPH.block}${RESET} ${t.gray}${turn.label || 'tool'}${RESET}`);
+    // turn.ok is only known once the call has actually run (the agent loop's
+    // tool-activity event fires after execution); undefined means "no result
+    // yet to report" (the plain registry-tool path, which never set it).
+    const status = turn.ok === undefined ? '' : turn.ok ? ` ${t.green}✓${RESET}` : ` ${t.red}${ERR}${RESET}`;
+    lines.push(`${t.white}${GLYPH.block}${RESET} ${t.gray}${turn.label || 'tool'}${RESET}${status}`);
     const args =
       turn.args == null
         ? ''
@@ -357,6 +361,33 @@ function renderToolResult(ctx, name, text, width = 80) {
   return lines;
 }
 
+/**
+ * The tool-approval card: the mutating call the model wants to run (a diff
+ * for writeFile/editFile, the command for exec) and the three answers. One
+ * inline question, matching aegiscodex-dev's Bash/edit approval dialog.
+ */
+function renderApproval(ctx, info = {}, width = 80) {
+  const t = themeOf(ctx);
+  const lines = [renderHeading(ctx, `confirm ${info.tool || 'tool'}`, width)];
+  const body = info.diff
+    ? info.diff
+    : info.args == null
+      ? ''
+      : typeof info.args === 'string'
+        ? info.args
+        : JSON.stringify(info.args);
+  for (const l of wrapBlock(body, Math.max(8, width - 2))) {
+    lines.push(l ? `  ${t.gray}${l}${RESET}` : '');
+  }
+  lines.push('');
+  lines.push(
+    `  ${t.coral}${GLYPH.bullet}${RESET} ${t.white}y${RESET}es once` +
+      `  ${t.dim}${GLYPH.bullet}${RESET} ${t.white}s${RESET}ession` +
+      `  ${t.dim}${GLYPH.bullet}${RESET} ${t.white}n${RESET}o ${t.dim}(default)${RESET}`
+  );
+  return lines;
+}
+
 /** A transient notice. Kinds map gray / coral / red / green with the matching
  *  glyph: info `·`, warn `⚠`, error `✗`, ok `✔`. */
 const NOTICE = {
@@ -381,6 +412,7 @@ module.exports = {
   renderWorking,
   renderHeading,
   renderToolResult,
+  renderApproval,
   renderNotice,
   mdLines,
   inline,

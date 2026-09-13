@@ -51,15 +51,28 @@ const toolsPath = resolveShared(path.join('mcp', 'tools.js'));
 // disagree about what a call consumed (test/cli-tools.test.mjs asserts the
 // function identity).
 const usagePath = resolveShared(path.join('desktop', 'renderer', 'usage.js'));
+// The desktop's agent-loop engine — persistent-shell exec, editFile/grep,
+// Task subagents — reused verbatim (src/engine.js scopes it to the 'aegis'
+// class) so the CLI's chat loop is the same tool loop as the GUI's, not a
+// second implementation that can drift out of step with it.
+const enginePath = resolveShared(path.join('desktop', 'lib', 'local', 'engine.js'));
+// Subagent role presets (/agents lists these; the model's task tool delegates
+// to them by name) — lives beside engine.js, staged into the same vendor dir.
+const agentsPath = resolveShared(path.join('desktop', 'lib', 'local', 'agents.js'));
 
 const { createClient } = require(clientPath);
 const { createTools } = require(toolsPath);
 const { usageTokens } = require(usagePath);
+const { createLocalEngine } = require(enginePath);
+const { agentRoles, agentRoleLabel } = require(agentsPath);
 
 module.exports = {
   createClient,
   createTools,
   usageTokens,
-  paths: { client: clientPath, tools: toolsPath, usage: usagePath },
+  createLocalEngine,
+  agentRoles,
+  agentRoleLabel,
+  paths: { client: clientPath, tools: toolsPath, usage: usagePath, engine: enginePath, agents: agentsPath },
   roots,
 };

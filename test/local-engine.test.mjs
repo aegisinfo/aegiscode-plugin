@@ -228,6 +228,58 @@ try {
 }
 assert(aborted, 'cancel aborts the in-flight stream');
 
+// ---- an interrupted turn must not re-dispatch ---------------------------
+//
+// Both "the model said nothing" recoveries — the doubled-budget truncation
+// retry and the write-up re-dispatch — are gated on an EMPTY round, and an
+// aborted request resolves with exactly that: no text. Without an abort guard
+// a user pressing Esc on a slow turn immediately issued a SECOND billed
+// provider call, and because every transport concatenates the deltas it has
+// already forwarded, the partial answer was streamed twice onto one bubble.
+// Measured on the pre-fix code: one interrupted turn, two dispatches.
+{
+  let dispatches = 0;
+  const slow = {
+    async chatCompletion(args) {
+      dispatches += 1;
+      // Stream before hanging, so a re-dispatch would visibly double the text.
+      if (args.onStream) args.onStream({ delta: 'partial' });
+      // Resolve (not reject) on abort — the shape of a transport that returns
+      // whatever it managed to read, which is what the pooled client does. A
+      // signal that is ALREADY aborted resolves at once, exactly as the real
+      // client does, so a re-dispatch after an abort fails on the dispatch
+      // count instead of hanging the test.
+      return new Promise((resolve) => {
+        const done = () => resolve({ choices: [{ message: { content: '' } }] });
+        if (args.signal.aborted) return done();
+        args.signal.addEventListener('abort', done);
+        return undefined;
+      });
+    },
+  };
+  const engine3 = createLocalEngine({
+    aegis: { ...aegis, chatCompletion: slow.chatCompletion, apiKey: 'k' },
+    settings,
+    ollama,
+    providers,
+  });
+  const pending2 = engine3.chat({ class: 'aegis', prompt: 'x', sessionId: 's2' }, () => {});
+  await new Promise((r) => setTimeout(r, 20));
+  engine3.cancel('s2');
+  let res2 = null;
+  try {
+    res2 = await pending2;
+  } catch {
+    res2 = null;
+  }
+  assert(dispatches === 1, `an interrupted turn dispatches once, not twice (got ${dispatches})`);
+  const got = res2 && res2.choices && res2.choices[0] && res2.choices[0].message
+    ? String(res2.choices[0].message.content || '')
+    : '';
+  const occurrences = (got.match(/partial/g) || []).length;
+  assert(occurrences <= 1, `the partial answer is not duplicated (got ${occurrences})`);
+}
+
 // ---- defect B: custom endpoints offer no base-URL-as-model-id -------------
 //
 // listModels used to return [{ id: cfg.baseURL }] for openai-compat/anthropic.
