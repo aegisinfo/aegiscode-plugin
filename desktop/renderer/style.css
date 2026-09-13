@@ -55,6 +55,17 @@ body {
   color: var(--text);
 }
 
+/* Same author-stylesheet-beats-UA-stylesheet gotcha as .autonomous-controls
+   below: `display: flex` here outranks `[hidden] { display: none }` from the
+   UA sheet, so the `hidden` attribute was a no-op with no visual effect. That
+   left the banner permanently on screen from first paint — its initial
+   `hidden` in index.html did nothing — and made the "Later" button look dead,
+   since its dismissal only sets `.hidden = true`. This override restores both
+   the initial hidden state and every silent status in renderUpdateBanner. */
+.update-banner[hidden] {
+  display: none;
+}
+
 .update-banner-actions {
   display: flex;
   gap: 8px;
