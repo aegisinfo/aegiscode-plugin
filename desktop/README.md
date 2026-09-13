@@ -17,7 +17,7 @@ mid-conversation with context intact:
 
 | Class | Transport | Key held in |
 |---|---|---|
-| **Aegis Cloud** | `aegiscloud.org` (pooled or pinned model) | main process |
+| **Aegis Cloud** | `aegiscloud.org` — one entry, **Nexus**; the pool auto-routes across whichever providers are live | main process |
 | **Ollama** | local `ollama` daemon | no key needed |
 | **Custom OpenAI-compatible** (LM Studio, OpenRouter, vLLM, …) | direct from the desktop app | main process — never sent to the renderer |
 | **Anthropic-compatible** (Claude, or any Messages-format gateway) | direct from the desktop app | main process |

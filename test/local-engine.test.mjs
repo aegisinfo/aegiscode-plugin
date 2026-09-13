@@ -13,7 +13,20 @@ const calls = [];
 const aegis = {
   apiKey: 'k',
   async listModels() {
-    return { models: [{ id: 'openai' }] };
+    // A realistic /api/v1/models payload: raw per-provider ids (whose keys
+    // drift in and out of validity) plus the pooled-brain tiers. The desktop
+    // collapses all of it to the single "Nexus" entry — see filterAegisCatalog.
+    return {
+      models: [
+        { id: 'openai' },
+        { id: 'anthropic' },
+        { id: 'groq' },
+        { id: 'gemini' },
+        { id: 'aegis-brain', label: 'aegis-brain' },
+        { id: 'aegis-brain-smart' },
+        { id: 'nexus-brain' },
+      ],
+    };
   },
   async chatCompletion(args) {
     calls.push(['chatCompletion', args]);
@@ -63,7 +76,15 @@ for (const n of ['aegis', 'ollama', 'openai-compat', 'anthropic']) {
 assert(classes.find((c) => c.class === 'ollama').configured === true, 'ollama configured');
 
 // listModels per class
-assert((await engine.listModels('aegis')).models[0].id === 'openai', 'aegis models');
+// The aegis class offers exactly one choice: the collapsed Nexus brain. Raw
+// provider ids and the other brain tiers never reach the dropdown — picking a
+// provider that happens to have no live key today is an ops detail, not a
+// model choice (the pool auto-routes).
+const aegisModels = (await engine.listModels('aegis')).models;
+assert(aegisModels.length === 1, `the aegis class collapses to exactly one entry, got ${aegisModels.length}`);
+assert(aegisModels[0].id === 'aegis-brain', `the collapsed entry is the aegis brain, got ${aegisModels[0].id}`);
+assert(aegisModels[0].label === 'Nexus', `the collapsed entry is labelled Nexus, got ${aegisModels[0].label}`);
+assert(!aegisModels.some((m) => ['openai', 'anthropic', 'groq', 'gemini'].includes(m.id)), 'raw provider ids are filtered out');
 assert((await engine.listModels('ollama')).models[0].id === 'llama3', 'ollama models');
 
 // chat routing per class

@@ -123,23 +123,23 @@ function normalizeCatalog(models) {
 }
 
 /**
- * The Aegis Cloud catalog (`/api/v1/models`) also lists internal routing
- * aliases — per-provider variants like `openai-gpt4o-mini`/`anthropic-haiku`,
- * and six pooled-brain tier ids (`{aegis,nexus}-brain[-smart|-neo]`) that all
- * run the same worker pool on the same backend model. None of those are a
- * human's model choice; picking between them put six near-duplicate "brain"
- * entries in the desktop dropdown. Surface only the four platform models the
- * user actually selects between, plus one collapsed "Nexus" entry standing
- * in for whichever brain tier the pool advertises.
+ * The Aegis Cloud catalog (`/api/v1/models`) lists every backend the pool can
+ * reach: per-provider ids (`openai`, `anthropic`, `groq`, `gemini`, ...) and
+ * six pooled-brain tier ids (`{aegis,nexus}-brain[-smart|-neo]`) that all run
+ * the same worker pool on the same backend model. None of that is a human's
+ * model choice — which providers currently hold a valid key is an ops detail
+ * (today: deepseek/anthropic/groq; openai and gemini drift in and out), and
+ * surfacing it invites picking a provider that happens to be dead right now.
+ * The pool already auto-routes across whichever providers are live, so the
+ * desktop dropdown offers exactly one entry for the "aegis" class: the
+ * collapsed "Nexus" brain — never the raw provider list.
  */
-const AEGIS_PLATFORM_MODELS = Object.freeze(['openai', 'anthropic', 'groq', 'gemini']);
 const NEXUS_BRAIN_ID = 'aegis-brain';
-const NEXUS_LABEL = 'Nexus (Aegis brain)';
+const NEXUS_LABEL = 'Nexus';
 
 function filterAegisCatalog(models) {
-  const platform = models.filter((m) => AEGIS_PLATFORM_MODELS.includes(m.id));
   const nexus = models.find((m) => m.id === NEXUS_BRAIN_ID);
-  return nexus ? [...platform, { ...nexus, label: NEXUS_LABEL }] : platform;
+  return nexus ? [{ ...nexus, label: NEXUS_LABEL }] : [];
 }
 
 // ── Agent-loop helpers ──────────────────────────────────────────────────────
