@@ -1,0 +1,43 @@
+{
+  "name": "aegis-terminal",
+  "productName": "AEGIS Terminal",
+  "version": "0.1.0",
+  "description": "AEGIS terminal host — the shared tool surface in your shell, over the same thin transport and tool registry as the MCP plugin and the desktop app. Ships transport + UI only; no brain.",
+  "author": {
+    "name": "AEGIS Code",
+    "email": "nborneklint@gmail.com"
+  },
+  "license": "MIT",
+  "homepage": "https://aegiscloud.org",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aegisinfo/aegiscode-plugin.git",
+    "directory": "cli"
+  },
+  "bin": {
+    "aegis-term": "bin/aegis-term.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "vendor",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node bin/aegis-term.js",
+    "predist": "node scripts/predist.mjs",
+    "prepublishOnly": "npm run predist",
+    "check": "node --check bin/aegis-term.js && node --check src/theme.js && node --check src/art.js && node --check src/screen.js && node --check src/format.js && node --check src/render.js && node --check src/commands.js && node --check src/deps.js && node --check src/app.js && node --check scripts/predist.mjs",
+    "test": "for f in ../../test/cli-*.test.mjs; do node \"$f\" || exit 1; done"
+  },
+  "keywords": [
+    "aegis",
+    "aegiscloud",
+    "cli",
+    "terminal",
+    "llm"
+  ]
+}

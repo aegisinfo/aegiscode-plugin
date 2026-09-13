@@ -6,6 +6,7 @@ node_modules/
 desktop/node_modules/
 desktop/release/
 desktop/vendor/
+cli/vendor/
 
 # Local xvfb .debs are fetched on demand, never committed (P3.6).
 desktop/*.deb

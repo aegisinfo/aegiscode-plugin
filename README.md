@@ -111,6 +111,29 @@ never returned in full (only a masked preview).
 
 ---
 
+## AEGIS Terminal (CLI)
+
+The same tools in a shell — third host over the shared transport and tool
+registry, no editor and no Electron required:
+
+```bash
+export AEGIS_API_KEY="aegis_your_key_here"
+aegis-term                 # interactive session
+aegis-term "explain this stack trace"   # one-shot
+echo "q" | aegis-term -p - # prompt on stdin
+```
+
+Plain text is a prompt; `/help` lists commands (`/balance` shows tokens beside
+€ on every ledger row, `/model` pins an id, `/byok-set` stores your own provider
+key without echoing it). `--json` gives machine-readable output with the usage
+object, the token total and the balance. See
+[cli/README.md](cli/README.md) and [docs/cli-host-plan.md](docs/cli-host-plan.md).
+
+It is deliberately **not** a Claude Code look-alike — its own palette, sigil,
+prompt glyph and layout, pinned by `test/cli-identity.test.mjs`.
+
+---
+
 ## AEGIS Desktop (Electron)
 
 A standalone chat app over the same transport, with an **agentic tool loop**:
@@ -244,14 +267,16 @@ in the private `ae-guix` product).
 ### Repository layout
 
 ```
-client/aegis.js      shared thin transport (MCP + Electron + browser)
+client/aegis.js      shared thin transport (MCP + Electron + browser + CLI)
 mcp/server.js        zero-dependency MCP server (Claude Code tools)
+mcp/tools.js         the shared tool registry (MCP host + CLI host)
 commands/            Claude Code slash commands
 skills/              Claude Code skills
 install.sh           one-line Claude Code installer
 .claude-plugin/      plugin + marketplace metadata
 desktop/             AEGIS Desktop (Electron host + lib + renderer)
-docs/                product plan and Electron host plan
+cli/                 AEGIS Terminal (third host: same transport + registry)
+docs/                product plan and host plans (Electron, online, CLI)
 test/                plain-Node unit + smoke tests (no Electron required)
 ```
 

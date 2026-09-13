@@ -1,0 +1,65 @@
+'use strict';
+
+/**
+ * Where the CLI finds the modules it shares with the rest of the repo.
+ *
+ * Two layouts must work:
+ *
+ *   in-repo   <repo>/cli/src/deps.js   -> <repo>/client/aegis.js, <repo>/mcp/tools.js
+ *   npm       <pkg>/src/deps.js        -> <pkg>/vendor/{client,mcp,desktop}/...
+ *
+ * The published package is staged by `scripts/predist.mjs` into `cli/vendor/`
+ * keeping the repo's own relative shape, so nothing here (or in the copied
+ * files) needs a path rewrite — `vendor/mcp/tools.js` requiring
+ * `../client/foreign-memory.js` resolves inside the vendor tree by construction.
+ *
+ * Resolution is by existence, and a missing module is a loud error rather than
+ * a silent fallback to a second copy: duplicate transports are how the two
+ * hosts would drift.
+ */
+
+const fs = require('node:fs');
+const path = require('node:path');
+
+function roots() {
+  const srcDir = __dirname; // <root>/cli/src
+  const cliDir = path.join(srcDir, '..');
+  return [
+    path.join(srcDir, '..', '..'), // repo root (in-repo layout)
+    path.join(cliDir, 'vendor'), // staged tree (published layout)
+  ];
+}
+
+/** Resolve a repo-relative module path against whichever root has it. */
+function resolveShared(relPath) {
+  for (const root of roots()) {
+    const candidate = path.join(root, relPath);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  throw new Error(
+    `aegis-term: cannot find ${relPath}. Expected it beside cli/ (in the repo) or ` +
+      'under cli/vendor/ (installed package). Reinstall the package, or run ' +
+      '`node scripts/predist.mjs` from cli/ if this is a source checkout.'
+  );
+}
+
+const clientPath = resolveShared(path.join('client', 'aegis.js'));
+const toolsPath = resolveShared(path.join('mcp', 'tools.js'));
+// The desktop's pure usage module is the single source of truth for turning a
+// provider's usage object into a display number. The CLI reuses the same file
+// instead of re-implementing the mapping, so the terminal and the GUI can never
+// disagree about what a call consumed (test/cli-tools.test.mjs asserts the
+// function identity).
+const usagePath = resolveShared(path.join('desktop', 'renderer', 'usage.js'));
+
+const { createClient } = require(clientPath);
+const { createTools } = require(toolsPath);
+const { usageTokens } = require(usagePath);
+
+module.exports = {
+  createClient,
+  createTools,
+  usageTokens,
+  paths: { client: clientPath, tools: toolsPath, usage: usagePath },
+  roots,
+};
