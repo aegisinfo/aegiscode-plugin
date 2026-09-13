@@ -132,6 +132,17 @@ guide and screenshot.
 | `exec` | Run commands in a persistent shell session |
 | `task` | Delegate a self-contained sub-task to a subagent |
 
+`exec`/`writeFile`/`editFile` are gated behind a diff/approval card by
+default — approve once, approve for the rest of the conversation, or deny.
+Toggle it off in **Settings → "Confirm before running tools"** if you'd
+rather the agent run mutating calls without asking.
+
+A global quick launcher (`Cmd/Ctrl+Shift+Space`, configurable) opens a small
+always-on-top prompt window for a fast one-shot answer from anywhere on the
+desktop, and an `aegis://` protocol handler supports deep links
+(`aegis://open?session=<id>`, `aegis://new?prompt=<text>`). Full keyboard
+shortcuts and deep-link reference: [`desktop/README.md`](desktop/README.md).
+
 ### Model classes
 
 Pick any of four transports from the model-class picker:

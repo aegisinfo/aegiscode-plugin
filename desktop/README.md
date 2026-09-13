@@ -1,8 +1,49 @@
 # AEGIS Desktop
 
-Electron host — see the repo root [README.md](../README.md) for the full
-build/architecture reference. This file covers day-to-day usage details that
-don't belong in the top-level doc.
+A standalone Electron chat app over the [AEGIS](https://aegiscloud.org) API,
+with an **agentic tool loop**: the model can read, write, and edit files,
+list directories, glob, grep, run shell commands in a persistent session, and
+delegate whole sub-tasks to subagents. It does **not** require Claude Code.
+
+```bash
+npm install -g aegis-desktop
+aegis
+```
+
+## Model classes
+
+Pick any of four transports from the model-class picker, switchable
+mid-conversation with context intact:
+
+| Class | Transport | Key held in |
+|---|---|---|
+| **Aegis Cloud** | `aegiscloud.org` (pooled or pinned model) | main process |
+| **Ollama** | local `ollama` daemon | no key needed |
+| **Custom OpenAI-compatible** (LM Studio, OpenRouter, vLLM, …) | direct from the desktop app | main process — never sent to the renderer |
+| **Anthropic-compatible** (Claude, or any Messages-format gateway) | direct from the desktop app | main process |
+
+Get a free AEGIS key at **https://aegiscloud.org**, or use your own
+Ollama/OpenAI-compatible/Anthropic-compatible endpoint — no AEGIS account
+needed for those.
+
+## Tools available to the model
+
+| Tool | What it does |
+|---|---|
+| `readFile` · `writeFile` · `editFile` | File access scoped to the working directory |
+| `listDir` · `glob` · `grep` | Navigate and search a tree |
+| `exec` | Run commands in a persistent shell session |
+| `task` | Delegate a self-contained sub-task to a subagent |
+
+Before `exec`, `writeFile`, or `editFile` runs, a diff/approval card asks you
+to confirm — approve once, approve for the rest of the conversation, or deny.
+Flip **Settings → "Confirm before running tools"** off if you'd rather the
+agent run mutating tool calls without asking; it's on by default.
+
+Conversations persist locally and sync to AEGIS cloud memory via a pending
+queue that flushes on each "Sync now" or heartbeat retry. The **remember**
+button on any assistant reply pins that message to cross-machine memory —
+queued locally if you're offline.
 
 ## Keyboard shortcuts
 
@@ -45,6 +86,15 @@ accelerator is already claimed by another application, registration fails
 gracefully: a warning is logged to the main process console and the
 Quick Launcher card shows the reason instead of the app crashing or hanging.
 
+## Deep links
+
+The app registers an `aegis://` protocol handler:
+
+| Link | What it does |
+|---|---|
+| `aegis://open?session=<id>` | Resumes a saved session |
+| `aegis://new?prompt=<text>` | Starts a fresh chat with that prompt pre-filled |
+
 ## Run from source
 
 ```bash
@@ -53,9 +103,35 @@ npm install
 npm start
 ```
 
+## Build a distributable
+
+```bash
+npm run dist        # packaged app (AppImage / MSI+NSIS / dmg)
+npm run dist:dir    # unpacked dir, for quick testing
+```
+
 ## Checks
 
 ```bash
-npm run check          # node --check every main-process + renderer file
+npm run check                    # node --check every main-process + renderer file
 node ../test/desktop-shell.mjs   # headless IPC smoke test (no Electron binary needed)
 ```
+
+## Structure
+
+```
+main.js              Electron main process — window + IPC shell only
+preload.js           Context-isolated IPC bridge exposed to the renderer
+renderer/            UI (vanilla JS, no framework)
+lib/local/           Model classes, providers, agentic tool loop, prompt
+lib/sync/            Local session/memory persistence + sync queue
+vendor/aegis.js      The AEGIS transport client (thin — no engine logic)
+bin/aegis.js         `aegis` CLI entry point for the global npm install
+```
+
+This directory is part of the [aegiscode-plugin](../README.md) monorepo,
+which also ships a Claude Code plugin and the shared `client/aegis.js`
+transport over the same AEGIS backend — see the repo root for that fuller
+architecture picture. A read-only mirror of just this directory (for
+browsing or `git clone`) lives at
+[aegiscloud/aegiscode-desktop](https://github.com/aegiscloud/aegiscode-desktop).
