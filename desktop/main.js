@@ -1432,11 +1432,6 @@ function bootstrap() {
     pushToMain: pushQuickLauncherResult,
   });
   registerQuickLauncherIpc(ipcMain, quickLauncherDispatch);
-  // Apply whatever was last saved (or the default) right away: ship the
-  // shortcut only when app.isPackaged || the settings flag is on — see
-  // shouldEnableGlobalShortcut — so a plain `electron .` dev run never grabs
-  // a systemwide hotkey unless the developer opted in from Settings.
-  quickLauncherDispatch.setConfig(settings.quickLauncherConfig());
 
   // A held global shortcut outlives this app if not released — every quit
   // path (explicit quit, window-all-closed on non-mac, OS shutdown) must
@@ -1572,6 +1567,12 @@ function bootstrap() {
     // key was saved in-app (safeStorage is usable only after app ready).
     const persistedKey = settings.aegisRawKey();
     if (persistedKey) aegis.setApiKey(persistedKey);
+    // Apply whatever was last saved (or the default): ship the shortcut only
+    // when app.isPackaged || the settings flag is on — see
+    // shouldEnableGlobalShortcut — so a plain `electron .` dev run never
+    // grabs a systemwide hotkey unless the developer opted in from Settings.
+    // Must run after 'ready' — globalShortcut throws before then.
+    quickLauncherDispatch.setConfig(settings.quickLauncherConfig());
     const win = createWindow();
     updateManager.start();
     // Cold-launch deep link (Linux/Windows argv, or a pre-ready macOS
