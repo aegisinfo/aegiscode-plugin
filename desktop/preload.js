@@ -127,6 +127,14 @@ const api = {
   // isSafeExternalUrl for the http/https-only allowlist.
   openExternal: (url) => invoke('openExternal', { url }),
 
+  // Tool-call approval toggle (Settings → "Confirm before running tools"):
+  // main.js createConfirmModeDispatch persists it in the settings store's
+  // reserved `__confirmMode` namespace, and the engine's gate
+  // (lib/local/engine.js gatedExecuteTool) reads it on every mutating tool
+  // call. Both resolve `{ enabled }`.
+  getConfirmMode: () => invoke('getConfirmMode'),
+  setConfirmMode: (enabled) => invoke('setConfirmMode', { enabled: Boolean(enabled) }),
+
   // Auto-update (electron-updater over GitHub Releases — see main.js
   // createUpdateManager). check/download resolve the same status shape the
   // push channel delivers; both are no-ops that resolve `{ status:

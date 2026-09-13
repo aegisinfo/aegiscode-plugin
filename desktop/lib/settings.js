@@ -45,11 +45,21 @@ const QUICK_LAUNCHER_NAMESPACE = '__quickLauncher';
  *  fighting existing app/OS bindings, memorable enough to type once. */
 const DEFAULT_QUICK_LAUNCHER_SHORTCUT = 'CmdOrCtrl+Shift+Space';
 
+/** Reserved namespace for the tool-call approval ("confirm mode") preference:
+ *  `{ enabled }` — app-level, not a provider, so it stays out of the provider
+ *  CRUD surface for the same reason the AEGIS key does. Default is ON
+ *  (settings.getConfirmMode() === true when unset), which is the historical
+ *  behaviour: exec/writeFile/editFile always asked for approval.
+ *  NOTE: like the AEGIS key and the quick launcher, this lives in its own
+ *  top-level namespace — never inside a provider's `cfg[provider]` object. */
+const CONFIRM_MODE_NAMESPACE = '__confirmMode';
+
 /** Namespaces the provider-config surface must never see or mutate. */
 const RESERVED_NAMESPACES = Object.freeze([
   AEGIS_KEY_NAMESPACE,
   LEGACY_AEGIS_NAMESPACE,
   QUICK_LAUNCHER_NAMESPACE,
+  CONFIRM_MODE_NAMESPACE,
 ]);
 
 /** True for the AEGIS-key namespace(s) — provider CRUD must refuse these. */
@@ -236,6 +246,28 @@ function createSettingsStore({ dir, safeStorage } = {}) {
     return quickLauncherConfig();
   }
 
+  // --- Confirm mode: reserved namespace, plain (unencrypted) preference ----
+  // "Confirm before running tools" — the ON/OFF switch for the renderer's
+  // tool-call approval gate (desktop/lib/local/engine.js gatedExecuteTool).
+  // ON (default, and the behaviour shipped so far) means every mutating tool
+  // call — exec / writeFile / editFile — is previewed and approved by the user
+  // first. OFF means the engine runs them straight through, like a tool the
+  // session already allowed. Nothing secret is stored here, so no encryption.
+
+  function getConfirmMode() {
+    const cfg = load()[CONFIRM_MODE_NAMESPACE] || {};
+    // Unset === true: an existing install that never touched the toggle keeps
+    // the gate exactly as it was.
+    return cfg.enabled === undefined ? true : Boolean(cfg.enabled);
+  }
+
+  function setConfirmMode(enabled) {
+    const data = load();
+    data[CONFIRM_MODE_NAMESPACE] = { enabled: Boolean(enabled) };
+    save(data);
+    return getConfirmMode();
+  }
+
   return {
     file,
     get,
@@ -250,6 +282,8 @@ function createSettingsStore({ dir, safeStorage } = {}) {
     migrateLegacyAegisKey,
     quickLauncherConfig,
     setQuickLauncherConfig,
+    getConfirmMode,
+    setConfirmMode,
   };
 }
 
@@ -258,6 +292,7 @@ module.exports = {
   AEGIS_KEY_NAMESPACE,
   LEGACY_AEGIS_NAMESPACE,
   QUICK_LAUNCHER_NAMESPACE,
+  CONFIRM_MODE_NAMESPACE,
   DEFAULT_QUICK_LAUNCHER_SHORTCUT,
   RESERVED_NAMESPACES,
   isReservedNamespace,

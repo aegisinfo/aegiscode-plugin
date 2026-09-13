@@ -81,6 +81,8 @@ const ELEMENT_IDS = {
   quickLauncherShortcut: 'quick-launcher-shortcut',
   quickLauncherSave: 'quick-launcher-save',
   quickLauncherHint: 'quick-launcher-hint',
+  confirmMode: 'confirm-mode-toggle',
+  confirmModeHint: 'confirm-mode-hint',
   sessionsRefresh: 'sessions-refresh',
   sessionsExport: 'sessions-export',
   sessionsList: 'sessions-list',
@@ -453,6 +455,58 @@ async function saveQuickLauncherSettings() {
       `save failed: ${err && err.message ? err.message : err}`;
   } finally {
     els.quickLauncherSave.disabled = false;
+  }
+}
+
+// ------------------------------------------------------ tool approvals
+//
+// "Confirm before running tools" — the user-facing ON/OFF switch for the
+// engine's tool-call approval gate (desktop/lib/local/engine.js
+// gatedExecuteTool; persisted by same-named IPC methods on
+// createConfirmModeDispatch). ON (the default, and the behaviour every
+// existing install has) previews exec/writeFile/editFile and asks before they
+// run; OFF runs them straight through, exactly like a tool already allowed for
+// the session — no approval card at all. The engine reads the flag per tool
+// call, so a flip here applies to the next call in flight, no restart.
+
+/** Paint a `{ enabled }` payload (from aegis.getConfirmMode/setConfirmMode)
+ *  into the card, and say plainly what the current state means. */
+function renderConfirmMode(status) {
+  if (!els.confirmMode || !status) return;
+  const enabled = status.enabled !== false;
+  els.confirmMode.checked = enabled;
+  els.confirmModeHint.textContent = enabled
+    ? 'On — exec, writeFile and editFile ask for your approval before they run.'
+    : 'Off — the agent runs exec, writeFile and editFile without asking.';
+}
+
+/** Read the persisted value. Called on boot (the Settings pane is a single
+ *  always-visible column, so that is "when Settings opens") and again on every
+ *  change via saveConfirmMode below. */
+async function loadConfirmMode() {
+  if (!els.confirmMode || !aegis.getConfirmMode) return;
+  try {
+    renderConfirmMode(await aegis.getConfirmMode());
+  } catch (err) {
+    els.confirmModeHint.textContent =
+      `status failed: ${err && err.message ? err.message : err}`;
+  }
+}
+
+/** Persist a flip of the switch. The card is only repainted from what the
+ *  main process actually stored, so a failed write leaves the switch showing
+ *  the truth rather than the click. */
+async function saveConfirmMode(enabled) {
+  if (!els.confirmMode) return;
+  els.confirmMode.disabled = true;
+  try {
+    renderConfirmMode(await aegis.setConfirmMode(enabled));
+  } catch (err) {
+    els.confirmMode.checked = !enabled;
+    els.confirmModeHint.textContent =
+      `save failed: ${err && err.message ? err.message : err}`;
+  } finally {
+    els.confirmMode.disabled = false;
   }
 }
 
@@ -2350,6 +2404,12 @@ async function init() {
     }
   });
 
+  // Tool-approval switch: persist on change (no Save button), repainting from
+  // what the main process stored — see saveConfirmMode.
+  if (els.confirmMode) {
+    els.confirmMode.addEventListener('change', () => saveConfirmMode(els.confirmMode.checked));
+  }
+
   els.composer.addEventListener('submit', (e) => {
     e.preventDefault();
     send();
@@ -2427,6 +2487,7 @@ async function init() {
   await loadClasses();
   await loadSettings();
   await loadQuickLauncherSettings();
+  await loadConfirmMode();
   await loadSessions();
   await refreshSyncStatus();
   loadAccountInfo();

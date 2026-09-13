@@ -491,6 +491,46 @@ function registerIpc(ipcMain, aegis, dir, persistApiKey, openExternal, onReplyFi
   return dispatch;
 }
 
+/**
+ * Tool-call approval toggle ("confirm mode"): `aegis:getConfirmMode` /
+ * `aegis:setConfirmMode` (see registerConfirmModeIpc below). Pure injection of
+ * the settings store, same shape as createQuickLauncherDispatch — so it is
+ * unit-testable in plain Node with a stub store, and bootstrap() wires the
+ * real one (desktop/lib/settings.js, reserved `__confirmMode` namespace).
+ *
+ * `{ enabled: true }` (the default) is the historical behaviour: the engine's
+ * gate (desktop/lib/local/engine.js gatedExecuteTool) previews and asks before
+ * every exec/writeFile/editFile. `false` lets the renderer's Settings switch
+ * turn that off for good — the engine reads the flag per tool call, so the
+ * change applies to the very next call, no restart.
+ */
+function createConfirmModeDispatch(settings) {
+  if (!settings) throw new Error('createConfirmModeDispatch requires a settings store');
+  return {
+    getConfirmMode: () => ({ enabled: settings.getConfirmMode() }),
+    setConfirmMode: (payload) => {
+      // Absent/undefined means "off"? No — an explicit boolean is required to
+      // change anything: a malformed payload must not silently disable the
+      // approval gate, so it only ever sets what was clearly asked for.
+      const enabled = payload && payload.enabled;
+      if (typeof enabled !== 'boolean') return { enabled: settings.getConfirmMode() };
+      return { enabled: settings.setConfirmMode(enabled) };
+    },
+  };
+}
+
+/** Register getConfirmMode/setConfirmMode as `aegis:<name>` on ipcMain —
+ *  the same ${IPC_PREFIX}<method> convention registerIpc uses for the rest of
+ *  the renderer's aegis.* bridge (their handlers need nothing but the
+ *  payload, so the event is dropped exactly like every non-chatCompletion
+ *  method there). */
+function registerConfirmModeIpc(ipcMain, dispatch) {
+  for (const [name, handler] of Object.entries(dispatch)) {
+    ipcMain.handle(`${IPC_PREFIX}${name}`, (_event, payload) => handler(payload));
+  }
+  return dispatch;
+}
+
 /** Turn a session title/id into a filesystem-safe base filename. */
 function safeExportBasename(session) {
   const base = (session && (session.title || session.id)) || 'session';
@@ -1243,6 +1283,13 @@ function bootstrap() {
   );
   registerModelIpc(ipcMain, engine, sessionsDir, aegis, notifyReplyIfUnfocused);
 
+  // Tool-call approval toggle (Settings → "Confirm before running tools"):
+  // aegis:getConfirmMode / aegis:setConfirmMode. Registered here because this
+  // is where the settings store lands — the exact tool gate it controls lives
+  // in the engine created alongside it (lib/local/engine.js gatedExecuteTool
+  // reads settings.getConfirmMode() on every mutating tool call).
+  registerConfirmModeIpc(ipcMain, createConfirmModeDispatch(settings));
+
   // ---------------------------------------------------------------------
   // Global quick-launcher (D? quick launcher): a frameless, always-on-top,
   // taskbar-hidden popup toggled by a systemwide shortcut, for a one-shot
@@ -1602,4 +1649,6 @@ module.exports = {
   QUICK_LAUNCHER_PUSH_CHANNEL,
   createQuickLauncherDispatch,
   registerQuickLauncherIpc,
+  createConfirmModeDispatch,
+  registerConfirmModeIpc,
 };

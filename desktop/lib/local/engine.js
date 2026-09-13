@@ -260,10 +260,27 @@ function emptyTurnError({ cls, model, maxTokens, finishReason }) {
   return err;
 }
 
-function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBuilder, env }) {
+function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBuilder, env, getConfirmMode }) {
   const controllers = new Map(); // sessionId -> AbortController
   const T = tools || toolsModule;
   const buildSystemPrompt = (promptBuilder && promptBuilder.buildSystemPrompt) || promptModule.buildSystemPrompt;
+
+  /** "Confirm before running tools" (Settings toggle, persisted by
+   *  lib/settings.js. Because gatedExecuteTool is called for EVERY tool round
+   *  it is read per call, not captured once at construction: flipping the
+   *  switch takes effect on the next tool call, with no restart.
+   *  An explicit `getConfirmMode` factory arg wins (used by tests); then the
+   *  settings store's own accessor; then the safe default — ON, i.e. the gate
+   *  stays up, so a store that predates the toggle can never silently
+   *  disable it. */
+  const confirmModeEnabled = () => {
+    if (typeof getConfirmMode === 'function') return getConfirmMode() !== false;
+    if (settings && typeof settings.getConfirmMode === 'function') {
+      const value = settings.getConfirmMode();
+      return value === undefined ? true : Boolean(value);
+    }
+    return true;
+  };
 
   // ── Tool-call approval gate (renderer confirms exec/writeFile/editFile
   // before they run) ─────────────────────────────────────────────────────
@@ -359,10 +376,16 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
    * needed for a call that couldn't succeed anyway), asks the renderer, and
    * on approval either applies with a fresh hash check (writeFile/editFile)
    * or runs normally (exec — nothing to hash-check).
+   *
+   * Confirm mode off (Settings → "Confirm before running tools") short-circuits
+   * ALL of that: no preview, no approval card, no requestApproval() — the call
+   * runs straight through exactly like a session-allowed one, so "don't ask"
+   * is one switch rather than a per-tool blanket allow in every conversation.
    */
   async function gatedExecuteTool(call, { toolCtx, rootSessionId, rootOnDelta, signal }) {
     const { name, args } = call;
     if (!T.MUTATING_TOOLS.has(name)) return T.executeTool(name, args, toolCtx);
+    if (!confirmModeEnabled()) return T.executeTool(name, args, toolCtx);
     if (sessionAllows(rootSessionId, name)) return T.executeTool(name, args, toolCtx);
 
     let preview = null;

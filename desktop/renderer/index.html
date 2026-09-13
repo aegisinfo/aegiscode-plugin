@@ -147,6 +147,19 @@
       </section>
 
       <section class="card">
+        <h2>Tool approvals</h2>
+        <label
+          class="flow-toggle"
+          for="confirm-mode-toggle"
+          title="When on, every exec / writeFile / editFile tool call is previewed and needs your approval (once, for the session, or denied) before it runs. Turn it off to let the agent run those tools without asking."
+        >
+          <input type="checkbox" id="confirm-mode-toggle" />
+          <span>confirm before running tools</span>
+        </label>
+        <p class="hint" id="confirm-mode-hint"></p>
+      </section>
+
+      <section class="card">
         <h2>Sessions</h2>
         <button type="button" id="sessions-refresh" class="ghost-btn">Refresh</button>
         <button type="button" id="sync-now" class="ghost-btn">Sync now</button>
