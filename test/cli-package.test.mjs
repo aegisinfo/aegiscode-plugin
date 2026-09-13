@@ -130,10 +130,18 @@ try {
   assert(run.out.includes('packaged ok'), `the packaged CLI prints the answer: ${JSON.stringify(run.out)}`);
   assert(run.out.includes('25 tok'), `the packaged CLI reports tokens: ${JSON.stringify(run.out)}`);
 
-  // 7. The published file list must include everything the binary loads.
+  // 7. The published file list must include everything the binary loads, and
+  //    the README must not reference a file the package does not ship.
   const manifest = JSON.parse(fs.readFileSync(join(cliDir, 'package.json'), 'utf8'));
   for (const need of ['bin', 'src', 'vendor']) {
     assert(manifest.files.includes(need), `package.json "files" must ship ${need}/`);
+  }
+  const readme = fs.readFileSync(join(cliDir, 'README.md'), 'utf8');
+  if (readme.includes('cli/scripts/demo.mjs')) {
+    assert(manifest.files.includes('scripts'), 'the README points at scripts/demo.mjs, so scripts/ must ship');
+  }
+  for (const referenced of ['bin/aegis-term.js', 'scripts/demo.mjs', 'scripts/predist.mjs']) {
+    assert(fs.existsSync(join(cliDir, referenced)), `README/packaging references a missing file: ${referenced}`);
   }
   assert(manifest.bin && manifest.bin['aegis-term'] === 'bin/aegis-term.js', 'the bin entry must point at the CLI');
   assert(manifest.scripts && manifest.scripts.prepublishOnly, 'publishing must run predist (prepublishOnly)');

@@ -112,7 +112,8 @@ not exist, and no tool is unreachable from the prompt.
 Render it yourself, with no key and no network:
 
 ```bash
-node cli/scripts/demo.mjs            # --light, --width 100, --plain also work
+node cli/scripts/demo.mjs            # from a source checkout
+                                     # --light, --width 100, --plain also work
 ```
 
 ## Design notes

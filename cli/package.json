@@ -1,7 +1,7 @@
 {
   "name": "aegis-terminal",
   "productName": "AEGIS Terminal",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "AEGIS terminal host — the shared tool surface in your shell, over the same thin transport and tool registry as the MCP plugin and the desktop app. Ships transport + UI only; no brain.",
   "author": {
     "name": "AEGIS Code",
@@ -20,6 +20,7 @@
   "files": [
     "bin",
     "src",
+    "scripts",
     "vendor",
     "README.md"
   ],
