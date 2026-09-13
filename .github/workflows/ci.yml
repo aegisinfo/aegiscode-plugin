@@ -90,10 +90,21 @@ jobs:
           # endpoints is explicitly PERMITTED — pure wire-format clients +
           # storage only, keys held in main. Keep this as a literal path
           # allowlist so it does not fight the feature.
+          #
+          # The three single-file entries are native-shell plumbing, not engine
+          # logic: deep-link (aegis:// URL) handling, window geometry, and the
+          # global quick-launcher window. They were added after the last green
+          # run and the guard — which lists files under desktop/lib/ one by one —
+          # had no entry for them, so it would flag them as violations on the
+          # next working run. Listed literally (not as `desktop/lib/`) so the
+          # rule keeps meaning something.
           allowed=(
             'desktop/lib/local/'
             'desktop/lib/sync/'
             'desktop/lib/settings.js'
+            'desktop/lib/deep-link.js'
+            'desktop/lib/window-state.js'
+            'desktop/lib/quick-launcher.js'
           )
           # Any file under desktop/lib/ that is NOT one of the permitted
           # transport/storage paths is a thin-shell violation.
