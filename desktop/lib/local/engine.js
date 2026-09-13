@@ -87,6 +87,19 @@ const DEEPSEEK_REASONING_MODEL_RE = /^deepseek-(v4(\.\d+)?-(flash|pro)|flash|pro
 const EFFORT_TOKEN_BUDGET = { low: 8192, medium: 16384, high: 32768 };
 
 /**
+ * Idle-stream budget for a pooled brain call ("work autonomously"). The
+ * generic watchdog in vendor/aegis.js kills a stream that goes 60s without a
+ * byte — right default for one provider call answering, wrong for a worker
+ * fan-out: pool_brain yields a header chunk, then stays silent until the
+ * FIRST worker pass *returns*, and each worker is a full reasoning-model call
+ * at roughly 1/(workers+1) of the effort budget. At high effort, 3 workers,
+ * that is a multi-thousand-token reasoning pass per worker — easily past a
+ * minute. Timing out there aborts a perfectly healthy autonomous turn
+ * mid-flight, after the server has already run and billed every worker.
+ */
+const AUTONOMOUS_IDLE_TIMEOUT_MS = 5 * 60_000;
+
+/**
  * Only ever raises a too-low budget for a DeepSeek reasoning model — never
  * lowers whatever the caller (renderer dropdown, or "adaptive" ceiling)
  * already asked for. Everything else (non-DeepSeek models, non-reasoning
@@ -462,6 +475,12 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
         maxTokens: opts.maxTokens,
         stream: true,
         onStream: opts.onDelta,
+        // Extended-reasoning trace (the fan-out's worker findings). Its own
+        // channel so it never counts as answer text — see vendor/aegis.js.
+        onReasoning: opts.onReasoning,
+        // A brain fan-out is silent between passes; give it room (see
+        // AUTONOMOUS_IDLE_TIMEOUT_MS). Undefined elsewhere -> 60s default.
+        idleTimeoutMs: opts.idleTimeoutMs,
         signal: opts.signal,
         // aegis_memory: automatic, no button — the server both reads prior
         // synced memory into context AND writes this turn back to it, the
@@ -542,6 +561,15 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
     // waiting for a response nobody can ever send.
     const rootOnDelta = (payload && payload.rootOnDelta) || onDelta;
 
+    // A pooled brain call streams each worker's finding as extended reasoning
+    // before the synthesis pass writes the visible answer. Forward it on its
+    // own channel so the renderer can show the fan-out working instead of an
+    // apparently idle bubble for the whole worker phase. Uses `onDelta` (not
+    // rootOnDelta) on purpose: a subagent's reasoning should be suppressed
+    // exactly as its text already is.
+    const onReasoning =
+      typeof onDelta === 'function' ? (text) => text && onDelta({ reasoning: text }) : undefined;
+
     const controller = new AbortController();
     controllers.set(sessionId, controller);
     const signal = controller.signal;
@@ -584,6 +612,8 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
         cls, model, mode: payload && payload.mode, maxTokens, autonomous, sessionId, signal, onDelta, cfg, apiKey, toolChoice,
         effort: payload && payload.effort,
         workers: payload && payload.workers,
+        onReasoning,
+        idleTimeoutMs: autonomous ? AUTONOMOUS_IDLE_TIMEOUT_MS : undefined,
       };
 
       // No round cap: a model that keeps calling tools keeps going for as

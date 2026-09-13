@@ -870,6 +870,26 @@ body.memory-open {
   gap: 2px;
 }
 
+/* Extended-reasoning trace for a "work autonomously" turn (streamed as
+   `reasoning` deltas — see renderer/app.js ensureReasoningEl). Deliberation
+   shown above the answer: dimmer and smaller than body copy so it reads as
+   working-out rather than the reply itself. */
+.reasoning {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text2);
+  opacity: 0.85;
+  max-height: 220px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border-left: 2px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+}
+
 .meta {
   font-size: 11px;
   color: var(--text2);
