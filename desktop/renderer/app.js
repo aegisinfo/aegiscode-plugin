@@ -2572,6 +2572,17 @@ async function init() {
     requestFrame: (fn) => requestAnimationFrame(fn),
   });
   transcript.attachScrollVeto();
+  // Read-only diagnostic surface for the headless smoke run
+  // (test/electron-smoke.mjs). Everything in this file lives inside the IIFE,
+  // so an injected script cannot otherwise see the scroll veto — the Phase 9
+  // harness read `transcript.isScrolledUp()` directly and silently got `null`,
+  // which made its veto assertion unfalsifiable. Exposes state only: no
+  // setters, nothing that can drive the UI. Frozen so a stray write in a test
+  // cannot fake a passing run.
+  window.__aegisSmoke = Object.freeze({
+    isScrolledUp: () => transcript.isScrolledUp(),
+    metrics: () => transcript.metrics(),
+  });
   bindEscapeInterrupt({
     doc: document,
     // The memory overlay wins: while it is open, Escape closes it rather than

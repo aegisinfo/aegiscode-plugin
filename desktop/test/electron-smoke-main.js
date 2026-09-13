@@ -43,6 +43,22 @@ if (process.env.AEGIS_SMOKE !== '1' || !loopback) {
   process.exit(2);
 }
 
+// How many characters the stub would send if its stream ran to completion.
+// This is the yardstick for "was the answer cut short". Do NOT substitute what
+// the socket had written at abort time — the renderer has usually already
+// consumed the last frame it wrote, so the two lengths tie and the comparison
+// fails at random. Refuse to guess: a missing value would silently become 0 and
+// make `partial-not-whole` unfalsifiable, which is the exact bug class this
+// phase exists to stamp out.
+const COMPLETE_TEXT_LEN = Number(process.env.AEGIS_SMOKE_COMPLETE_LEN);
+if (!Number.isFinite(COMPLETE_TEXT_LEN) || COMPLETE_TEXT_LEN <= 0) {
+  console.error(
+    'electron-smoke-main: AEGIS_SMOKE_COMPLETE_LEN must be a positive number ' +
+      `(got ${JSON.stringify(process.env.AEGIS_SMOKE_COMPLETE_LEN)}). Use test/electron-smoke.mjs.`
+  );
+  process.exit(2);
+}
+
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('disable-dev-shm-usage');
 
@@ -140,8 +156,8 @@ const PREPARE = `
 const MEASURE = (label) => `
   var m = document.getElementById('messages');
   var text = liveText();
-  var t = (typeof transcript !== 'undefined' && transcript && transcript.isScrolledUp)
-    ? transcript.isScrolledUp() : null;
+  var hook = window.__aegisSmoke;
+  var t = (hook && typeof hook.isScrolledUp === 'function') ? hook.isScrolledUp() : null;
   return {
     label: ${JSON.stringify(label)},
     scrollTop: m.scrollTop,
@@ -156,13 +172,24 @@ const MEASURE = (label) => `
 
 const SCROLL_UP = `
   var m = document.getElementById('messages');
-  var moved = false;
+  // Establish a genuine tail first. Scrolling "up" from an offset that is
+  // already 0 is a no-op, and an earlier revision of this driver asserted
+  // \`m.scrollTop === 0\` right after setting it — a check that could only ever
+  // pass, which is how it reported a hold that never happened.
+  m.scrollTop = m.scrollHeight;
+  var tailTop = m.scrollTop;
+  m.dispatchEvent(new Event('scroll', { bubbles: false }));
   // Exactly what a user reading history produces: a scroll to an earlier
   // offset, announced with a scroll event on the transcript element.
   m.scrollTop = 0;
   m.dispatchEvent(new Event('scroll', { bubbles: false }));
-  moved = m.scrollTop === 0;
-  return { moved: moved, scrollTop: m.scrollTop, scrollHeight: m.scrollHeight, clientHeight: m.clientHeight };
+  return {
+    moved: tailTop > 0 && m.scrollTop === 0,
+    tailTop: tailTop,
+    scrollTop: m.scrollTop,
+    scrollHeight: m.scrollHeight,
+    clientHeight: m.clientHeight
+  };
 `;
 
 const ESCAPE = `
@@ -196,7 +223,7 @@ const CAPTURE = `
     rows: rows,
     stoppedText: stopped,
     stoppedLength: stopped ? stopped.length : -1,
-    liveTurnsLeft: document.querySelectorAll('#messages .msg .cancel-btn').length,
+    pendingLeft: document.querySelectorAll('#messages .msg .cancel-btn').length,
     errorRows: Array.prototype.filter.call(all, function (r) {
       var m = r.querySelector('.meta');
       return m && /request failed|Error:/i.test(m.textContent + ' ' + bodyOf(r));
@@ -360,10 +387,19 @@ async function main() {
     settledB.sendDisabled === false,
     `sendDisabled=${settledB.sendDisabled}`
   );
+  // The honest invariant: what survived is a real answer that is *shorter than
+  // the stream the stub would have sent*. Comparing against `textAtEscape` (the
+  // visible length at the instant Escape was dispatched) encoded a race — the
+  // renderer can legitimately flush a queued frame after the keypress, pushing
+  // the salvaged length past that snapshot. That flake is why this check must
+  // use the complete-stream length instead.
   check(
     'partial-not-whole',
-    escaped.textAtEscape > 0 && settledB.stoppedLength <= escaped.textAtEscape + 8,
-    `at Escape ${escaped.textAtEscape} chars, salvaged ${settledB.stoppedLength}`
+    escaped.textAtEscape > 0 &&
+      settledB.stoppedLength > 0 &&
+      settledB.stoppedLength < COMPLETE_TEXT_LEN,
+    `salvaged ${settledB.stoppedLength} of ${COMPLETE_TEXT_LEN} streamed chars ` +
+      `(view showed ${escaped.textAtEscape} at the keystroke)`
   );
 
   return {

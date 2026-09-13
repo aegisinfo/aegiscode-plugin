@@ -17,8 +17,8 @@ Status:
 - [x] Phase 5 — P2 metadata-driven per-model output ceiling
 - [x] Phase 6 — P3 cloud conversation sync (replace the push stub)
 - [x] Phase 7 — P3 memory-follows-user from any model class
-- [ ] Phase 8 — P3.5 renderer testability: prove the DOM paths, not just pure policy
-- [ ] Phase 9 — P3.6 headless Electron smoke in CI (scroll-hold + interrupt)
+- [x] Phase 8 — P3.5 renderer testability: prove the DOM paths, not just pure policy
+- [x] Phase 9 — P3.6 headless Electron smoke in CI (scroll-hold + interrupt)
 - [ ] Phase 10 — P3.7 stream lifecycle hardening (abort re-entrancy, partial salvage)
 
 ---
@@ -202,53 +202,67 @@ Phase 6). Phase 7 is unblocked today (memory sync already shipped).
 
 ---
 
-## Phase 8 — P3.5 renderer testability: prove the DOM paths, not just pure policy
+## Phase 8 ✅ — P3.5 renderer testability: prove the DOM paths, not just pure policy
 
-Scope. The renderer's decision logic now lives in `desktop/renderer/*.js` sibling
-classic scripts (`max-tokens.js`, `stream-policy.js`) with guarded
-`module.exports`, loaded by an entry point and unit-tested from
-`test/*.test.mjs`. That convention is good and should hold — but it only covers
-**pure** functions. `rafPainter`, `stickToBottom`, and `stopPendingTurn` touch
-the DOM, so the two symptoms this phase exists to prevent —
-*the transcript snapping to the bottom while you read* and *Escape not
-interrupting* — cannot be proven by the suite today. A broken scroll path can
-ship green, which is precisely how `stream-policy.js` once shipped unwired.
+Done. `desktop/renderer/transcript-view.js` extracts `rafPainter`, the
+follow-only-at-tail scroll veto, and `stopPendingTurn` into a pure,
+DOM-injected module (`document`/`requestAnimationFrame` passed in, not
+imported), so `test/renderer-dom.test.mjs` exercises the real coalescing,
+veto, and Escape-interrupt logic against a minimal fake DOM instead of
+re-describing the policy in the abstract. `test/renderer-wiring.test.mjs`
+extended to the now 5 sibling scripts + 10 globals, asserting no orphaned
+script and that `app.js` actually wires the transcript policy in. Verified
+by deleting each of the script tag, the scroll veto, and the Escape handler
+in turn — each one fails a test.
 
-- Add a jsdom harness (or extract the remaining DOM-touching policy into pure
-  functions) so `rafPainter` coalescing, the follow-only-at-tail rule, and the
-  Escape → `stopPendingTurn` path are asserted behaviorally.
-- Keep `test/renderer-wiring.test.mjs`: it guards the
-  `ReferenceError` class that `node --check` provably cannot see (a module
-  loaded by no entry point, or a global used before its script tag). Add any
-  new renderer script to it.
-- The suite must fail when a script tag is missing, when the scroll veto is
-  removed, and when Escape is unbound.
+Commit: `2c30678`.
 
 Exit criteria:
 - Removing the script tag, the `userScrolledUp` veto, or the Escape handler
-  each fails a test — verified by actually removing each in a worktree.
+  each fails a test — verified by actually removing each in a worktree. ✅
 - `npm run check` + the `test/**/*.test.mjs` glob run in CI (already wired);
-  no test file may depend on being run by hand.
+  no test file may depend on being run by hand. ✅
 
-## Phase 9 — P3.6 headless Electron smoke in CI (scroll-hold + interrupt)
+## Phase 9 ✅ — P3.6 headless Electron smoke in CI (scroll-hold + interrupt)
 
-Scope. Every claim about the scroll/interrupt fix in this repo is so far
-unproven at runtime: the pure policy is unit-tested, the DOM behaviour is not,
-and no one has run a live turn. This phase makes the acceptance criterion
-executable instead of manual.
+Done. `test/electron-smoke.mjs` launches the real Electron binary (headless,
+`xvfb-run` when no `DISPLAY` is present, otherwise the existing display) against
+a stubbed local HTTP server speaking the cloud pool's SSE wire format — no
+network, no key, no provider spend. `desktop/test/electron-smoke-main.js` drives
+a live turn inside the window, scrolls up mid-stream, and asserts the
+transcript holds position, then fires Escape and asserts the partial answer is
+salvaged and labelled "stopped by you" rather than lost or reported as an
+error. Fixed while closing this phase out (live-run, not just read):
+- `window.__aegisSmoke` (frozen, read-only) exposes `transcript.isScrolledUp()`/
+  `metrics()` to the injected driver script, which previously read `transcript`
+  as a bare global and silently got `null` — an unfalsifiable scroll assertion.
+- `SCROLL_UP` now establishes a genuine tail (`scrollTop = scrollHeight`) before
+  scrolling to 0, instead of asserting `scrollTop === 0` right after setting it
+  — a check that could only ever pass.
+- The "salvaged is partial" assertion compares against the full stream length
+  the stub would have sent (`AEGIS_SMOKE_COMPLETE_LEN`), not the visible text
+  length at the instant Escape fired — the old comparison raced the renderer's
+  in-flight frame and flaked (23/0, 22/1, 20/3 across identical runs).
+- `CHUNK_COUNT` raised 400 → 4000 (10s → 100s of stub drip): a live run against
+  the real display caught the stub completing for real before Escape fired,
+  under ordinary desktop load — a false "nothing was interrupted" caused by the
+  test's own timing budget, not the app. Escape still fires within ~1s in
+  practice, so this doesn't slow a healthy run.
+- Wired as a second CI job (`electron-smoke` in `.github/workflows/ci.yml`):
+  installs `xvfb` + desktop deps, runs with no cloud credentials or outbound
+  network.
 
-- Launch the real Electron host headlessly (xvfb) against a **stubbed**
-  streaming transport, so it needs no network, no key, and no provider spend.
-- Drive a streamed turn, assert the transcript holds position when the user
-  scrolls up mid-stream, assert Escape stops the stream, and assert the partial
-  answer is salvaged and labelled rather than destroyed.
-- Wire it as a CI job so the manual `npm start` ritual stops being the only
-  gate on the desktop shell.
+Verified locally: 5 consecutive green runs against a real X display
+(`OK — 45 passed, 0 failed`, ~5s each) after the CHUNK_COUNT fix; one of the
+pre-fix runs reproduced the exact race described above.
+
+Commits: `7b73a8d` (harness scaffolding) + the CI-wiring/flake-fix commit that
+closes this phase.
 
 Exit criteria:
-- CI fails if scrolling up mid-stream loses the reader's position.
-- CI fails if Escape does not terminate a streamed turn.
-- The job runs with no cloud credentials and no outbound network dependency.
+- CI fails if scrolling up mid-stream loses the reader's position. ✅
+- CI fails if Escape does not terminate a streamed turn. ✅
+- The job runs with no cloud credentials and no outbound network dependency. ✅
 
 ## Phase 10 — P3.7 stream lifecycle hardening (abort re-entrancy, partial salvage)
 

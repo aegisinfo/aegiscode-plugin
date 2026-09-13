@@ -162,3 +162,34 @@ jobs:
       # --- 7. Desktop host smoke test: IPC surface, no Electron binary -------
       - name: Desktop shell smoke test
         run: node test/desktop-shell.mjs
+
+  electron-smoke:
+    name: Headless Electron smoke (P3.6)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install xvfb
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
+      - name: Cache Electron download
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.cache/electron
+          key: ${{ runner.os }}-electron-${{ hashFiles('desktop/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-electron-
+
+      - name: Install desktop deps
+        working-directory: desktop
+        env:
+          ELECTRON_CACHE: ${{ github.workspace }}/.cache/electron
+        run: npm ci --no-audit --no-fund
+
+      # No cloud credentials, no outbound network — the driver talks only to
+      # a stub HTTP server the test itself starts on localhost.
+      - name: Electron smoke test (scroll-hold + interrupt)
+        run: node test/electron-smoke.mjs

@@ -42,15 +42,28 @@ const DRIVER = path.join(DESKTOP, 'test', 'electron-smoke-main.js');
 // A key shaped nothing like a real one — it only has to be truthy so the
 // renderer's Aegis Cloud class is "configured"; the stub server ignores it.
 const FAKE_KEY = 'aegis-smoke-test-only';
-const CHUNK_COUNT = 400;
+// The driver only needs ~3000 chars (a few hundred ms of chunks) before it
+// scrolls up and fires Escape, so the true "did the stream get cut short"
+// signal comes with a huge margin baked in on purpose: under CI/host load the
+// driver's own polling (waitFor loops, sleeps) can eat seconds of wall clock
+// before it dispatches Escape, and a stub that finishes in ~10s (400 * 25ms)
+// can complete for real in that window — a false "nothing was interrupted"
+// that has nothing to do with the app. 4000 chunks (~100s) keeps that race
+// from being reachable without slowing a healthy run, which is bounded by
+// Escape firing early, not by CHUNK_COUNT.
+const CHUNK_COUNT = 4000;
 const CHUNK_INTERVAL_MS = 25;
 
 const failures = [];
 const passes = [];
 
 function check(name, ok, detail) {
+  // Details are written as explanations of failure ("the salvaged text equals
+  // the whole stream — ..."), so they only belong on a FAIL line. Printing them
+  // on a PASS made a green run read as if it had failed, which is how a
+  // vacuously-passing assertion survived review.
   if (ok) {
-    passes.push(`${name}${detail ? ` — ${detail}` : ''}`);
+    passes.push(name);
   } else {
     failures.push(`${name}${detail ? ` — ${detail}` : ''}`);
   }
@@ -60,6 +73,14 @@ function check(name, ok, detail) {
 function norm(s) {
   return String(s || '').replace(/\s+/g, ' ').trim();
 }
+
+// Every character the stub would send if the stream ran to completion. This is
+// the honest yardstick for "was the answer actually cut short?" — see the
+// salvaged-is-partial check, which must NOT compare against what the socket had
+// written at abort time. That comparison is a race: the renderer has usually
+// already consumed the last frame the stub wrote, so the two lengths tie and
+// the check failed at random (observed 23/0, 22/1, 20/3 across identical runs).
+const COMPLETE_TEXT_LEN = Array.from({ length: CHUNK_COUNT }, (_, i) => chunkText(i)).join('').length;
 
 // ---------------------------------------------------------------------------
 // The stubbed streaming transport: an SSE endpoint speaking the same wire
@@ -260,6 +281,9 @@ async function main() {
     AEGIS_SMOKE: '1',
     AEGIS_API_BASE: apiBase,
     AEGIS_API_KEY: FAKE_KEY,
+    // Lets the driver judge "partial" against the stream it never received,
+    // rather than against the bytes its own abort happened to leave in flight.
+    AEGIS_SMOKE_COMPLETE_LEN: String(COMPLETE_TEXT_LEN),
     // The app must never touch the developer's real settings/sessions store.
     XDG_CONFIG_HOME: userData,
     HOME: process.env.HOME || userData,
@@ -322,10 +346,6 @@ async function main() {
 
   const ev = payload.evidence || {};
   const byName = new Map((payload.checks || []).map((c) => [c.name, c]));
-  const driverCheck = (name) => {
-    const c = byName.get(name);
-    return check(`driver:${name}`, Boolean(c && c.ok), c && !c.ok ? String(c.detail) : '');
-  };
 
   check('driver-ok', payload.ok === true, payload.fatal ? `fatal: ${payload.fatal}` : '');
   check(
@@ -334,16 +354,45 @@ async function main() {
     `${(payload.checks || []).length} checks recorded`
   );
 
-  // ── 1. scroll-hold (the regression this phase exists to catch) ──────────
-  driverCheck('transcript-overflows');
-  driverCheck('scrolled-up-moved');
-  driverCheck('stream-live-during-hold');
-  driverCheck('position-held-while-streaming');
-  driverCheck('veto-engaged');
-  driverCheck('scrolled-up-flag-set');
+  // Surface EVERY check the driver recorded, not a hand-maintained subset.
+  // The old explicit list covered 12 of 19, so `send-re-enabled` and
+  // `partial-not-whole` could fail invisibly — the run reported only
+  // `driver-ok: false` with no name or reason attached.
+  for (const c of payload.checks || []) {
+    check(`driver:${c.name}`, Boolean(c.ok), c && !c.ok ? String(c.detail) : '');
+  }
+
+  // Pair the loop above with a presence assertion: generic surfacing alone
+  // would pass silently if a check were renamed or dropped from the driver,
+  // which is how drift starts. This list is the contract.
+  const expectedDriverChecks = [
+    'turn-started',
+    'class-is-cloud',
+    'discovery-lane-off',
+    'transcript-overflows',
+    'scrolled-up-moved',
+    'stream-live-during-hold',
+    'position-held-while-streaming',
+    'veto-engaged',
+    'scrolled-up-flag-set',
+    'escape-consumed',
+    'salvage-bubble-present',
+    'partial-text-salvaged',
+    'no-error-bubble',
+    'pending-bubble-cleared',
+    'stream-really-stopped',
+    'send-re-enabled',
+    'partial-not-whole',
+  ];
+  for (const name of expectedDriverChecks) {
+    check(
+      `driver-emits:${name}`,
+      byName.has(name),
+      `the driver no longer records "${name}" — fix the driver or update the contract`
+    );
+  }
 
   // ── 2. Escape stops the stream ───────────────────────────────────────────
-  driverCheck('escape-consumed');
   check(
     'transport-saw-abort',
     state.aborted === true,
@@ -363,12 +412,6 @@ async function main() {
   );
 
   // ── 3. partial answer salvaged, honestly labelled ───────────────────────
-  driverCheck('salvage-bubble-present');
-  driverCheck('partial-text-salvaged');
-  driverCheck('no-error-bubble');
-  driverCheck('pending-bubble-cleared');
-  driverCheck('stream-really-stopped');
-
   const salvaged = norm(ev.settled && ev.settled.stoppedText);
   const sent = norm(state.fullText);
   check(
@@ -378,10 +421,15 @@ async function main() {
       sent.startsWith(salvaged) ? 'exact prefix' : 'NOT a prefix of what the transport sent'
     }`
   );
+  // Must be measured against the COMPLETE stream, not `sent` (what the socket
+  // had written when it was aborted). The renderer normally has already
+  // consumed the final frame the stub wrote, so the two lengths tie and this
+  // assertion flipped at random — 23/0, 22/1, 20/3 across identical runs.
   check(
     'salvaged-is-partial',
-    salvaged.length < sent.length,
-    'the salvaged text equals the whole stream — nothing was actually interrupted'
+    salvaged.length > 200 && salvaged.length < COMPLETE_TEXT_LEN,
+    `salvaged ${salvaged.length} of ${COMPLETE_TEXT_LEN} chars the stub would have sent ` +
+      `(socket had written ${sent.length} when it was aborted)`
   );
 
   report({ state, payload });
@@ -394,7 +442,8 @@ function report({ state, payload }) {
   if (payload && payload.evidence) {
     const e = payload.evidence;
     console.log(
-      `\n  transcript: scrollTop ${e.before.scrollTop} -> ${e.held.scrollTop} while ` +
+      `\n  transcript: scrolled up from tail offset ${e.scrollUp && e.scrollUp.tailTop} to ` +
+        `${e.held.scrollTop}, then held there while ` +
         `${e.before.textLen} -> ${e.held.textLen} chars streamed ` +
         `(scrollHeight ${e.held.scrollHeight}, clientHeight ${e.held.clientHeight})`
     );
