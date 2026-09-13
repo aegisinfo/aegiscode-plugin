@@ -466,12 +466,15 @@ function createClient(opts = {}) {
     // close), reader.read() below waits forever and the whole desktop host
     // hangs with no way out but force-quit. Cap the gap between chunks —
     // not the whole response — so a slow-but-alive generation is untouched.
-    const SSE_IDLE_TIMEOUT_MS = 60_000;
-    // A pooled brain call may set its own, larger budget: the fan-out yields a
-    // header chunk and then stays silent until the FIRST worker pass returns,
-    // which is a full reasoning-model call and can outlast the 60s default.
-    const idleMs =
-      Number(idleTimeoutMs) > 0 ? Number(idleTimeoutMs) : SSE_IDLE_TIMEOUT_MS;
+    //
+    // The budget is per *response*, not per call site: a pooled brain call
+    // announces its worker fan-out in the X-AEGIS-Brain response header, and a
+    // fan-out is legitimately silent until its first worker returns. Keying the
+    // longer budget on a request the caller remembered to flag left the
+    // default Nexus turn (brain model id, checkbox off) dying at 60s — with
+    // the server already past its own fan-out deadline and every worker
+    // billed. See idleBudgetFor().
+    const idleMs = idleBudgetFor(res, idleTimeoutMs);
     async function readWithIdleTimeout() {
       let timer;
       const timeout = new Promise((_, reject) => {
@@ -752,7 +755,49 @@ function createClient(opts = {}) {
   };
 }
 
-const api = { createClient, envVar, randomUUID, DEFAULT_API_BASE, CLIENT_VERSION };
+/** Gap between SSE chunks that counts as "the stream is dead", in ms. */
+const SSE_IDLE_TIMEOUT_MS = 60_000;
+
+/**
+ * Gap allowed while a pooled brain call runs its worker fan-out, in ms.
+ *
+ * The fan-out yields a header chunk and then says nothing until its FIRST
+ * worker pass returns — and each worker is a full reasoning-model call at
+ * roughly 1/(workers+1) of the effort budget, so the silent window is minutes,
+ * not seconds. The server bounds that window itself
+ * (``services/pool_brain.py`` ``NEXUS_BRAIN_WORKER_TIMEOUT``, default 600s) and
+ * announces it per-response with the ``X-AEGIS-Brain`` header, so this budget
+ * has to outlast the *server's* deadline: aborting first kills a healthy turn
+ * the server is still running and billing.
+ *
+ * Raising the server's env var above ~14 minutes requires raising this too.
+ * desktop/lib/local/engine.js mirrors the same value for the explicit
+ * "work autonomously" path (AUTONOMOUS_IDLE_TIMEOUT_MS); the desktop test
+ * test/autonomous-mode.test.mjs fails if either drops below the server default.
+ */
+const BRAIN_IDLE_TIMEOUT_MS = 15 * 60_000;
+
+/**
+ * Idle budget for one SSE response: the caller's override when it asked for
+ * one, widened to the fan-out budget when the server says this response *is* a
+ * fan-out. The header is the authoritative signal — it is set by the same code
+ * that runs the fan-out, so a renamed brain id or a caller that forgot its
+ * flag cannot desynchronise the two. A response with no header (an older
+ * server, or a single-pass call) keeps the caller's budget or the 60s default.
+ */
+function idleBudgetFor(res, requestedMs) {
+  const base = Number(requestedMs) > 0 ? Number(requestedMs) : SSE_IDLE_TIMEOUT_MS;
+  let header = '';
+  try {
+    const get = res && res.headers && typeof res.headers.get === 'function' ? res.headers.get.bind(res.headers) : null;
+    header = (get && get('X-AEGIS-Brain')) || '';
+  } catch {
+    header = ''; // an exotic fetch shim without headers: keep the caller's budget
+  }
+  return header && String(header).trim() ? Math.max(base, BRAIN_IDLE_TIMEOUT_MS) : base;
+}
+
+const api = { createClient, envVar, randomUUID, DEFAULT_API_BASE, CLIENT_VERSION, idleBudgetFor, SSE_IDLE_TIMEOUT_MS, BRAIN_IDLE_TIMEOUT_MS };
 
 // Node / Electron (CommonJS): the MCP plugin and desktop shell require() this.
 if (typeof module !== 'undefined' && module.exports) {

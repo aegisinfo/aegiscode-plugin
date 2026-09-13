@@ -96,8 +96,17 @@ const EFFORT_TOKEN_BUDGET = { low: 8192, medium: 16384, high: 32768 };
  * that is a multi-thousand-token reasoning pass per worker — easily past a
  * minute. Timing out there aborts a perfectly healthy autonomous turn
  * mid-flight, after the server has already run and billed every worker.
+ *
+ * 15 minutes deliberately outlasts the server's OWN ceiling for that window
+ * (aegis1 services/pool_brain.py: NEXUS_BRAIN_WORKER_TIMEOUT, default 600s),
+ * because aborting first leaves the server running and billing a fan-out
+ * nobody will ever see. Raising that env var past ~14 minutes means raising
+ * this constant too; the shared client applies the same budget from the
+ * server's X-AEGIS-Brain response header (see client/aegis.js idleBudgetFor),
+ * which is what covers a fan-out the caller did not flag — test/
+ * autonomous-mode.test.mjs pins both halves.
  */
-const AUTONOMOUS_IDLE_TIMEOUT_MS = 5 * 60_000;
+const AUTONOMOUS_IDLE_TIMEOUT_MS = 15 * 60_000;
 
 /**
  * Only ever raises a too-low budget for a DeepSeek reasoning model — never
@@ -513,6 +522,12 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
   /** One transport round for the chosen class. */
   async function dispatch(cls, opts) {
     if (cls === 'aegis') {
+      // `undefined` = "leave the model id's own default alone" (a real user
+      // turn on the pooled class: the selected Nexus id is what decides, so
+      // today's behaviour is unchanged). `false` = an explicit single provider
+      // call, for a pass that is a continuation rather than a new
+      // investigation. `true` = the autonomous fan-out.
+      const brainFlag = opts.singlePass ? false : opts.autonomous ? true : undefined;
       return aegis.chatCompletion({
         prompt: opts.prompt,
         system: opts.system,
@@ -542,13 +557,30 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
         extra: {
           aegis_memory: true,
           session: opts.sessionId,
-          ...(opts.autonomous ? { brain: true } : {}),
-          // Only meaningful (and only sent) alongside `brain` — aegis1
+          // The fan-out is opt-in per dispatch. `brain` is sent EXPLICITLY
+          // whenever this dispatch is not the autonomous one, because the
+          // model id this class sends (``nexus-brain``) enables the pooled
+          // brain on its own: without the flag a continuation pass — the
+          // doubled-budget retry, or the "write up what you already found"
+          // re-dispatch — silently re-ran the whole workers+1 fan-out for a
+          // pass whose documented cost is a single request. aegis1
+          // services/pool_brain.py parse_brain_request honours the opt-out.
+          ...(brainFlag === undefined ? {} : { brain: brainFlag }),
+          // An opted-out pass is also told WHICH band to run on. A single call
+          // on a brain model id infers its band from the id and lands on
+          // "fast" (the cheapest id in the pool); "brain" is the band the
+          // workers themselves run on (cheapest model that can think). Same
+          // model as the fan-out, one sample instead of four — otherwise
+          // dropping the fan-out would have quietly changed the model too.
+          ...(brainFlag === false ? { mode: 'brain' } : {}),
+          // Only meaningful (and only sent) alongside a running fan-out — aegis1
           // services/pool_brain.py parse_brain_request reads `effort`/
           // `workers` straight off the body and clamps them itself
           // (EFFORT_LEVELS / MAX_WORKERS), so no client-side validation here.
-          ...(opts.autonomous && opts.effort ? { effort: opts.effort } : {}),
-          ...(opts.autonomous && opts.workers ? { workers: opts.workers } : {}),
+          // Keyed on the effective brain flag, not on `autonomous`: an opted-out
+          // single pass carries no fan-out tuning it cannot use.
+          ...(brainFlag === true && opts.effort ? { effort: opts.effort } : {}),
+          ...(brainFlag === true && opts.workers ? { workers: opts.workers } : {}),
           // The pool forwards `tools` to the provider and returns tool_calls
           // (aegis1 app.py:7765 → provider, pool_brain synthesis keeps them).
           ...(opts.tools.length ? { tools: opts.tools } : {}),
@@ -763,7 +795,16 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
         // would stream it a second time onto the same bubble.
         if (!truncationRetried && !assistantText(res) && isTruncated(res)) {
           truncationRetried = true;
-          res = await dispatch(cls, { ...opts, maxTokens: doubledBudget(opts.maxTokens) });
+          // singlePass: this retry buys *budget*, not a second investigation.
+          // The fan-out's workers would re-run the whole task from scratch for
+          // it — 3 extra reasoning passes + a synthesis — which is the opposite
+          // of what "one doubled request" means (and what the note above
+          // promises). The pass itself is unchanged apart from that.
+          res = await dispatch(cls, {
+            ...opts,
+            singlePass: true,
+            maxTokens: doubledBudget(opts.maxTokens),
+          });
           addUsage(res);
         }
 
@@ -778,7 +819,19 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
           synthesisDone = true;
           foldPromptIntoHistory();
           history.push({ role: 'user', content: EMPTY_TURN_NUDGE });
-          res = await dispatch(cls, { ...opts, messages: history, prompt: '', tools: [] });
+          // singlePass: same reasoning as the truncation retry above, and it is
+          // the same comment's literal promise ("force the summary out of the
+          // context it already holds"). Escalating a write-up back into the
+          // worker fan-out asked three fresh workers to redo an investigation
+          // whose findings are already in `history`, at 4x the cost, to produce
+          // a paragraph the model had all the material for.
+          res = await dispatch(cls, {
+            ...opts,
+            singlePass: true,
+            messages: history,
+            prompt: '',
+            tools: [],
+          });
           addUsage(res);
           if (!assistantText(res)) {
             throw emptyTurnError({

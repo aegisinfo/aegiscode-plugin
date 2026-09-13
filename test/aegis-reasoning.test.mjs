@@ -203,9 +203,13 @@ try {
 
   await engine.chat({ class: 'aegis', prompt: 'hi', model: 'm1', autonomous: true }, () => {});
   const auto = seen[seen.length - 1];
+  // The invariant, not the number: the fan-out is silent until its first
+  // worker returns, and the server allows that phase 600s of its own
+  // (aegis1 services/pool_brain.py DEFAULT_WORKER_DEADLINE). A client budget
+  // below it aborts a healthy turn the server is still running and billing.
   assert(
-    auto.idleTimeoutMs === 300000,
-    `an autonomous turn gets the 5-minute fan-out budget, got ${auto.idleTimeoutMs}`
+    auto.idleTimeoutMs > 600_000,
+    `an autonomous turn must outlast the server's 600s fan-out deadline, got ${auto.idleTimeoutMs}`
   );
 
   // ── 4. the engine forwards reasoning on the delta channel ───────────────
