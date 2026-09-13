@@ -225,7 +225,14 @@ for (const cls of ['openai-compat', 'anthropic']) {
   const fetched = [];
   globalThis.fetch = async (url) => {
     fetched.push(url);
-    return new Response(JSON.stringify({ model: 'gpt-4o-mini', choices: [{ message: { content: 'ok' } }] }), {
+    // Answer in the wire format the requested endpoint actually speaks. The
+    // Anthropic parser reads `content` blocks (not `choices`), so feeding it
+    // an OpenAI body yields empty text — which the engine now treats as a
+    // failed turn rather than silently passing through.
+    const body = String(url).includes('/v1/messages')
+      ? { model: 'claude-3-5-sonnet', content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }
+      : { model: 'gpt-4o-mini', choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] };
+    return new Response(JSON.stringify(body), {
       status: 200,
       headers: { 'content-type': 'application/json' },
     });
@@ -319,6 +326,186 @@ for (const cls of ['openai-compat', 'anthropic']) {
   assert(text === 'final summary', `a long tool-calling turn still gets the final text answer, got ${JSON.stringify(res)}`);
   assert(dispatchCount === TOOL_ROUNDS + 1, `no cap: ran past the old ${OLD_CAP}-round limit (${dispatchCount} dispatches)`);
   assert(executeCount === TOOL_ROUNDS, `every tool round actually executed (${executeCount}/${TOOL_ROUNDS})`);
+}
+
+// ---- empty turn: the engine recovers instead of returning nothing --------
+//
+// The reported bug: a long tool-calling turn ends with a completion whose
+// content is empty and which carries no tool call, so engine.js returned it
+// verbatim and renderer/app.js painted "(empty response)" — discarding every
+// tool result the turn had gathered. These drive the two recovery passes.
+
+const textOf = (res) =>
+  (res && res.choices && res.choices[0] && res.choices[0].message && res.choices[0].message.content) || '';
+
+/** Snapshot a dispatch's arguments — `history` is mutated in place by the
+ *  loop, so reading `args.messages` after the fact would show the final
+ *  state, not what that particular request was actually sent. */
+const snapDispatch = (args) => ({
+  prompt: args.prompt,
+  tools: (args.tools || []).map((t) => t.function && t.function.name),
+  messages: (args.messages || []).map((m) => `${m.role}:${String(m.content == null ? '' : m.content)}`),
+  maxTokens: args.maxTokens,
+});
+
+const fakeTools = {
+  SUBAGENT_TOOL: 'task',
+  MUTATING_TOOLS: new Set(),
+  toolsFor: () => [{ type: 'function', function: { name: 'poke', parameters: {} } }],
+  async executeTool() {
+    return { ok: true, output: 'poked' };
+  },
+  toolResultText: (r) => r.output,
+};
+
+// A provider that stops with neither text nor a tool call is re-dispatched
+// once, with tools withdrawn and the original prompt folded into the history
+// so the model still sees the question it is answering.
+{
+  const seen = [];
+  let n = 0;
+  const prov = {
+    async openaiCompatible(args) {
+      seen.push(snapDispatch(args));
+      n += 1;
+      return n === 1
+        ? { model: 'x', choices: [{ message: { content: '' }, finish_reason: 'stop' }] }
+        : { model: 'x', choices: [{ message: { content: 'recovered answer' }, finish_reason: 'stop' }] };
+    },
+  };
+  const e = createLocalEngine({ aegis, settings, ollama, providers: prov, tools: fakeTools });
+  const res = await e.chat({ class: 'openai-compat', prompt: 'what did you find', model: 'x' }, () => {});
+
+  assert(textOf(res) === 'recovered answer', `synthesis pass delivers the answer, got ${JSON.stringify(res)}`);
+  assert(seen.length === 2, `exactly one synthesis dispatch (${seen.length})`);
+  assert(seen[1].tools.length === 0, 'synthesis is dispatched with no tools offered');
+  assert(
+    seen[1].messages.some((m) => m.startsWith('user:') && /came back empty/.test(m)),
+    `nudge tells the model its reply was empty: ${JSON.stringify(seen[1].messages)}`
+  );
+  assert(
+    seen[1].messages.some((m) => m === 'user:what did you find'),
+    `the original prompt was folded into history before the nudge: ${JSON.stringify(seen[1].messages)}`
+  );
+}
+
+// The exact reported shape: tool rounds run, then the model answers with an
+// empty completion. The gathered tool results must reach the summary.
+{
+  const seen = [];
+  let n = 0;
+  const prov = {
+    async openaiCompatible(args) {
+      seen.push(snapDispatch(args));
+      n += 1;
+      if (n === 1) {
+        return {
+          model: 'x',
+          choices: [
+            {
+              message: {
+                content: '',
+                tool_calls: [{ id: 'c1', function: { name: 'poke', arguments: '{}' } }],
+              },
+              finish_reason: 'tool_calls',
+            },
+          ],
+        };
+      }
+      if (n === 2) return { model: 'x', choices: [{ message: { content: '' }, finish_reason: 'stop' }] };
+      return { model: 'x', choices: [{ message: { content: 'summarised findings' }, finish_reason: 'stop' }] };
+    },
+  };
+  const e = createLocalEngine({ aegis, settings, ollama, providers: prov, tools: fakeTools });
+  const res = await e.chat({ class: 'openai-compat', prompt: 'research the repo', model: 'x' }, () => {});
+
+  assert(textOf(res) === 'summarised findings', `empty final round is rescued, got ${JSON.stringify(res)}`);
+  assert(seen.length === 3, `one tool round + one empty round + one synthesis (${seen.length})`);
+  assert(
+    seen[2].messages.some((m) => m.startsWith('tool:') && m.includes('poked')),
+    `the synthesis request still carries the tool results: ${JSON.stringify(seen[2].messages)}`
+  );
+  assert(!(seen[2].prompt || ''), 'synthesis sends no shorthand prompt alongside the folded history');
+}
+
+// Truncation: no visible text and finish_reason 'length' means the budget was
+// spent before any content, so the turn is retried once at double the budget.
+{
+  const seen = [];
+  let n = 0;
+  const prov = {
+    async openaiCompatible(args) {
+      seen.push(snapDispatch(args));
+      n += 1;
+      return n === 1
+        ? { model: 'x', choices: [{ message: { content: '' }, finish_reason: 'length' }] }
+        : { model: 'x', choices: [{ message: { content: 'after doubling' }, finish_reason: 'stop' }] };
+    },
+  };
+  const e = createLocalEngine({ aegis, settings, ollama, providers: prov, tools: fakeTools });
+  const res = await e.chat({ class: 'openai-compat', prompt: 'q', model: 'x', maxTokens: 4096 }, () => {});
+
+  assert(textOf(res) === 'after doubling', `truncated turn recovers, got ${JSON.stringify(res)}`);
+  assert(seen.length === 2, `one truncation retry (${seen.length})`);
+  assert(seen[1].maxTokens === 8192, `retry doubles the budget (${seen[1].maxTokens})`);
+}
+
+// A turn that already produced text is NOT retried on 'length' — the answer
+// is merely truncated, and re-dispatching would stream it a second time onto
+// the same renderer bubble.
+{
+  const seen = [];
+  const prov = {
+    async openaiCompatible(args) {
+      seen.push(snapDispatch(args));
+      return { model: 'x', choices: [{ message: { content: 'partial answer' }, finish_reason: 'length' }] };
+    },
+  };
+  const e = createLocalEngine({ aegis, settings, ollama, providers: prov, tools: fakeTools });
+  const res = await e.chat({ class: 'openai-compat', prompt: 'q', model: 'x', maxTokens: 4096 }, () => {});
+
+  assert(textOf(res) === 'partial answer', `truncated text is returned as-is, got ${JSON.stringify(res)}`);
+  assert(seen.length === 1, `no retry when text already arrived (${seen.length})`);
+}
+
+// Still empty after the synthesis pass: fail loudly with the cause rather
+// than handing the renderer a blank completion to paint "(empty response)".
+{
+  const seen = [];
+  const prov = {
+    async openaiCompatible(args) {
+      seen.push(snapDispatch(args));
+      return { model: 'x', choices: [{ message: { content: '' }, finish_reason: 'length' }] };
+    },
+  };
+  const e = createLocalEngine({ aegis, settings, ollama, providers: prov, tools: fakeTools });
+  let threw = null;
+  try {
+    await e.chat({ class: 'openai-compat', prompt: 'q', model: 'x', maxTokens: 4096 }, () => {});
+  } catch (err) {
+    threw = err;
+  }
+  assert(threw, 'a permanently empty turn throws instead of returning blank content');
+  assert(/no answer/.test(threw.message), `error names the failure: ${threw.message}`);
+  assert(/length/.test(threw.message), `error carries the provider stop reason: ${threw.message}`);
+  assert(/8192|4096/.test(threw.message), `error carries the budget actually used: ${threw.message}`);
+  assert(seen.length === 3, `truncation retry + synthesis, then give up (${seen.length} dispatches)`);
+}
+
+// `tools: false` is the documented single-shot opt-out and has no gathered
+// context to rescue, so it keeps returning the provider's own completion.
+{
+  const seen = [];
+  const prov = {
+    async openaiCompatible(args) {
+      seen.push(snapDispatch(args));
+      return { model: 'x', choices: [{ message: { content: '' }, finish_reason: 'stop' }] };
+    },
+  };
+  const e = createLocalEngine({ aegis, settings, ollama, providers: prov, tools: fakeTools });
+  const res = await e.chat({ class: 'openai-compat', prompt: 'q', model: 'x', tools: false }, () => {});
+  assert(textOf(res) === '', 'tools:false single-shot turn is unchanged');
+  assert(seen.length === 1, `no synthesis dispatch when tools are opted out (${seen.length})`);
 }
 
 console.log('engine tests passed');

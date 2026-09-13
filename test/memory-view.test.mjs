@@ -177,6 +177,7 @@ const src = [
   extractFn(APP_SRC, 'relTime'),
   extractFn(APP_SRC, 'normalizeMemoryEntry'),
   extractFn(APP_SRC, 'fetchMemory'),
+  extractFn(APP_SRC, 'formatTokens'),
   extractFn(APP_SRC, 'capNotice'),
   extractFn(APP_SRC, 'renderCapHint'),
   extractFn(APP_SRC, 'renderMemoryResults'),
@@ -192,7 +193,7 @@ const src = [
   extractFn(APP_SRC, 'activeMemoryEntry'),
   extractFn(APP_SRC, 'saveMemory'),
   extractFn(APP_SRC, 'importMemory'),
-  'return { overlayOpen, relTime, normalizeMemoryEntry, fetchMemory, capNotice, renderCapHint, renderMemoryResults, memoryChip, memoryCard, memoryFacets, memoryMatches, renderMemoryChips, renderMemoryOverlay, loadMemoryOverlay, openMemoryOverlay, closeMemoryOverlay, activeMemoryEntry, saveMemory, importMemory };',
+  'return { overlayOpen, relTime, normalizeMemoryEntry, fetchMemory, formatTokens, capNotice, renderCapHint, renderMemoryResults, memoryChip, memoryCard, memoryFacets, memoryMatches, renderMemoryChips, renderMemoryOverlay, loadMemoryOverlay, openMemoryOverlay, closeMemoryOverlay, activeMemoryEntry, saveMemory, importMemory };',
 ].join('\n');
 
 // eslint-disable-next-line no-new-func

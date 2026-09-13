@@ -89,7 +89,7 @@ const tmp = (n) => mkdtempSync(join(tmpdir(), `aegis-key-${n}-`));
   store.setAegisKey(AEGIS_KEY);
   store.set('openai-compat', { baseURL: 'https://api.example.com', key: PROVIDER_KEY });
 
-  const stub = () => ({ model: 'm', choices: [{ message: { content: '' } }] });
+  const stub = () => ({ model: 'm', choices: [{ message: { content: 'ok' } }] });
   const engine = createLocalEngine({
     aegis: { apiKey: AEGIS_KEY, listModels: async () => ({ models: [] }), chatCompletion: stub },
     settings: store,
@@ -236,7 +236,7 @@ const tmp = (n) => mkdtempSync(join(tmpdir(), `aegis-key-${n}-`));
       },
       async chatCompletion(args) {
         seen.push(['chatCompletion', args]);
-        return { model: args.model, choices: [{ message: { content: '' } }] };
+        return { model: args.model, choices: [{ message: { content: 'ok' } }] };
       },
     },
     settings,
@@ -249,17 +249,17 @@ const tmp = (n) => mkdtempSync(join(tmpdir(), `aegis-key-${n}-`));
       },
       async chat(args) {
         seen.push(['ollama', args]);
-        return { model: args.model, choices: [{ message: { content: '' } }] };
+        return { model: args.model, choices: [{ message: { content: 'ok' } }] };
       },
     },
     providers: {
       async openaiCompatible(args) {
         seen.push(['openai-compat', args]);
-        return { model: args.model, choices: [{ message: { content: '' } }] };
+        return { model: args.model, choices: [{ message: { content: 'ok' } }] };
       },
       async anthropicMessages(args) {
         seen.push(['anthropic', args]);
-        return { model: args.model, choices: [{ message: { content: '' } }] };
+        return { model: args.model, choices: [{ message: { content: 'ok' } }] };
       },
     },
   });
@@ -283,11 +283,11 @@ const tmp = (n) => mkdtempSync(join(tmpdir(), `aegis-key-${n}-`));
       providers: {
         async openaiCompatible(args) {
           seen.push(['openai-compat', args]);
-          return { model: args.model, choices: [{ message: { content: '' } }] };
+          return { model: args.model, choices: [{ message: { content: 'ok' } }] };
         },
         async anthropicMessages(args) {
           seen.push(['anthropic', args]);
-          return { model: args.model, choices: [{ message: { content: '' } }] };
+          return { model: args.model, choices: [{ message: { content: 'ok' } }] };
         },
       },
     });
