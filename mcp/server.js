@@ -118,13 +118,30 @@ const TOOLS = {
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     async run() {
       const data = await aegis.tokenBankBalance();
-      const lines = [`Balance: €${data.balance_eur ?? '0'}`];
+      const lines = [`Balance: €${Number(data.balance_eur || 0).toFixed(2)}`];
       const ledger = (data.ledger || []).slice(0, 5);
       if (ledger.length) {
         lines.push('', 'Recent activity:');
         for (const l of ledger) {
-          const cost = ((l.charged_micros || 0) / 1_000_000).toFixed(4);
-          lines.push(`  ${l.created_at || ''}  ${l.model_key || l.kind || ''}  -€${cost}`);
+          // The balance endpoint returns `amount_eur`, signed from the user's
+          // side: negative = spent on a call, positive = top-up/rebate. This
+          // used to read `charged_micros`, which the endpoint does not return
+          // at all — every row rendered as "-€0.0000" no matter how many
+          // tokens the call consumed. Only fall back to the raw micros column
+          // (opposite sign) if a future server drops amount_eur.
+          const eur = l.amount_eur != null
+            ? Number(l.amount_eur)
+            : -Number(l.charged_micros || 0) / 1_000_000;
+          // Sub-cent calls are the norm here, so keep 4dp below a cent and
+          // fall back to 2dp for cash-sized rows.
+          const abs = Math.abs(eur);
+          const amount = `${eur < 0 ? '-' : '+'}€${abs < 0.01 ? abs.toFixed(4) : abs.toFixed(2)}`;
+          const kind = l.kind === 'topup' ? 'top-up' : (l.kind || '');
+          const model = l.model_key || kind || '';
+          const tokens = (l.tokens_in || l.tokens_out)
+            ? `  ${l.tokens_in || 0}/${l.tokens_out || 0} tok`
+            : '';
+          lines.push(`  ${l.created_at || ''}  ${model}${tokens}  ${amount}`);
         }
       } else {
         lines.push('No spend yet.');

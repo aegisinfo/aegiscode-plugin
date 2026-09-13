@@ -132,12 +132,20 @@ globalThis.fetch = async () =>
 }
 
 // ---- Anthropic Messages streaming -----------------------------------------
+//
+// A faithful Anthropic event sequence, which is the whole point of these
+// assertions: the token counts arrive split across TWO events — the prompt side
+// on `message_start`, the output side on `message_delta` — and NOTHING on the
+// wire is ever called `total_tokens`. Both facts used to be mishandled:
+// `message_delta`'s partial usage was *assigned over* the message_start usage
+// (discarding every input token), and the renderer prints `total_tokens` only,
+// so an Anthropic-compatible turn showed no token count at all.
 globalThis.fetch = async (url, opts) => {
   lastFetch = { url, opts };
   return sseResponse([
-    'data: {"type":"message_start","message":{"model":"claude-x","usage":{"input_tokens":3}}}\n\n',
+    'data: {"type":"message_start","message":{"model":"claude-x","usage":{"input_tokens":1200,"cache_read_input_tokens":50,"output_tokens":1}}}\n\n',
     'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hey"}}\n\n',
-    'data: {"type":"message_delta","usage":{"output_tokens":3}}\n\n',
+    'data: {"type":"message_delta","usage":{"output_tokens":300}}\n\n',
     'data: {"type":"message_stop"}\n\n',
   ]);
 };
@@ -151,9 +159,98 @@ globalThis.fetch = async (url, opts) => {
   });
   assert(r.choices[0].message.content === 'Hey', 'Anthropic normalised text');
   assert(r.model === 'claude-x', 'Anthropic model captured');
-  assert(r.usage.output_tokens === 3, 'Anthropic usage captured');
+  assert(r.usage.output_tokens === 300, 'Anthropic output tokens are the cumulative delta value');
+  assert(
+    r.usage.input_tokens === 1200,
+    `message_delta must not clobber the message_start input tokens, got ${r.usage.input_tokens}`
+  );
+  assert(r.usage.cache_read_input_tokens === 50, 'Anthropic cache read tokens preserved');
+  // The field the renderer actually prints — absent from the wire format.
+  assert(
+    r.usage.total_tokens === 1550,
+    `Anthropic usage must expose total_tokens (1200+50+300), got ${r.usage.total_tokens}`
+  );
+  assert(r.usage.prompt_tokens === 1250, 'Anthropic prompt_tokens includes cached prompt tokens');
+  assert(r.usage.completion_tokens === 300, 'Anthropic completion_tokens mirrors output_tokens');
   assert(lastFetch.opts.headers['x-api-key'] === KEY, 'Anthropic x-api-key');
   assert(lastFetch.opts.headers['anthropic-version'] === '2023-06-01', 'Anthropic version header');
+}
+
+// A stream that ends before `message_delta` still reports what message_start
+// knew: output_tokens stays at the start value rather than collapsing to zero.
+globalThis.fetch = async () =>
+  sseResponse([
+    'data: {"type":"message_start","message":{"model":"claude-x","usage":{"input_tokens":40,"output_tokens":2}}}\n\n',
+    'data: {"type":"message_stop"}\n\n',
+  ]);
+{
+  const r = await anthropicMessages({
+    baseURL: 'https://api.example.com',
+    apiKey: KEY,
+    model: 'claude-x',
+    messages: [{ role: 'user', content: 'hi' }],
+  });
+  assert(r.usage.input_tokens === 40 && r.usage.output_tokens === 2, 'truncated stream keeps both halves');
+  assert(r.usage.total_tokens === 42, `truncated stream total, got ${r.usage.total_tokens}`);
+}
+
+// Some Anthropic-compatible gateways echo the WHOLE usage object on
+// message_delta with a zeroed prompt side. A naive merge adopts that 0 and
+// loses the real input count — the same data loss the wholesale assignment
+// caused, in a different costume.
+globalThis.fetch = async () =>
+  sseResponse([
+    'data: {"type":"message_start","message":{"model":"claude-x","usage":{"input_tokens":900,"output_tokens":1}}}\n\n',
+    'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hey"}}\n\n',
+    'data: {"type":"message_delta","usage":{"input_tokens":0,"output_tokens":120}}\n\n',
+    'data: {"type":"message_stop"}\n\n',
+  ]);
+{
+  const r = await anthropicMessages({
+    baseURL: 'https://api.example.com',
+    apiKey: KEY,
+    model: 'claude-x',
+    messages: [{ role: 'user', content: 'hi' }],
+  });
+  assert(r.usage.input_tokens === 900, `a zeroed echo must not erase the real input count, got ${r.usage.input_tokens}`);
+  assert(r.usage.output_tokens === 120, 'the echoed output count is still the newest value');
+  assert(r.usage.total_tokens === 1020, `total stays honest, got ${r.usage.total_tokens}`);
+}
+
+// No usage anywhere on the stream: the field is omitted, not faked as 0 — a
+// provider that reports nothing must not render as "0 tokens".
+globalThis.fetch = async () =>
+  sseResponse([
+    'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}\n\n',
+    'data: {"type":"message_stop"}\n\n',
+  ]);
+{
+  const r = await anthropicMessages({
+    baseURL: 'https://api.example.com',
+    apiKey: KEY,
+    model: 'claude-x',
+    messages: [{ role: 'user', content: 'hi' }],
+  });
+  assert(r.usage === undefined, 'absent Anthropic usage stays absent, never a zeroed object');
+}
+
+// The plain-JSON fallback (a server that ignored stream:true) reports the whole
+// Message at once, usage included — same normalisation must apply.
+globalThis.fetch = async () =>
+  jsonResponse({
+    model: 'claude-x',
+    content: [{ type: 'text', text: 'full' }],
+    usage: { input_tokens: 7, output_tokens: 4 },
+    stop_reason: 'end_turn',
+  });
+{
+  const r = await anthropicMessages({
+    baseURL: 'https://api.example.com',
+    apiKey: KEY,
+    model: 'claude-x',
+    messages: [{ role: 'user', content: 'hi' }],
+  });
+  assert(r.usage.total_tokens === 11, `plain-JSON fallback exposes total_tokens, got ${r.usage.total_tokens}`);
 }
 
 // ---- defect A: base URL normalisation (exactly one version segment) --------

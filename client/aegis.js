@@ -290,6 +290,7 @@ function createClient(opts = {}) {
     onStream,
     onReasoning,
     idleTimeoutMs,
+    includeUsage,
     signal,
     extra,
   } = {}) {
@@ -307,9 +308,22 @@ function createClient(opts = {}) {
     if (!stream || typeof onStream !== 'function') {
       return apiPost('/api/v1/chat/completions', { ...body, stream: false });
     }
+    // An OpenAI-compatible SSE response carries no `usage` unless the caller
+    // asks for it (`stream_options.include_usage`). Without this the streamed
+    // AEGIS pool call — the only path the desktop uses for the Nexus brain —
+    // resolved with no usage at all, so a pooled turn could report its text but
+    // never what it spent, while the same model through the non-streaming MCP
+    // path reported both. Only the streaming request sets it: `stream_options`
+    // is invalid alongside `stream:false`, so the non-stream branch above and
+    // every non-stream fallback must stay clean.
+    if (includeUsage) body.stream_options = { include_usage: true };
     return postStream('/api/v1/chat/completions', body, authHeaders(), onStream, signal, {
       onReasoning,
       idleTimeoutMs,
+      // A server that predates `stream_options` 400s the whole request; the
+      // stream is worth more than the token count, so retry on the wire without
+      // the hint before sacrificing streaming for the non-stream fallback.
+      retryWithoutStreamOptions: Boolean(includeUsage),
     });
   }
 
@@ -370,23 +384,49 @@ function createClient(opts = {}) {
    * This keeps streaming purely additive for hosts that opt in.
    */
   async function postStream(path, body, headers, onStream, signal, streamOpts) {
-    const { onReasoning, idleTimeoutMs } = streamOpts || {};
-    let res;
-    try {
-      res = await fetch(`${apiBase}${path}`, {
+    const { onReasoning, idleTimeoutMs, retryWithoutStreamOptions } = streamOpts || {};
+    const request = (payload) =>
+      fetch(`${apiBase}${path}`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ ...body, stream: true }),
+        body: JSON.stringify({ ...payload, stream: true }),
         signal,
       });
+    let res;
+    try {
+      res = await request(body);
     } catch (err) {
       throw err; // network-level failure; nothing to fall back to
     }
 
+    // Ask for the token count, but never at the cost of the stream: a server
+    // that predates `stream_options` rejects the request outright, so drop that
+    // one hint and put it back on the wire before falling back to a non-stream
+    // response (which would answer in one lump and end the live paint).
+    if (!res.ok && retryWithoutStreamOptions && body.stream_options) {
+      try {
+        if (res.body) await res.body.cancel();
+      } catch {
+        /* the failed response is being discarded anyway */
+      }
+      const cleanBody = { ...body };
+      delete cleanBody.stream_options;
+      body = cleanBody;
+      try {
+        res = await request(body);
+      } catch (err) {
+        throw err;
+      }
+    }
+
     if (!res.ok) {
       // The endpoint may not accept `stream: true`. Retry once without it so
-      // the caller gets the normal structured JSON (result or error).
-      const data = await apiPost(path, { ...body, stream: false }, headers);
+      // the caller gets the normal structured JSON (result or error). Strip
+      // `stream_options` too — it is only legal with `stream: true`, so leaving
+      // it on would turn this graceful fallback into a second rejection.
+      const cleanBody = { ...body };
+      delete cleanBody.stream_options;
+      const data = await apiPost(path, { ...cleanBody, stream: false }, headers);
       const fullText = textOf(data);
       if (fullText) onStream({ delta: fullText });
       return data;

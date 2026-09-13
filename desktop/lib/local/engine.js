@@ -521,6 +521,12 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
         mode: opts.mode,
         maxTokens: opts.maxTokens,
         stream: true,
+        // The pooled (Nexus) brain is streamed, and an OpenAI-compatible SSE
+        // stream reports no token usage unless asked. Without this the Aegis
+        // Cloud class — the desktop's default — was the one class that answered
+        // with text but never a token count, so a pooled turn's spend was
+        // invisible here while the same model through the MCP path reported it.
+        includeUsage: true,
         onStream: opts.onDelta,
         // Extended-reasoning trace (the fan-out's worker findings). Its own
         // channel so it never counts as answer text — see vendor/aegis.js.
@@ -682,6 +688,41 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
       let truncationRetried = false;
       let synthesisDone = false;
 
+      // Token accounting for the whole TURN, not just its last round. An
+      // agentic turn makes one provider call per tool round, and returning only
+      // the final round's `usage` (what this did) reported a fraction of what
+      // was actually spent — the tool phase's tokens simply disappeared. Every
+      // dispatch is summed, including the truncation retry and the synthesis
+      // re-dispatch: both are real, separately billed provider calls.
+      const turnUsage = { calls: 0 };
+      const USAGE_FIELDS = ['input_tokens', 'output_tokens', 'prompt_tokens', 'completion_tokens', 'total_tokens'];
+      const addUsage = (res) => {
+        const u = res && res.usage;
+        if (!u || typeof u !== 'object') return;
+        turnUsage.calls += 1;
+        for (const key of USAGE_FIELDS) {
+          if (typeof u[key] === 'number' && Number.isFinite(u[key])) {
+            turnUsage[key] = (turnUsage[key] || 0) + u[key];
+          }
+        }
+        // A provider that reports only the split (Anthropic-compatible) has no
+        // total to sum, so derive one or the renderer has nothing to print.
+        if (typeof u.total_tokens !== 'number') {
+          const derived =
+            (u.prompt_tokens ?? u.input_tokens ?? 0) + (u.completion_tokens ?? u.output_tokens ?? 0);
+          if (derived) turnUsage.total_tokens = (turnUsage.total_tokens || 0) + derived;
+        }
+      };
+      // The turn's totals win over any single round's, so the attached usage is
+      // never the last round wearing the whole turn's label.
+      const withTurnUsage = (res) => {
+        if (!res || typeof res !== 'object' || !turnUsage.calls) return res;
+        // Built from the accumulator alone: every field already present in a
+        // round's usage was summed into it, so merging the last round back in
+        // could only reintroduce a partial number under a whole-turn label.
+        return { ...res, usage: { ...turnUsage } };
+      };
+
       // Round 1's shorthand prompt was sent as `prompt`, not as a message, so
       // any follow-up dispatch in this turn must fold it into the history
       // first or the model would be shown a nudge with no question above it.
@@ -707,6 +748,7 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
           if (!retriable) throw e;
           res = await dispatch(cls, { ...opts, tools: [] });
         }
+        addUsage(res);
 
         // Budget exhausted before the answer was written. Doubling it costs
         // one request and converts a dead turn into a real one; a second
@@ -722,11 +764,12 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
         if (!truncationRetried && !assistantText(res) && isTruncated(res)) {
           truncationRetried = true;
           res = await dispatch(cls, { ...opts, maxTokens: doubledBudget(opts.maxTokens) });
+          addUsage(res);
         }
 
         const calls = toolSchemas.length ? extractToolCalls(res) : [];
         if (!calls.length) {
-          if (assistantText(res) || synthesisDone || !toolsEnabled) return res;
+          if (assistantText(res) || synthesisDone || !toolsEnabled) return withTurnUsage(res);
           // The model stopped without calling a tool and without saying
           // anything. Force the summary out of the context it already holds
           // instead of handing the renderer a blank completion. Skipped when
@@ -736,6 +779,7 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
           foldPromptIntoHistory();
           history.push({ role: 'user', content: EMPTY_TURN_NUDGE });
           res = await dispatch(cls, { ...opts, messages: history, prompt: '', tools: [] });
+          addUsage(res);
           if (!assistantText(res)) {
             throw emptyTurnError({
               cls,
@@ -744,7 +788,7 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
               finishReason: finishReasonOf(res),
             });
           }
-          return res;
+          return withTurnUsage(res);
         }
 
         foldPromptIntoHistory();
@@ -767,6 +811,8 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
                 cls, model, maxTokens, mode: payload && payload.mode, parentSignal: signal, depth, rootSessionId, rootOnDelta,
               })
             : await gatedExecuteTool(call, { toolCtx, rootSessionId, rootOnDelta, signal });
+          // A subagent's spend rides back on its tool result (see runSubagent).
+          if (result && result.usage) addUsage({ usage: result.usage });
           if (onDelta) onDelta({ delta: '', tool: { name: call.name, args: call.args, ok: result.ok } });
           history.push({
             role: 'tool',
@@ -822,9 +868,15 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
         () => {}
       );
       const text = assistantText(res);
+      // The subagent's tokens were billed to the same account as the parent
+      // turn, so its usage travels back on the tool result and is summed into
+      // the parent's total. Attached even on the no-output branch: a subagent
+      // that burned a full context and said nothing is precisely the spend the
+      // user most needs to see.
+      const spent = res && res.usage ? { usage: res.usage } : {};
       return text
-        ? { ok: true, output: text }
-        : { ok: false, error: `subagent (${label}) produced no output` };
+        ? { ok: true, output: text, ...spent }
+        : { ok: false, error: `subagent (${label}) produced no output`, ...spent };
     } catch (e) {
       return { ok: false, error: `subagent (${label}) failed: ${e && e.message ? e.message : e}` };
     } finally {

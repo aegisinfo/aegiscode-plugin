@@ -120,6 +120,22 @@ assert(noBrainModels.length === 0, `a provider-only catalog yields no entries, g
 // chat routing per class
 await engine.chat({ class: 'aegis', prompt: 'hi', model: 'm1' }, () => {});
 assert(calls[calls.length - 1][0] === 'chatCompletion', 'aegis routes to chatCompletion');
+// The cloud class is the one streamed transport in the desktop, and an
+// OpenAI-compatible SSE response omits `usage` unless asked — so the engine
+// must ask, or the pooled "Nexus" brain reports its answer but never its token
+// spend while the same model through the MCP path reports both.
+assert(
+  calls[calls.length - 1][1].includeUsage === true,
+  'the aegis cloud dispatch must request usage on its stream (stream_options.include_usage)'
+);
+assert(
+  calls[calls.length - 1][1].stream === true,
+  'the aegis cloud dispatch stays streamed — usage is requested, not traded away'
+);
+assert(
+  calls[calls.length - 1][1].model === 'm1',
+  'the selected model id is forwarded verbatim (no client-side tier rewriting)'
+);
 
 await engine.chat({ class: 'ollama', prompt: 'hi', model: 'llama3' }, () => {});
 assert(calls[calls.length - 1][0] === 'ollama', 'ollama routes to ollama.chat');
@@ -629,6 +645,112 @@ const fakeTools = {
     assert(!deltas.some((c) => c && c.approval), 'confirm mode off sends no approval chunk');
     assert(execCalls.length === 1 && execCalls[0] === 'poke', `tool still runs exactly once (${JSON.stringify(execCalls)})`);
   }
+}
+
+// ---- token usage is the TURN's, not its last round's ----------------------
+//
+// An agentic turn is one provider call per tool round, and each of those calls
+// is billed. The engine used to return the final `res.usage` verbatim, so a
+// turn that made N calls reported only the Nth — the tokens the whole tool
+// phase cost were invisible. For Anthropic-compatible models (which report
+// input_tokens/output_tokens and no `total_tokens`) that meant a turn could
+// show nothing at all, which is the reported symptom.
+{
+  const ROUNDS = 3;
+  const usageTools = {
+    SUBAGENT_TOOL: 'task',
+    MUTATING_TOOLS: new Set(),
+    toolsFor: () => [{ type: 'function', function: { name: 'poke', parameters: {} } }],
+    async executeTool() {
+      return { ok: true, output: 'poked' };
+    },
+    toolResultText: (r) => r.output,
+  };
+
+  // Each round reports a DIFFERENT, recognisable cost so a last-round-only
+  // regression is distinguishable from a real sum.
+  let round = 0;
+  const usageProviders = {
+    async anthropicMessages() {
+      round += 1;
+      const usage = {
+        input_tokens: 100 * round,
+        output_tokens: 10 * round,
+        prompt_tokens: 100 * round,
+        completion_tokens: 10 * round,
+        total_tokens: 110 * round,
+      };
+      if (round > ROUNDS) {
+        return { model: 'x', choices: [{ message: { content: 'final summary' } }], usage };
+      }
+      return {
+        model: 'x',
+        usage,
+        choices: [
+          {
+            message: { content: '', tool_calls: [{ id: `c${round}`, function: { name: 'poke', arguments: '{}' } }] },
+            finish_reason: 'tool_calls',
+          },
+        ],
+      };
+    },
+  };
+
+  const usageEngine = createLocalEngine({
+    aegis, settings, ollama, providers: usageProviders, tools: usageTools,
+  });
+  const res = await usageEngine.chat({ class: 'anthropic', prompt: 'work', model: 'claude-x' }, () => {});
+  assert(textOf(res) === 'final summary', `turn completed, got ${JSON.stringify(res)}`);
+  // Round r reports 100r/10r tokens; the turn runs ROUNDS tool rounds plus the
+  // answering pass, so the totals are the sums over r = 1..ROUNDS+1.
+  const dispatches = ROUNDS + 1;
+  const expected = (per) => (per * dispatches * (dispatches + 1)) / 2;
+  assert(
+    res.usage.total_tokens === expected(110),
+    `usage sums every round of the turn, expected ${expected(110)}, got ${JSON.stringify(res.usage)}`
+  );
+  assert(res.usage.input_tokens === expected(100), `input tokens summed (${res.usage.input_tokens})`);
+  assert(res.usage.output_tokens === expected(10), `output tokens summed (${res.usage.output_tokens})`);
+  assert(res.usage.calls === dispatches, `dispatch count recorded (${res.usage.calls})`);
+  // The last round alone would be 110*dispatches — the exact value a
+  // last-round-only implementation would have reported.
+  assert(
+    res.usage.total_tokens !== 110 * dispatches,
+    'the reported total is the whole turn, not its final round'
+  );
+}
+
+// A provider that reports the Anthropic split with NO total still yields a
+// printable total, because the accumulator derives one.
+{
+  const splitOnly = {
+    async anthropicMessages() {
+      return {
+        model: 'x',
+        choices: [{ message: { content: 'done' } }],
+        usage: { input_tokens: 250, output_tokens: 50 },
+      };
+    },
+  };
+  const e = createLocalEngine({ aegis, settings, ollama, providers: splitOnly });
+  const res = await e.chat({ class: 'anthropic', prompt: 'hi', model: 'claude-x', tools: false }, () => {});
+  assert(
+    res.usage.total_tokens === 300,
+    `total derived from input+output, got ${JSON.stringify(res.usage)}`
+  );
+}
+
+// A turn whose provider reports no usage attaches none — an unknown count must
+// stay unknown rather than being summed into a confident "0 tokens".
+{
+  const mute = {
+    async anthropicMessages() {
+      return { model: 'x', choices: [{ message: { content: 'done' } }] };
+    },
+  };
+  const e = createLocalEngine({ aegis, settings, ollama, providers: mute });
+  const res = await e.chat({ class: 'anthropic', prompt: 'hi', model: 'claude-x', tools: false }, () => {});
+  assert(res.usage === undefined, `no reported usage stays absent, got ${JSON.stringify(res.usage)}`);
 }
 
 console.log('engine tests passed');

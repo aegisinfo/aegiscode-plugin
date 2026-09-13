@@ -380,6 +380,48 @@ async function openaiCompatible({
   return result;
 }
 
+/**
+ * Normalise an Anthropic usage object into the one shape every caller reads.
+ *
+ * Anthropic reports tokens split across TWO events and in TWO pieces:
+ *   - `message_start` carries the prompt side (`input_tokens`, plus
+ *     `cache_creation_input_tokens` / `cache_read_input_tokens`);
+ *   - `message_delta` carries ONLY the cumulative `output_tokens`.
+ * Nothing in the wire format is called `total_tokens`, which is the single
+ * field the renderer prints — so every Anthropic-compatible model reported no
+ * token count at all while OpenAI-compatible ones showed one.
+ *
+ * Returns `null` for an empty/absent usage so the caller can omit the field
+ * rather than advertise a fake `0`.
+ */
+function normalizeAnthropicUsage(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const num = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0);
+  const input = num(raw.input_tokens);
+  const output = num(raw.output_tokens);
+  const cacheRead = num(raw.cache_read_input_tokens);
+  const cacheCreate = num(raw.cache_creation_input_tokens);
+  // Cached prompt tokens are still prompt tokens: OpenAI counts them inside
+  // `prompt_tokens` (exposing the subset as prompt_tokens_details.cached), so
+  // folding them in keeps the two wire formats' numbers comparable — and a
+  // turn that reads a big cached prefix must not look free.
+  const prompt = input + cacheRead + cacheCreate;
+  if (!prompt && !output) return null;
+  const usage = {
+    // Anthropic's own names first, so a caller reading native blocks keeps both
+    // halves of the split it used to get (it previously got only output_tokens).
+    input_tokens: input,
+    output_tokens: output,
+    // OpenAI spellings, read by the renderer and every other transport here.
+    prompt_tokens: prompt,
+    completion_tokens: output,
+    total_tokens: prompt + output,
+  };
+  if (cacheRead) usage.cache_read_input_tokens = cacheRead;
+  if (cacheCreate) usage.cache_creation_input_tokens = cacheCreate;
+  return usage;
+}
+
 /** Anthropic Messages streaming chat (x-api-key + anthropic-version). */
 async function anthropicMessages({
   baseURL,
@@ -423,8 +465,11 @@ async function anthropicMessages({
 
   let fullText = '';
   let resultModel = modelId;
-  let usage = null;
   let stopReason = null;
+  // Accumulated, never replaced: the prompt half arrives on `message_start` and
+  // the output half on `message_delta`, so assignment (which is what this used
+  // to do) left whichever event came last owning the whole object.
+  const usageAcc = {};
   const toolBlocks = new Map(); // content-block index → {id, name, args}
 
   await requestStream({
@@ -446,7 +491,7 @@ async function anthropicMessages({
       }
       if (json.type === 'message_start' && json.message) {
         if (json.message.model) resultModel = json.message.model;
-        if (json.message.usage) usage = json.message.usage;
+        if (json.message.usage) Object.assign(usageAcc, json.message.usage);
       }
       // A tool_use block opens here; its arguments arrive as
       // input_json_delta fragments below (the text deltas we already parsed
@@ -474,13 +519,30 @@ async function anthropicMessages({
         }
       }
       if (json.type === 'message_delta') {
-        if (json.usage) usage = json.usage;
+        // `message_delta.usage` is PARTIAL — `output_tokens` only — so it is
+        // merged onto what `message_start` already reported, not assigned over
+        // it. Assigning it wholesale is what made prompt tokens vanish from
+        // every Anthropic-compatible call's accounting.
+        if (json.usage) {
+          for (const [k, v] of Object.entries(json.usage)) {
+            if (k === 'output_tokens') continue;
+            // Only take a field this event carries a real value for. Some
+            // Anthropic-compatible gateways echo the whole usage object here
+            // with a zeroed prompt side, and letting a bogus 0 overwrite the
+            // count message_start already reported is the same data loss in a
+            // different costume.
+            if (usageAcc[k] == null || (typeof v === 'number' && v > 0)) usageAcc[k] = v;
+          }
+          if (typeof json.usage.output_tokens === 'number') {
+            usageAcc.output_tokens = json.usage.output_tokens;
+          }
+        }
         if (json.delta && json.delta.stop_reason) stopReason = json.delta.stop_reason;
       }
       // Non-streaming fallback: a full Anthropic Message with content blocks.
       if (Array.isArray(json.content)) {
         if (json.model) resultModel = json.model;
-        if (json.usage) usage = json.usage;
+        if (json.usage) Object.assign(usageAcc, json.usage);
         if (json.stop_reason) stopReason = json.stop_reason;
         json.content.forEach((block, i) => {
           if (block && block.type === 'text' && block.text && !fullText) {
@@ -501,6 +563,7 @@ async function anthropicMessages({
 
   const toolCalls = finalizeToolCalls(toolBlocks);
   const result = { model: resultModel, choices: [{ message: { content: fullText } }] };
+  const usage = normalizeAnthropicUsage(usageAcc);
   if (usage) result.usage = usage;
   if (stopReason) result.stop_reason = stopReason;
   if (toolCalls.length) {

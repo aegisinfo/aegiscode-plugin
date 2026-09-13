@@ -13,9 +13,10 @@
  * selection, routed in the main process. If this file grows engine logic it is
  * wrong.
  *
- * `maxTokensCeiling`/`FLAT_CEILING` come from max-tokens.js, a sibling
- * classic script loaded before this one (see index.html) so the per-model
- * ceiling math stays unit-testable without window.aegis/window.models.
+ * `maxTokensCeiling`/`FLAT_CEILING` come from max-tokens.js and `usageTokens`
+ * from usage.js, sibling classic scripts loaded before this one (see
+ * index.html) so the per-model ceiling math and the token-usage → displayed
+ * number mapping stay unit-testable without window.aegis/window.models.
  */
 
 // Everything below runs inside an IIFE. preload.js's contextBridge.exposeInMainWorld
@@ -1431,9 +1432,8 @@ async function spawnPath(card, spec) {
     const bits = [spec.path.title];
     if (data && data.model) bits.push(data.model);
     else if (spec.model) bits.push(spec.model);
-    if (data && data.usage && data.usage.total_tokens != null) {
-      bits.push(`${data.usage.total_tokens} tokens`);
-    }
+    const flowTokens = usageTokens(data && data.usage);
+    if (flowTokens != null) bits.push(`${flowTokens} tokens`);
     meta.textContent = bits.join(' · ');
   } catch (err) {
     const message = err && err.message ? err.message : String(err);
@@ -2353,9 +2353,8 @@ async function send() {
     else if (model) bits.push(`model: ${model}`);
     bits.push(classLabel(cls));
     if (autonomous) bits.push(`autonomous (${effort}, ${workers || 3}w)`);
-    if (data && data.usage && data.usage.total_tokens != null) {
-      bits.push(`tokens: ${data.usage.total_tokens}`);
-    }
+    const turnTokens = usageTokens(data && data.usage);
+    if (turnTokens != null) bits.push(`tokens: ${turnTokens}`);
     addMessage('assistant', text, bits.join(' · ') || undefined, sessionId, toolLog);
 
     try {
