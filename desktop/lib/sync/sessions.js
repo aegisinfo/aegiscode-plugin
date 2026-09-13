@@ -183,6 +183,31 @@ function mergeRemoteSessions(dir, remoteSessions) {
   return merged;
 }
 
+/**
+ * Markdown export (session export, plan: Save as.../Export session). Each
+ * message becomes a `## Role` heading followed by its content verbatim —
+ * content is never re-escaped or re-wrapped, so any code fences a message
+ * already contains (assistant replies routinely have them) survive untouched
+ * instead of being nested inside an outer fence.
+ */
+function toMarkdown(session) {
+  const title = (session && (session.title || session.id)) || 'session';
+  const messages = (session && Array.isArray(session.messages)) ? session.messages : [];
+  const lines = [`# ${title}`, ''];
+  for (const message of messages) {
+    const role = (message && message.role) || 'unknown';
+    const heading = role.charAt(0).toUpperCase() + role.slice(1);
+    const content = (message && (message.content || message.text)) || '';
+    lines.push(`## ${heading}`, '', content, '');
+  }
+  return lines.join('\n');
+}
+
+/** JSON export: the session record as stored, pretty-printed. */
+function toJson(session) {
+  return JSON.stringify(session, null, 2);
+}
+
 module.exports = {
   sessionsFile,
   load,
@@ -196,4 +221,6 @@ module.exports = {
   markPending,
   listPending,
   mergeRemoteSessions,
+  toMarkdown,
+  toJson,
 };

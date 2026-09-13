@@ -77,6 +77,7 @@ const ELEMENT_IDS = {
   settingsList: 'settings-list',
   settingsHint: 'settings-hint',
   sessionsRefresh: 'sessions-refresh',
+  sessionsExport: 'sessions-export',
   sessionsList: 'sessions-list',
   sessionsHint: 'sessions-hint',
   syncNow: 'sync-now',
@@ -1357,6 +1358,27 @@ function appendToolActivity(row, tool, containerClass, beforeSelector) {
   return toolsEl;
 }
 
+/**
+ * Lazily create a message row's extended-reasoning block and return it.
+ *
+ * Only pooled brain turns emit `reasoning` deltas (the "work autonomously"
+ * fan-out's worker findings), so this block exists for AEGIS Cloud autonomous
+ * turns and nowhere else. It sits ABOVE `.body` — deliberation first, then the
+ * answer the synthesis pass writes — and is transient UI: it is never pushed
+ * into the thread history, so it cannot leak back into the model's context.
+ */
+function ensureReasoningEl(row) {
+  let el = row.querySelector('.reasoning');
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'reasoning';
+    const body = row.querySelector('.body');
+    if (body) row.insertBefore(el, body);
+    else row.appendChild(el);
+  }
+  return el;
+}
+
 /** The one-line summary shown above an approval card's diff (or alone, for
  *  exec, which has none). */
 function approvalSummary(tool, args) {
@@ -1930,6 +1952,34 @@ function openSession(id) {
     });
 }
 
+/**
+ * Export the open thread to a user-picked file — Markdown or JSON, both
+ * serialized in main.js from the same lib/sync/sessions.js record `sync.*`
+ * already uses as the source of truth. One code path for all three entry
+ * points: the sidebar's Export button and both File-menu items (see boot()
+ * wiring below) call this with the format they want.
+ */
+function exportSession(format) {
+  const id = currentSessionId;
+  if (!id) {
+    els.sessionsHint.textContent = 'no open session to export';
+    return;
+  }
+  aegis.exportSession(id, format)
+    .then((result) => {
+      if (result && result.ok) {
+        els.sessionsHint.textContent = `exported to ${result.filePath}`;
+      } else if (!result || !result.canceled) {
+        els.sessionsHint.textContent =
+          `export failed: ${(result && result.reason) || 'unknown error'}`;
+      }
+    })
+    .catch((err) => {
+      els.sessionsHint.textContent =
+        `export failed: ${err && err.message ? err.message : err}`;
+    });
+}
+
 function newChat() {
   abortBranches();
   // A fresh thread must never inherit the outgoing one's "allow for this
@@ -1945,6 +1995,28 @@ function newChat() {
   currentSessionId = null;
   threadMessages = [];
   flowCount = 0;
+}
+
+/**
+ * Route a resolved aegis:// link (main.js DEEP_LINK_CHANNEL, see
+ * preload.js onDeepLink) into the UI: `open` jumps straight to the named
+ * session; `new` starts a fresh thread with the prompt prefilled in the
+ * composer — prefilled, not auto-sent, so the user still confirms before
+ * anything reaches a model.
+ */
+function handleDeepLink(parsed) {
+  if (!parsed) return;
+  if (parsed.action === 'open' && parsed.sessionId) {
+    openSession(parsed.sessionId);
+    return;
+  }
+  if (parsed.action === 'new') {
+    newChat();
+    if (parsed.prompt) {
+      els.prompt.value = parsed.prompt;
+      els.prompt.focus();
+    }
+  }
 }
 
 // ------------------------------------------------------------------ actions
@@ -2000,8 +2072,21 @@ async function send() {
   }
 
   let streamedText = '';
+  let reasoningText = '';
   const toolLog = [];
   const onDelta = (chunk) => {
+    // Extended-reasoning trace from a pooled brain turn: the fan-out's worker
+    // findings, streamed before the synthesis pass writes the answer. Shown so
+    // "work autonomously" doesn't look idle for the whole worker phase.
+    if (chunk && typeof chunk.reasoning === 'string' && chunk.reasoning) {
+      reasoningText += chunk.reasoning;
+      if (pendingEl) {
+        pendingEl.classList.remove('pending');
+        ensureReasoningEl(pendingEl).textContent = reasoningText;
+        els.messages.scrollTop = els.messages.scrollHeight;
+      }
+      return;
+    }
     if (chunk && chunk.approval) {
       if (pendingEl) {
         pendingEl.classList.remove('pending');
@@ -2159,8 +2244,18 @@ async function init() {
   // pings these channels (see preload.js onMenuNewChat/onMenuSearch).
   if (aegis.onMenuNewChat) aegis.onMenuNewChat(newChat);
   if (aegis.onMenuSearch) aegis.onMenuSearch(openMemoryOverlay);
+  // File > Save as… / Export Session… — same "menu pings, renderer acts"
+  // pattern as New Chat/Search above; both call exportSession() with the
+  // format the menu label promised (see main.js buildAppMenu).
+  if (aegis.onMenuExportMarkdown) aegis.onMenuExportMarkdown(() => exportSession('markdown'));
+  if (aegis.onMenuExportJson) aegis.onMenuExportJson(() => exportSession('json'));
+  // aegis:// deep link (main.js sendDeepLinkToWindow) — delivered once the
+  // window has finished loading, so registering it here at boot is in time
+  // for both a cold-launch link and one that arrives while running.
+  if (aegis.onDeepLink) aegis.onDeepLink(handleDeepLink);
   els.sessionsRefresh.addEventListener('click', loadSessions);
   els.syncNow.addEventListener('click', syncNow);
+  els.sessionsExport.addEventListener('click', () => exportSession('markdown'));
 
   els.apiKeySave.addEventListener('click', saveApiKey);
   els.apiKeyVerify.addEventListener('click', verifyAegisKey);

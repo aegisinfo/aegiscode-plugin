@@ -20,6 +20,7 @@
 'use strict';
 
 const path = require('node:path');
+const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
 
 // Dev / CI / smoke-test layout: desktop/ lives inside the repo, so the shared
@@ -55,6 +56,7 @@ const providers = require('./lib/local/providers.js');
 const sessionStore = require('./lib/sync/sessions.js');
 const memoryQueue = require('./lib/sync/memory-queue.js');
 const windowState = require('./lib/window-state.js');
+const deepLink = require('./lib/deep-link.js');
 // Foreign-memory scanner (shared with client/foreign-memory.js). Same
 // resolution rule as the transport above: the canonical file inside the repo,
 // the predist-staged copy in a packaged app. Never forked logic — so it needs
@@ -88,6 +90,19 @@ const CHAT_DELTA_CHANNEL = `${IPC_PREFIX}chatDelta`;
  *  "new chat" and "open search" behaviour, so the menu just asks for it. */
 const MENU_NEW_CHAT_CHANNEL = `${IPC_PREFIX}menuNewChat`;
 const MENU_SEARCH_CHANNEL = `${IPC_PREFIX}menuSearch`;
+/** File > Save as… / Export session — same "menu has no state of its own,
+ *  renderer does the work" pattern as the two channels above: the renderer
+ *  knows the open session id, main.js just pings it. */
+const MENU_EXPORT_MARKDOWN_CHANNEL = `${IPC_PREFIX}menuExportMarkdown`;
+const MENU_EXPORT_JSON_CHANNEL = `${IPC_PREFIX}menuExportJson`;
+
+/**
+ * Main -> renderer push for a resolved aegis:// deep link (D? deep linking).
+ * Delivered once per link, after the target window has finished loading
+ * (see sendDeepLinkToWindow) so the renderer's listener is always attached
+ * before it arrives.
+ */
+const DEEP_LINK_CHANNEL = `${IPC_PREFIX}deepLink`;
 
 /**
  * Address one SSE delta to the stream that produced it (D2.2 multi-stream).
@@ -460,6 +475,64 @@ function registerIpc(ipcMain, aegis, dir, persistApiKey, openExternal, onReplyFi
       });
       continue;
     }
+    ipcMain.handle(`${IPC_PREFIX}${name}`, (_event, payload) => handler(payload));
+  }
+  return dispatch;
+}
+
+/** Turn a session title/id into a filesystem-safe base filename. */
+function safeExportBasename(session) {
+  const base = (session && (session.title || session.id)) || 'session';
+  return base.replace(/[^\w.-]+/g, '_').slice(0, 80) || 'session';
+}
+
+/**
+ * Pure mapping: `aegis:exportSession` -> read the session from the sessions
+ * store (lib/sync/sessions.js is the single source of truth for its shape),
+ * serialize it, then hand the (defaultPath, filters) to an injected
+ * `showSaveDialog` and the resulting path + content to an injected
+ * `writeFile`. Both are injected — exactly like `openExternal` on
+ * createIpcDispatch — so this is unit-testable with stub functions and needs
+ * no Electron import of its own; bootstrap() wires the real
+ * dialog.showSaveDialog / fs.promises.writeFile.
+ */
+function createExportDispatch(sessions, dir, showSaveDialog, writeFile) {
+  return {
+    exportSession: async (payload) => {
+      const sessionId = payload && payload.sessionId;
+      const format = payload && payload.format === 'json' ? 'json' : 'markdown';
+      const session = sessionId ? sessions.getSession(dir, sessionId) : null;
+      if (!session) return { ok: false, reason: 'session not found' };
+
+      const content = format === 'json' ? sessions.toJson(session) : sessions.toMarkdown(session);
+      const ext = format === 'json' ? 'json' : 'md';
+      const filters = format === 'json'
+        ? [{ name: 'JSON', extensions: ['json'] }]
+        : [{ name: 'Markdown', extensions: ['md'] }];
+
+      const dialogResult = await showSaveDialog({
+        defaultPath: `${safeExportBasename(session)}.${ext}`,
+        filters,
+      });
+      if (!dialogResult || dialogResult.canceled || !dialogResult.filePath) {
+        return { ok: false, canceled: true };
+      }
+
+      try {
+        await writeFile(dialogResult.filePath, content);
+      } catch (err) {
+        return { ok: false, reason: errorText(err) };
+      }
+      return { ok: true, filePath: dialogResult.filePath };
+    },
+  };
+}
+
+/** Register export dispatch methods as `aegis:<name>`, same convention as
+ *  registerIpc()/registerUpdateIpc() above. */
+function registerExportIpc(ipcMain, sessions, dir, showSaveDialog, writeFile) {
+  const dispatch = createExportDispatch(sessions, dir, showSaveDialog, writeFile);
+  for (const [name, handler] of Object.entries(dispatch)) {
     ipcMain.handle(`${IPC_PREFIX}${name}`, (_event, payload) => handler(payload));
   }
   return dispatch;
@@ -873,6 +946,25 @@ function sendToFocusedWindow(BrowserWindow, channel) {
   if (win && !win.isDestroyed()) win.webContents.send(channel);
 }
 
+/**
+ * Deliver a resolved deep link to one window over DEEP_LINK_CHANNEL. A cold
+ * launch (`aegis://…` handed to the OS while the app wasn't running) reaches
+ * this before the renderer script has run `aegis.onDeepLink(...)` — sending
+ * immediately would be lost, so a still-loading page gets the payload queued
+ * for its first 'did-finish-load' instead of sent right away.
+ */
+function sendDeepLinkToWindow(win, parsed) {
+  if (!win || win.isDestroyed() || !parsed) return;
+  const deliver = () => {
+    if (!win.isDestroyed()) win.webContents.send(DEEP_LINK_CHANNEL, parsed);
+  };
+  if (win.webContents.isLoadingMainFrame()) {
+    win.webContents.once('did-finish-load', deliver);
+  } else {
+    deliver();
+  }
+}
+
 /** Application menu: the platform defaults (Edit roles, mac's app/quit
  *  items) plus the native-shell accelerators this plan adds — New Chat
  *  (Cmd/Ctrl+N), Search (Cmd/Ctrl+K, opens the memory/session search
@@ -906,6 +998,20 @@ function buildAppMenu({ app, Menu, BrowserWindow, updateManager }) {
     accelerator: 'CmdOrCtrl+K',
     click: () => sendToFocusedWindow(BrowserWindow, MENU_SEARCH_CHANNEL),
   };
+  // Neither item knows the open session id — that's renderer state — so, like
+  // newChatItem/searchItem above, the click just pings the renderer, which
+  // calls window.aegis.exportSession() with its own currentSessionId. "Save
+  // as…" writes the human-readable Markdown form; "Export Session…" writes
+  // the raw JSON record (round-trippable, e.g. for re-import).
+  const saveAsItem = {
+    label: 'Save as…',
+    accelerator: 'CmdOrCtrl+S',
+    click: () => sendToFocusedWindow(BrowserWindow, MENU_EXPORT_MARKDOWN_CHANNEL),
+  };
+  const exportSessionItem = {
+    label: 'Export Session…',
+    click: () => sendToFocusedWindow(BrowserWindow, MENU_EXPORT_JSON_CHANNEL),
+  };
 
   const template = [
     ...(isMac
@@ -931,6 +1037,9 @@ function buildAppMenu({ app, Menu, BrowserWindow, updateManager }) {
       label: 'File',
       submenu: [
         newChatItem,
+        { type: 'separator' },
+        saveAsItem,
+        exportSessionItem,
         { type: 'separator' },
         ...(isMac ? [] : [checkForUpdatesItem, { type: 'separator' }]),
         isMac ? { role: 'close' } : { role: 'quit' },
@@ -976,7 +1085,7 @@ function buildAppMenu({ app, Menu, BrowserWindow, updateManager }) {
 // ---------------------------------------------------------------------------
 
 function bootstrap() {
-  const { app, BrowserWindow, ipcMain, safeStorage, shell, Menu, Notification, screen } = electron;
+  const { app, BrowserWindow, ipcMain, safeStorage, shell, Menu, Notification, screen, dialog } = electron;
 
   // A second launch (double-clicking the icon again, `aegis` from a second
   // terminal, …) must focus the existing window, not spawn a second process
@@ -984,12 +1093,37 @@ function bootstrap() {
   // see the 'second-instance' handler below, registered once the window
   // machinery it calls (createWindow/openWindows) exists later in this
   // function (safe: the event only fires well after bootstrap() returns).
+  //
+  // A second launch is also how an aegis:// link reaches an already-running
+  // app on Windows/Linux: the OS starts a second process with the URL on its
+  // argv, requestSingleInstanceLock() hands that argv to 'second-instance' on
+  // *this* process below, and the second process exits here.
   if (!app.requestSingleInstanceLock()) {
     app.quit();
     return;
   }
 
   app.setName('AEGIS Desktop');
+
+  // Register the aegis:// scheme so the OS routes those links to this app.
+  // Safe to call unconditionally (idempotent) and before 'ready'.
+  app.setAsDefaultProtocolClient(deepLink.PROTOCOL);
+
+  // macOS delivers a registered scheme via 'open-url', not argv — must be
+  // listened for before 'ready' or an activation during launch is dropped.
+  // A cold launch (app not yet running) races this handler against
+  // createWindow() below, so the parsed link is stashed and flushed once the
+  // first window exists; a warm launch (already running) delivers straight
+  // to the focused window, mirroring 'second-instance' below.
+  let pendingDeepLink = deepLink.parseDeepLinkArgv(process.argv);
+  app.on('open-url', (event, url) => {
+    event.preventDefault();
+    const parsed = deepLink.parseDeepLinkUrl(url);
+    if (!parsed) return;
+    const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+    if (win) sendDeepLinkToWindow(win, parsed);
+    else pendingDeepLink = parsed;
+  });
 
   const aegis = createClient();
   const dataDir = resolveUserDataDir(app);
@@ -1066,6 +1200,13 @@ function bootstrap() {
     onStatus: broadcastUpdateStatus,
   });
   registerUpdateIpc(ipcMain, updateManager);
+  registerExportIpc(
+    ipcMain,
+    sessionStore,
+    sessionsDir,
+    (opts) => dialog.showSaveDialog(BrowserWindow.getFocusedWindow(), opts),
+    (filePath, content) => fs.promises.writeFile(filePath, content, 'utf8')
+  );
   Menu.setApplicationMenu(buildAppMenu({ app, Menu, BrowserWindow, updateManager }));
 
   // The local file this window is allowed to be at — used both to restore a
@@ -1157,8 +1298,12 @@ function bootstrap() {
     // key was saved in-app (safeStorage is usable only after app ready).
     const persistedKey = settings.aegisRawKey();
     if (persistedKey) aegis.setApiKey(persistedKey);
-    createWindow();
+    const win = createWindow();
     updateManager.start();
+    // Cold-launch deep link (Linux/Windows argv, or a pre-ready macOS
+    // 'open-url'): the window didn't exist when it was parsed above, so
+    // deliver it now that one does.
+    if (pendingDeepLink) sendDeepLinkToWindow(win, pendingDeepLink);
   });
 
   app.on('window-all-closed', () => {
@@ -1171,16 +1316,23 @@ function bootstrap() {
 
   // Second launch while already running: focus (and restore/show) the
   // existing window instead of leaving the new process to just exit having
-  // done nothing visible.
-  app.on('second-instance', () => {
+  // done nothing visible. `argv` is the second process's argv — on
+  // Windows/Linux this is how an aegis:// link reaches an already-running
+  // app (see the 'open-url'/macOS comment above); the URL arrives as a bare
+  // positional entry (the Linux argv quirk deepLink.extractDeepLinkUrl scans
+  // for), not a named flag.
+  app.on('second-instance', (_event, argv) => {
     const win = BrowserWindow.getAllWindows()[0];
+    const parsed = deepLink.parseDeepLinkArgv(argv);
     if (!win) {
-      createWindow();
+      const created = createWindow();
+      if (parsed) sendDeepLinkToWindow(created, parsed);
       return;
     }
     if (win.isMinimized()) win.restore();
     if (!win.isVisible()) win.show();
     win.focus();
+    if (parsed) sendDeepLinkToWindow(win, parsed);
   });
 }
 
@@ -1197,6 +1349,9 @@ module.exports = {
   CHAT_DELTA_CHANNEL,
   MENU_NEW_CHAT_CHANNEL,
   MENU_SEARCH_CHANNEL,
+  MENU_EXPORT_MARKDOWN_CHANNEL,
+  MENU_EXPORT_JSON_CHANNEL,
+  DEEP_LINK_CHANNEL,
   UPDATE_STATUS_CHANNEL,
   UPDATE_CHECK_INTERVAL_MS,
   taggedChunk,
@@ -1212,4 +1367,8 @@ module.exports = {
   createUpdateDispatch,
   registerUpdateIpc,
   buildAppMenu,
+  createExportDispatch,
+  registerExportIpc,
+  safeExportBasename,
+  sendDeepLinkToWindow,
 };

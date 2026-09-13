@@ -20,6 +20,9 @@ const CHAT_DELTA_CHANNEL = `${IPC_PREFIX}chatDelta`;
 const UPDATE_STATUS_CHANNEL = `${IPC_PREFIX}updateStatus`;
 const MENU_NEW_CHAT_CHANNEL = `${IPC_PREFIX}menuNewChat`;
 const MENU_SEARCH_CHANNEL = `${IPC_PREFIX}menuSearch`;
+const MENU_EXPORT_MARKDOWN_CHANNEL = `${IPC_PREFIX}menuExportMarkdown`;
+const MENU_EXPORT_JSON_CHANNEL = `${IPC_PREFIX}menuExportJson`;
+const DEEP_LINK_CHANNEL = `${IPC_PREFIX}deepLink`;
 
 function invoke(name, payload) {
   return ipcRenderer.invoke(
@@ -145,6 +148,31 @@ const api = {
     const listener = () => onTrigger();
     ipcRenderer.on(MENU_SEARCH_CHANNEL, listener);
     return () => ipcRenderer.removeListener(MENU_SEARCH_CHANNEL, listener);
+  },
+  // File > Save as… / Export Session… (see main.js buildAppMenu): the menu
+  // has no renderer state of its own, so it just pings which format was
+  // asked for; the renderer's handler knows the open session id and calls
+  // exportSession() below — the same path the sidebar's Export button uses.
+  onMenuExportMarkdown: (onTrigger) => {
+    const listener = () => onTrigger();
+    ipcRenderer.on(MENU_EXPORT_MARKDOWN_CHANNEL, listener);
+    return () => ipcRenderer.removeListener(MENU_EXPORT_MARKDOWN_CHANNEL, listener);
+  },
+  onMenuExportJson: (onTrigger) => {
+    const listener = () => onTrigger();
+    ipcRenderer.on(MENU_EXPORT_JSON_CHANNEL, listener);
+    return () => ipcRenderer.removeListener(MENU_EXPORT_JSON_CHANNEL, listener);
+  },
+  // Writes the given session to a user-picked file (dialog.showSaveDialog
+  // runs in main — see main.js createExportDispatch); resolves
+  // { ok, filePath } or { ok: false, canceled | reason }.
+  exportSession: (sessionId, format) => invoke('exportSession', { sessionId, format }),
+  // aegis:// deep link (main.js sendDeepLinkToWindow): fires with
+  // { action: 'open', sessionId } or { action: 'new', prompt }.
+  onDeepLink: (onLink) => {
+    const listener = (_event, parsed) => onLink(parsed);
+    ipcRenderer.on(DEEP_LINK_CHANNEL, listener);
+    return () => ipcRenderer.removeListener(DEEP_LINK_CHANNEL, listener);
   },
 };
 
