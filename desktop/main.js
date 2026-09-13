@@ -20,6 +20,7 @@
 'use strict';
 
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 
 // Dev / CI / smoke-test layout: desktop/ lives inside the repo, so the shared
 // client resolves via ../client/aegis.js. In the packaged app the client is
@@ -53,6 +54,7 @@ const ollama = require('./lib/local/ollama.js');
 const providers = require('./lib/local/providers.js');
 const sessionStore = require('./lib/sync/sessions.js');
 const memoryQueue = require('./lib/sync/memory-queue.js');
+const windowState = require('./lib/window-state.js');
 // Foreign-memory scanner (shared with client/foreign-memory.js). Same
 // resolution rule as the transport above: the canonical file inside the repo,
 // the predist-staged copy in a packaged app. Never forked logic — so it needs
@@ -80,6 +82,12 @@ const TOOLS_PREFIX = 'tools:';
  * final result; live chunks travel on this single dedicated channel.
  */
 const CHAT_DELTA_CHANNEL = `${IPC_PREFIX}chatDelta`;
+
+/** Main -> renderer pushes for native menu accelerators (Cmd/Ctrl+N,
+ *  Cmd/Ctrl+K) that have no Electron role to bind to — the renderer owns
+ *  "new chat" and "open search" behaviour, so the menu just asks for it. */
+const MENU_NEW_CHAT_CHANNEL = `${IPC_PREFIX}menuNewChat`;
+const MENU_SEARCH_CHANNEL = `${IPC_PREFIX}menuSearch`;
 
 /**
  * Address one SSE delta to the stream that produced it (D2.2 multi-stream).
@@ -397,12 +405,26 @@ function createIpcDispatch(aegis, dir, persistApiKey, openExternal) {
   return dispatch;
 }
 
+/** Chain `onReplyFinished(event, result)` onto a dispatch promise without
+ *  changing what it resolves/rejects with — the notifier is best-effort
+ *  (native-notification side effect) and optional (undefined in every
+ *  headless test path, where it is simply never called). */
+function withReplyNotify(promise, event, onReplyFinished) {
+  if (!onReplyFinished) return promise;
+  return promise.then((result) => {
+    onReplyFinished(event, result);
+    return result;
+  });
+}
+
 /** Register every dispatch method as `aegis:<name>` on ipcMain. `dir` (the
  *  user-data dir) is optional and threaded through only for the memorySave
  *  offline-queue fallback — see saveMemoryWithQueue(). `openExternal` is the
  *  real electron.shell.openExternal, injected by bootstrap(); omitted in
- *  tests, where the safe no-op default in createIpcDispatch takes over. */
-function registerIpc(ipcMain, aegis, dir, persistApiKey, openExternal) {
+ *  tests, where the safe no-op default in createIpcDispatch takes over.
+ *  `onReplyFinished` is likewise bootstrap()-only: it fires the native
+ *  "reply ready" notification when the window is unfocused/hidden. */
+function registerIpc(ipcMain, aegis, dir, persistApiKey, openExternal, onReplyFinished) {
   const dispatch = createIpcDispatch(aegis, dir, persistApiKey, openExternal);
   for (const [name, handler] of Object.entries(dispatch)) {
     if (name === 'chatCompletion') {
@@ -413,7 +435,7 @@ function registerIpc(ipcMain, aegis, dir, persistApiKey, openExternal) {
       // dispatch (what the headless shell test drives directly).
       ipcMain.handle(`${IPC_PREFIX}${name}`, (event, payload) => {
         const opts = { ...(payload || {}) };
-        if (!opts.stream) return handler(opts);
+        if (!opts.stream) return withReplyNotify(handler(opts), event, onReplyFinished);
         const sender = event && event.sender;
         const forward = (chunk) => {
           if (
@@ -430,7 +452,11 @@ function registerIpc(ipcMain, aegis, dir, persistApiKey, openExternal) {
             sender.send(CHAT_DELTA_CHANNEL, taggedChunk(chunk, opts.sessionId));
           }
         };
-        return handler({ ...opts, stream: true, onStream: forward });
+        return withReplyNotify(
+          handler({ ...opts, stream: true, onStream: forward }),
+          event,
+          onReplyFinished
+        );
       });
       continue;
     }
@@ -648,8 +674,12 @@ function createSyncDispatch(sessions, dir, aegis) {
  * any pending sessions (plan §7 "retry on a heartbeat"): fire-and-forget,
  * never awaited, never throws — it just gives queued sessions another
  * chance to sync without a dedicated poller.
+ *
+ * `onReplyFinished`, like the identical param on registerIpc, is
+ * bootstrap()-only — it fires the native "reply ready" notification when the
+ * window is unfocused/hidden and is never set in the headless test path.
  */
-function registerModelIpc(ipcMain, engine, sessionsDir, aegis) {
+function registerModelIpc(ipcMain, engine, sessionsDir, aegis, onReplyFinished) {
   const modelDispatch = createModelDispatch(engine);
   const syncDispatch = createSyncDispatch(sessionStore, sessionsDir, aegis);
 
@@ -674,7 +704,11 @@ function registerModelIpc(ipcMain, engine, sessionsDir, aegis) {
             sender.send(CHAT_DELTA_CHANNEL, taggedChunk(chunk, opts.sessionId));
           }
         };
-        return handler({ ...opts, onStream: forward });
+        return withReplyNotify(
+          handler({ ...opts, onStream: forward }),
+          event,
+          onReplyFinished
+        );
       });
       continue;
     }
@@ -828,16 +862,51 @@ function registerUpdateIpc(ipcMain, updateManager) {
   return dispatch;
 }
 
+/** Send a no-payload ping to whichever window currently has focus (falling
+ *  back to the first open window so a menu click still does something when
+ *  triggered via a global accelerator with no window focused, e.g. right
+ *  after 'activate' on mac). Used for the two accelerators that have no
+ *  built-in Electron role — "new chat" and "search" are renderer state, not
+ *  something main.js can act on directly. */
+function sendToFocusedWindow(BrowserWindow, channel) {
+  const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+  if (win && !win.isDestroyed()) win.webContents.send(channel);
+}
+
 /** Application menu: the platform defaults (Edit roles, mac's app/quit
- *  items) plus one addition — a manual "Check for Updates…" entry, since
- *  the automatic checks in createUpdateManager.start() only run on ready
- *  and every few hours. */
-function buildAppMenu({ app, Menu, updateManager }) {
+ *  items) plus the native-shell accelerators this plan adds — New Chat
+ *  (Cmd/Ctrl+N), Search (Cmd/Ctrl+K, opens the memory/session search
+ *  overlay), Reload (Cmd/Ctrl+R) and Toggle DevTools (Cmd/Ctrl+Shift+I) are
+ *  plain Electron roles that already carry the right accelerator on every
+ *  platform — plus a manual "Check for Updates…" entry, since the automatic
+ *  checks in createUpdateManager.start() only run on ready and every few
+ *  hours, and an About item (mac gets one for free in the app submenu; other
+ *  platforms get a Help menu — role 'about' shows app.setAboutPanelOptions()
+ *  cross-platform since Electron 15). */
+function buildAppMenu({ app, Menu, BrowserWindow, updateManager }) {
   const isMac = process.platform === 'darwin';
+
+  app.setAboutPanelOptions({
+    applicationName: app.getName(),
+    applicationVersion: app.getVersion(),
+    version: app.getVersion(),
+  });
+
   const checkForUpdatesItem = {
     label: 'Check for Updates…',
     click: () => updateManager.check(),
   };
+  const newChatItem = {
+    label: 'New Chat',
+    accelerator: 'CmdOrCtrl+N',
+    click: () => sendToFocusedWindow(BrowserWindow, MENU_NEW_CHAT_CHANNEL),
+  };
+  const searchItem = {
+    label: 'Search…',
+    accelerator: 'CmdOrCtrl+K',
+    click: () => sendToFocusedWindow(BrowserWindow, MENU_SEARCH_CHANNEL),
+  };
+
   const template = [
     ...(isMac
       ? [
@@ -861,6 +930,8 @@ function buildAppMenu({ app, Menu, updateManager }) {
     {
       label: 'File',
       submenu: [
+        newChatItem,
+        { type: 'separator' },
         ...(isMac ? [] : [checkForUpdatesItem, { type: 'separator' }]),
         isMac ? { role: 'close' } : { role: 'quit' },
       ],
@@ -877,6 +948,25 @@ function buildAppMenu({ app, Menu, updateManager }) {
         { role: 'selectAll' },
       ],
     },
+    {
+      label: 'View',
+      submenu: [
+        searchItem,
+        { type: 'separator' },
+        { role: 'reload', accelerator: 'CmdOrCtrl+R' },
+        { role: 'forceReload' },
+        { type: 'separator' },
+        { role: 'toggleDevTools', accelerator: 'CmdOrCtrl+Shift+I' },
+      ],
+    },
+    ...(isMac
+      ? []
+      : [
+          {
+            label: 'Help',
+            submenu: [{ role: 'about' }],
+          },
+        ]),
   ];
   return Menu.buildFromTemplate(template);
 }
@@ -886,7 +976,18 @@ function buildAppMenu({ app, Menu, updateManager }) {
 // ---------------------------------------------------------------------------
 
 function bootstrap() {
-  const { app, BrowserWindow, ipcMain, safeStorage, shell, Menu } = electron;
+  const { app, BrowserWindow, ipcMain, safeStorage, shell, Menu, Notification, screen } = electron;
+
+  // A second launch (double-clicking the icon again, `aegis` from a second
+  // terminal, …) must focus the existing window, not spawn a second process
+  // fighting the first over the same on-disk settings/session/queue files —
+  // see the 'second-instance' handler below, registered once the window
+  // machinery it calls (createWindow/openWindows) exists later in this
+  // function (safe: the event only fires well after bootstrap() returns).
+  if (!app.requestSingleInstanceLock()) {
+    app.quit();
+    return;
+  }
 
   app.setName('AEGIS Desktop');
 
@@ -907,8 +1008,38 @@ function bootstrap() {
   // "Remove" delete the AEGIS key; defect #1).
   const persistApiKey = (key) => settings.setAegisKey(key);
 
-  registerIpc(ipcMain, aegis, dataDir, persistApiKey, (url) => shell.openExternal(url));
-  registerModelIpc(ipcMain, engine, sessionsDir, aegis);
+  // Native "reply ready" notification: main.js is exactly where every
+  // chatCompletion/model:chat call already resolves (withReplyNotify above),
+  // so this is the one place that can tell whether the window that asked for
+  // it is still the one in front. Fires only when that window is
+  // minimized/hidden/unfocused; a foregrounded chat needs no OS-level nudge.
+  // Notification.isSupported() gates platforms/sandboxes with no native
+  // notification centre so this never throws.
+  function notifyReplyIfUnfocused(event) {
+    const sender = event && event.sender;
+    const win = sender && BrowserWindow.fromWebContents(sender);
+    if (!win || win.isDestroyed()) return;
+    if (win.isFocused() && win.isVisible()) return;
+    if (!Notification || !Notification.isSupported()) return;
+    const note = new Notification({ title: 'AEGIS Desktop', body: 'Reply ready' });
+    note.on('click', () => {
+      if (win.isDestroyed()) return;
+      if (win.isMinimized()) win.restore();
+      if (!win.isVisible()) win.show();
+      win.focus();
+    });
+    note.show();
+  }
+
+  registerIpc(
+    ipcMain,
+    aegis,
+    dataDir,
+    persistApiKey,
+    (url) => shell.openExternal(url),
+    notifyReplyIfUnfocused
+  );
+  registerModelIpc(ipcMain, engine, sessionsDir, aegis, notifyReplyIfUnfocused);
 
   // electron-updater touches the network and expects a build-time
   // app-update.yml that only exists in a packaged app; requiring it is safe
@@ -935,12 +1066,25 @@ function bootstrap() {
     onStatus: broadcastUpdateStatus,
   });
   registerUpdateIpc(ipcMain, updateManager);
-  Menu.setApplicationMenu(buildAppMenu({ app, Menu, updateManager }));
+  Menu.setApplicationMenu(buildAppMenu({ app, Menu, BrowserWindow, updateManager }));
+
+  // The local file this window is allowed to be at — used both to restore a
+  // saved position/reload and to recognise (and block) any navigation away
+  // from it. pathToFileURL normalises the platform path separators so the
+  // will-navigate comparison below works identically on Windows.
+  const appUrl = pathToFileURL(path.join(__dirname, 'renderer', 'index.html')).href;
 
   function createWindow() {
+    const defaultBounds = { width: 1080, height: 720 };
+    const saved = windowState.load(dataDir);
+    // A saved position from a monitor that's since been unplugged (or a
+    // resolution that shrank) must never place the window off every
+    // connected display — that's a window that "opens" but nobody can see
+    // or reach.
+    const bounds = windowState.clampToDisplay(saved, screen.getAllDisplays(), defaultBounds);
+
     const win = new BrowserWindow({
-      width: 1080,
-      height: 720,
+      ...bounds,
       minWidth: 720,
       minHeight: 480,
       backgroundColor: '#0d1117',
@@ -954,7 +1098,53 @@ function bootstrap() {
       },
     });
 
-    win.setMenuBarVisibility(false);
+    if (saved && saved.isMaximized) win.maximize();
+
+    // Popups (window.open, target=_blank, a model-rendered link that isn't
+    // routed through the aegis:openExternal IPC method) never get a second
+    // BrowserWindow inside this app: an http/https URL goes to the OS
+    // browser, everything else (file://, javascript:, …) is dropped — same
+    // allowlist as isSafeExternalUrl above.
+    win.webContents.setWindowOpenHandler(({ url }) => {
+      if (isSafeExternalUrl(url)) shell.openExternal(url);
+      return { action: 'deny' };
+    });
+
+    // In-page navigation is likewise locked to this one local file. Without
+    // this, a compromised renderer script (or a link that reaches the
+    // BrowserWindow's own navigation instead of window.open) could carry the
+    // whole app to an arbitrary origin; http/https targets are hard-blocked
+    // here too, exactly like the popup case, and handed to the OS browser.
+    win.webContents.on('will-navigate', (navEvent, navigationUrl) => {
+      if (navigationUrl === appUrl) return;
+      navEvent.preventDefault();
+      if (isSafeExternalUrl(navigationUrl)) shell.openExternal(navigationUrl);
+    });
+
+    // Bounds persistence: debounced on resize/move (dragging fires dozens of
+    // events per second — writing a file on every one would be wasteful and
+    // would fight the OS for disk I/O mid-drag), and flushed unconditionally
+    // on close so the final size/position always lands. getNormalBounds() is
+    // used while maximized so un-maximizing next launch restores the pre-
+    // maximize rectangle instead of the full-screen one.
+    let saveBoundsTimer = null;
+    function persistBounds() {
+      if (win.isDestroyed()) return;
+      const isMaximized = win.isMaximized();
+      const rect = isMaximized ? win.getNormalBounds() : win.getBounds();
+      windowState.save(dataDir, { ...rect, isMaximized });
+    }
+    function scheduleBoundsSave() {
+      if (saveBoundsTimer) clearTimeout(saveBoundsTimer);
+      saveBoundsTimer = setTimeout(persistBounds, 500);
+    }
+    win.on('resize', scheduleBoundsSave);
+    win.on('move', scheduleBoundsSave);
+    win.on('close', () => {
+      if (saveBoundsTimer) clearTimeout(saveBoundsTimer);
+      persistBounds();
+    });
+
     win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
     openWindows.add(win);
     win.on('closed', () => openWindows.delete(win));
@@ -978,6 +1168,20 @@ function bootstrap() {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+
+  // Second launch while already running: focus (and restore/show) the
+  // existing window instead of leaving the new process to just exit having
+  // done nothing visible.
+  app.on('second-instance', () => {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (!win) {
+      createWindow();
+      return;
+    }
+    if (win.isMinimized()) win.restore();
+    if (!win.isVisible()) win.show();
+    win.focus();
+  });
 }
 
 if (electron && electron.app) {
@@ -991,6 +1195,8 @@ module.exports = {
   MODEL_PREFIX,
   SYNC_PREFIX,
   CHAT_DELTA_CHANNEL,
+  MENU_NEW_CHAT_CHANNEL,
+  MENU_SEARCH_CHANNEL,
   UPDATE_STATUS_CHANNEL,
   UPDATE_CHECK_INTERVAL_MS,
   taggedChunk,

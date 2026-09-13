@@ -1205,6 +1205,12 @@ async function spawnPath(card, spec) {
         prompt: `Original request:\n${spec.prompt}\n\n${spec.path.hint}`,
         model: spec.model,
         maxTokens: Math.min(spec.maxTokens || 1024, 1024),
+        // A single-shot summariser: one lead line and 3-5 bullets, no tools.
+        // Without this the engine puts the agent loop (and its tool schemas)
+        // behind a 1024-token budget, and a turn that comes back with neither
+        // text nor a tool call would trigger the empty-turn recovery — an
+        // extra dispatch this lane has no gathered context to justify.
+        tools: false,
         sessionId: id,
       },
       onDelta
@@ -2148,6 +2154,11 @@ async function init() {
   });
 
   els.newChat.addEventListener('click', newChat);
+  // Native File > New Chat (Cmd/Ctrl+N) and View > Search (Cmd/Ctrl+K) —
+  // main.js's application menu has no renderer state of its own, so it just
+  // pings these channels (see preload.js onMenuNewChat/onMenuSearch).
+  if (aegis.onMenuNewChat) aegis.onMenuNewChat(newChat);
+  if (aegis.onMenuSearch) aegis.onMenuSearch(openMemoryOverlay);
   els.sessionsRefresh.addEventListener('click', loadSessions);
   els.syncNow.addEventListener('click', syncNow);
 

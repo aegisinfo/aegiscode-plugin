@@ -18,6 +18,8 @@ const MODEL_PREFIX = 'model:';
 const SYNC_PREFIX = 'sync:';
 const CHAT_DELTA_CHANNEL = `${IPC_PREFIX}chatDelta`;
 const UPDATE_STATUS_CHANNEL = `${IPC_PREFIX}updateStatus`;
+const MENU_NEW_CHAT_CHANNEL = `${IPC_PREFIX}menuNewChat`;
+const MENU_SEARCH_CHANNEL = `${IPC_PREFIX}menuSearch`;
 
 function invoke(name, payload) {
   return ipcRenderer.invoke(
@@ -130,6 +132,19 @@ const api = {
     const listener = (_event, state) => onStatus(state);
     ipcRenderer.on(UPDATE_STATUS_CHANNEL, listener);
     return () => ipcRenderer.removeListener(UPDATE_STATUS_CHANNEL, listener);
+  },
+  // Native menu accelerators with no built-in Electron role (Cmd/Ctrl+N,
+  // Cmd/Ctrl+K — see main.js buildAppMenu): main.js just pings the channel,
+  // the renderer owns what "new chat" / "search" actually do.
+  onMenuNewChat: (onTrigger) => {
+    const listener = () => onTrigger();
+    ipcRenderer.on(MENU_NEW_CHAT_CHANNEL, listener);
+    return () => ipcRenderer.removeListener(MENU_NEW_CHAT_CHANNEL, listener);
+  },
+  onMenuSearch: (onTrigger) => {
+    const listener = () => onTrigger();
+    ipcRenderer.on(MENU_SEARCH_CHANNEL, listener);
+    return () => ipcRenderer.removeListener(MENU_SEARCH_CHANNEL, listener);
   },
 };
 

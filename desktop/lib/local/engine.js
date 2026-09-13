@@ -13,7 +13,16 @@
  * a provider answers with tool calls the loop executes them in-process and
  * feeds the results back for as many rounds as the model keeps calling tools
  * — there is no round cap; a turn ends when the model answers with text, or
- * the user cancels it (cancel()/AbortController). The window stays
+ * the user cancels it (cancel()/AbortController).
+ *
+ * Because a provider can signal "finished" with no answer attached, the two
+ * exit paths are guarded against the empty turn (see the loop's comment):
+ * a `finish_reason: 'length'` completion with no text is retried once with a
+ * doubled budget, and a turn that ends with neither text nor a tool call is
+ * re-dispatched once with `tools: []` plus a nudge so the model has to write
+ * up what it already gathered. A turn still empty after both throws instead
+ * of returning a blank completion for the renderer to paint "(empty
+ * response)" over. The window stays
  * contextIsolated + sandboxed: this module runs in the MAIN process, so the
  * executor never has to be exposed to the renderer.
  *
@@ -162,6 +171,80 @@ function extractToolCalls(res) {
 function assistantText(res) {
   const msg = res && res.choices && res.choices[0] && res.choices[0].message;
   return (msg && typeof msg.content === 'string' && msg.content) || '';
+}
+
+/**
+ * The provider's stop reason for a completion ('' when it sent none). The two
+ * wire formats report it in different places and both have to be read: the
+ * OpenAI shape carries `choices[0].finish_reason` (this is what providers.js
+ * and vendor/aegis.js emit), while providers.js's Anthropic parser puts
+ * `stop_reason` on the result and never sets a finish_reason on the choice.
+ */
+function finishReasonOf(res) {
+  const choice = res && res.choices && res.choices[0];
+  return (choice && choice.finish_reason) || (res && res.stop_reason) || '';
+}
+
+/**
+ * True when the provider cut the answer off at the token budget instead of
+ * the model choosing to stop. This is the diagnosis for the most common
+ * flavour of the empty turn: DeepSeek (and other reasoning models that bill
+ * hidden chain-of-thought against max_tokens) can spend the entire budget
+ * before emitting a single visible token, and the completion still arrives
+ * as a clean `finish_reason: 'length'` — no error, empty content. A tool
+ * call whose JSON was truncated mid-argument lands here too, where
+ * parseArgs() would otherwise silently yield `{}` and run the tool with no
+ * arguments, which is worse than retrying.
+ */
+function isTruncated(res) {
+  const reason = finishReasonOf(res);
+  // 'length' is OpenAI's wording, 'max_tokens' is Anthropic's — same event.
+  return reason === 'length' || reason === 'max_tokens';
+}
+
+/**
+ * Double a budget for the one-shot truncation retry. A budget the caller set
+ * on purpose (the flow lane's deliberate 1024-token cap, say) is merely
+ * doubled — the floor only applies when nothing was set at all, so a retry
+ * can never silently override a small cap by an order of magnitude.
+ */
+function doubledBudget(maxTokens) {
+  const n = Number(maxTokens) || 0;
+  return n > 0 ? n * 2 : 8192;
+}
+
+/**
+ * The follow-up shown to a model that ended its turn with neither text nor a
+ * tool call. Sent as a plain user message (never as a tool result — there is
+ * no pending tool call to answer) so every provider accepts it verbatim.
+ */
+const EMPTY_TURN_NUDGE =
+  'Your previous reply came back empty — it contained no answer and no tool call. ' +
+  'Write your answer now, using only the information already gathered above. ' +
+  'No tools are available in this reply, so do not call any: respond in plain ' +
+  'prose or markdown.';
+
+/**
+ * Last resort for a turn that is still empty after the synthesis pass.
+ *
+ * Throws rather than returning the blank completion. Returning it is what
+ * produces the renderer's undiagnosable "(empty response)" bubble, and
+ * synthesising fake assistant text instead would be worse: renderer/app.js
+ * persists whatever comes back as the assistant's own message and syncs it
+ * to the aegis account, so the notice would re-enter the model's context on
+ * the next turn as something it had said. Failing loudly leaves the turn's
+ * real tool log on screen, keeps the transcript honest, and names the cause
+ * (renderer prints `Error: <message>`).
+ */
+function emptyTurnError({ cls, model, maxTokens, finishReason }) {
+  const err = new Error(
+    `The model returned no answer after ${cls}/${model} was asked to summarise its results ` +
+      `(stop reason: ${finishReason || 'none'}, max_tokens: ${maxTokens}). The token budget ` +
+      'was most likely consumed before any visible text — raise the max-tokens setting, ' +
+      'or lower effort.'
+  );
+  err.status = 502;
+  return err;
 }
 
 function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBuilder, env }) {
@@ -505,11 +588,35 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
 
       // No round cap: a model that keeps calling tools keeps going for as
       // long as it wants to. The old fixed cap (12 rounds) cut off genuinely
-      // long research/exploration turns mid-investigation and handed back a
-      // response whose text content was empty (renderer/app.js then showed
-      // "(empty response)") even though real tool results were sitting in
-      // `history` unused. The only way out now is the model answering with
-      // text, or the user cancelling via cancel()/AbortController.
+      // long research/exploration turns mid-investigation. A turn ends when
+      // the model answers with text, or the user cancels.
+      //
+      // Both of those exit paths need a guard, because a provider's
+      // "I'm finished" signal can arrive with no answer attached — which is
+      // exactly how the renderer came to paint "(empty response)" over a turn
+      // that had actually done real work:
+      //   - truncated (finish_reason 'length'): the budget was consumed
+      //     before any visible text (DeepSeek's hidden reasoning bills
+      //     against max_tokens), or mid tool-call JSON. One doubled retry.
+      //   - empty (no tool call AND no text): re-dispatch once with no tools
+      //     and a nudge, so the model has to write up what it already found.
+      // Each guard fires at most once per turn, so a provider that is simply
+      // broken still terminates instead of looping.
+      let truncationRetried = false;
+      let synthesisDone = false;
+
+      // Round 1's shorthand prompt was sent as `prompt`, not as a message, so
+      // any follow-up dispatch in this turn must fold it into the history
+      // first or the model would be shown a nudge with no question above it.
+      const foldPromptIntoHistory = () => {
+        if (prompt === '') return;
+        const last = history[history.length - 1];
+        if (!(last && last.role === 'user' && last.content === prompt)) {
+          history.push({ role: 'user', content: prompt });
+        }
+        prompt = '';
+      };
+
       for (;;) {
         const opts = { ...base, system, messages: history, prompt, tools: toolSchemas };
         let res;
@@ -524,19 +631,46 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
           res = await dispatch(cls, { ...opts, tools: [] });
         }
 
-        const calls = toolSchemas.length ? extractToolCalls(res) : [];
-        if (!calls.length) return res;
-
-        // Continuing the loop means round 1's shorthand prompt has to become
-        // part of the history — it was sent as `prompt`, not as a message, so
-        // without this the model would see a tool result and no question.
-        if (prompt !== '') {
-          const last = history[history.length - 1];
-          if (!(last && last.role === 'user' && last.content === prompt)) {
-            history.push({ role: 'user', content: prompt });
-          }
-          prompt = '';
+        // Budget exhausted before the answer was written. Doubling it costs
+        // one request and converts a dead turn into a real one; a second
+        // 'length' result is accepted as-is so a hard-capped model can't
+        // spin here forever.
+        //
+        // Gated on empty text on purpose. Every transport builds `content`
+        // by concatenating the deltas it already forwarded to onDelta, so
+        // empty content means nothing was streamed and re-dispatching cannot
+        // double up in the renderer's live view. When text *has* arrived the
+        // turn is not empty — the answer is merely truncated — and a retry
+        // would stream it a second time onto the same bubble.
+        if (!truncationRetried && !assistantText(res) && isTruncated(res)) {
+          truncationRetried = true;
+          res = await dispatch(cls, { ...opts, maxTokens: doubledBudget(opts.maxTokens) });
         }
+
+        const calls = toolSchemas.length ? extractToolCalls(res) : [];
+        if (!calls.length) {
+          if (assistantText(res) || synthesisDone || !toolsEnabled) return res;
+          // The model stopped without calling a tool and without saying
+          // anything. Force the summary out of the context it already holds
+          // instead of handing the renderer a blank completion. Skipped when
+          // the caller opted out of the agent loop (`tools: false`): there is
+          // no gathered context to rescue, so a bare completion is just that.
+          synthesisDone = true;
+          foldPromptIntoHistory();
+          history.push({ role: 'user', content: EMPTY_TURN_NUDGE });
+          res = await dispatch(cls, { ...opts, messages: history, prompt: '', tools: [] });
+          if (!assistantText(res)) {
+            throw emptyTurnError({
+              cls,
+              model,
+              maxTokens: opts.maxTokens,
+              finishReason: finishReasonOf(res),
+            });
+          }
+          return res;
+        }
+
+        foldPromptIntoHistory();
 
         // Thread the assistant turn (its tool_calls) and each result back in
         // the shapes both wire formats accept (providers.js normalises them).
