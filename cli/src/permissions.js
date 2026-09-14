@@ -29,6 +29,40 @@
 
 const RULE_RE = /^(\w+)(?:\((.*)\))?$/;
 
+/**
+ * Tool-name aliases. The shipped engine (desktop/lib/local/tools.js) names its
+ * tools readFile/writeFile/editFile/listDir/glob/grep/exec/task, while this
+ * module was ported from the reference and keyed on that CLI's names —
+ * Read/Write/Edit/Glob/Grep/Bash/Task. Those reference names are also what
+ * users write into /permissions, so both spellings must fold onto one
+ * capability. Keying on the reference's spelling alone meant subjectFor()
+ * returned '' for every tool the engine actually calls: `exec(git *)` never
+ * matched its subject, `Read(*.env)` never matched a readFile, and the
+ * multi-directory rail never fired — a permission system blind to the very
+ * tools it was meant to govern.
+ */
+const TOOL_ALIAS = {
+  exec: 'shell', Bash: 'shell',
+  readFile: 'read', Read: 'read',
+  writeFile: 'write', Write: 'write',
+  editFile: 'edit', Edit: 'edit',
+  listDir: 'list', LS: 'list',
+  glob: 'glob', Glob: 'glob',
+  grep: 'grep', Grep: 'grep',
+  task: 'task', Task: 'task',
+};
+
+/** Fold either registry's name for a tool onto the capability it names. */
+function canonTool(name) {
+  const key = String(name == null ? '' : name);
+  return TOOL_ALIAS[key] || key;
+}
+
+/** True for the engine's `exec` and the reference's `Bash` alike. */
+function isShellTool(toolName) {
+  return canonTool(toolName) === 'shell';
+}
+
 function globToRegex(pattern) {
   let re = '^';
   for (const c of pattern) {
@@ -37,23 +71,28 @@ function globToRegex(pattern) {
     else if (/[.+^${}()|[\]\\]/.test(c)) re += `\\${c}`;
     else re += c;
   }
-  return new RegExp(re + '$');
+  return new RegExp(re + "$");
 }
 
 /** The subject a rule's pattern matches against, per tool. */
 function subjectFor(toolName, args = {}) {
-  if (toolName === 'Bash') return String(args.command || '');
-  if (toolName === 'Read' || toolName === 'Write' || toolName === 'Edit') return String(args.file_path || '');
-  if (toolName === 'Glob' || toolName === 'Grep') return String(args.pattern || '');
-  return '';
+  switch (canonTool(toolName)) {
+    case 'shell': return String(args.command || '');
+    case 'read': case 'write': case 'edit': return String(args.file_path || '');
+    case 'glob': case 'grep': return String(args.pattern || '');
+    case 'list': return String(args.path || '');
+    default: return '';
+  }
 }
 
 function matchRule(rule, toolName, subject) {
   const m = RULE_RE.exec(String(rule || '').trim());
   if (!m) return false;
   const [, tool, pattern] = m;
-  if (tool !== toolName) return false;
-  if (pattern === undefined) return true; // bare "Bash" matches every call
+  // A rule spelled with the reference's name governs the engine's tool and
+  // vice versa: `Bash(git *)` and `exec(git *)` are one rule, not two.
+  if (canonTool(tool) !== canonTool(toolName)) return false;
+  if (pattern === undefined) return true; // bare "Bash"/"exec" matches every call
   try { return globToRegex(pattern).test(subject); } catch { return false; }
 }
 
@@ -90,13 +129,17 @@ function evalPermission(toolName, args, rules = {}) {
   const subject = subjectFor(toolName, args);
   if (matchesAny(rules.deny, toolName, subject)) return 'deny';
   if (matchesAny(rules.allow, toolName, subject)) return 'allow';
-  if (toolName === 'Bash' && isMultiDirCommand(args && args.command)) return 'ask';
+  if (isShellTool(toolName) && isMultiDirCommand(args && args.command)) return 'ask';
   if (matchesAny(rules.ask, toolName, subject)) return 'ask';
   if (rules.explicitAsk && rules.defaultMode === 'ask') return 'ask';
   return 'allow';
 }
 
 module.exports = {
+  canonTool,
+  isShellTool,
+  subjectFor,
+  matchRule,
   isMultiDirCommand,
   evalPermission,
 };

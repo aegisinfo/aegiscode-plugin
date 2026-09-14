@@ -168,21 +168,32 @@ assert(calls[calls.length - 1][0] === 'openai', 'custom routes to openaiCompatib
 await engine.chat({ class: 'anthropic', prompt: 'hi', model: 'x' }, () => {});
 assert(calls[calls.length - 1][0] === 'anthropic', 'anthropic routes to anthropicMessages');
 
-// ---- DeepSeek reasoning floor (matches aegiscodex-dev's own DeepSeek fix) --
+// ---- DeepSeek reasoning budget: one authority per call --------------------
 //
-// A user pointing "Custom OpenAI-compatible" straight at DeepSeek's API with
-// the renderer's 4k default hits the same bug aegiscodex-dev already fixed
-// for itself: DeepSeek's reasoning models spend max_tokens on hidden
-// chain-of-thought, so a low cap burns the whole budget and the turn
-// finishes with empty content. The floor only raises a too-low value, never
-// lowers an explicit higher one, and never touches non-reasoning ids.
+// A caller-stated number IS the budget and is honoured verbatim. For the
+// non-pooled classes the renderer's max-tokens dropdown is their only budget
+// control (updateBudgetControls hides the effort row for them), so raising it
+// to an effort rung is what made the figure beside the dropdown untrustworthy:
+// a caller asking for 1024 used to run on 32768. The effort rung is the
+// DEFAULT, consulted only when no number was stated at all. An over-budget
+// turn is caught by the doubled-budget retry and emptyTurnError instead of by
+// inflating the ceiling up front — escalating on a demonstrated empty turn
+// costs less than granting the top rung to every reasoning call.
 for (const model of ['deepseek-flash', 'deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-reasoner']) {
   await engine.chat({ class: 'openai-compat', prompt: 'hi', model, maxTokens: 4096 }, () => {});
   const [, args] = calls[calls.length - 1];
-  assert(args.maxTokens === 32768, `${model} floors the default 4k up to the high-effort budget, got ${args.maxTokens}`);
+  assert(args.maxTokens === 4096, `${model} honours a stated ceiling verbatim, got ${args.maxTokens}`);
 }
-await engine.chat({ class: 'openai-compat', prompt: 'hi', model: 'deepseek-flash', maxTokens: 4096, effort: 'low' }, () => {});
-assert(calls[calls.length - 1][1].maxTokens === 8192, 'an explicit low effort uses the low-effort budget (8192)');
+
+// The case the old Math.max() overrode by an order of magnitude.
+await engine.chat({ class: 'openai-compat', prompt: 'hi', model: 'deepseek-v4-pro', maxTokens: 1024 }, () => {});
+assert(calls[calls.length - 1][1].maxTokens === 1024, 'a deliberate small cap is never raised to a rung');
+
+// No number stated at all -> the effort rung supplies the default.
+await engine.chat({ class: 'openai-compat', prompt: 'hi', model: 'deepseek-flash' }, () => {});
+assert(calls[calls.length - 1][1].maxTokens === 32768, 'an unstated budget defaults to the high rung');
+await engine.chat({ class: 'openai-compat', prompt: 'hi', model: 'deepseek-flash', effort: 'low' }, () => {});
+assert(calls[calls.length - 1][1].maxTokens === 8192, 'an unstated budget at low effort uses the low rung');
 
 // A non-reasoning DeepSeek id (deepseek-chat) and a non-DeepSeek model both
 // pass their maxTokens through untouched.
@@ -191,10 +202,9 @@ assert(calls[calls.length - 1][1].maxTokens === 4096, 'deepseek-chat (non-reason
 await engine.chat({ class: 'openai-compat', prompt: 'hi', model: 'gpt-4o-mini', maxTokens: 4096 }, () => {});
 assert(calls[calls.length - 1][1].maxTokens === 4096, 'a non-DeepSeek model is not floored');
 
-// The floor only ever raises — an explicit choice already above the budget
-// (e.g. "adaptive" sending the model's real ceiling) is left alone.
+// "adaptive" sends the model's real ceiling; it passes through unchanged.
 await engine.chat({ class: 'openai-compat', prompt: 'hi', model: 'deepseek-v4-pro', maxTokens: 300000 }, () => {});
-assert(calls[calls.length - 1][1].maxTokens === 300000, 'an already-higher explicit value is never lowered');
+assert(calls[calls.length - 1][1].maxTokens === 300000, 'a stated ceiling above the ladder passes through unchanged');
 
 // autonomous + effort/workers reach aegis1's pool_brain via `extra`
 // (services/pool_brain.py parse_brain_request reads body.effort/body.workers)

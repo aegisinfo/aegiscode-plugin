@@ -109,18 +109,38 @@ const EFFORT_TOKEN_BUDGET = { low: 8192, medium: 16384, high: 32768 };
 const AUTONOMOUS_IDLE_TIMEOUT_MS = 15 * 60_000;
 
 /**
- * Only ever raises a too-low budget for a DeepSeek reasoning model — never
- * lowers whatever the caller (renderer dropdown, or "adaptive" ceiling)
- * already asked for. Everything else (non-DeepSeek models, non-reasoning
- * DeepSeek ids like deepseek-chat) passes through untouched. Effort defaults
- * to 'high' since custom endpoints have no effort selector of their own
- * (that UI is aegis-class/autonomous-only) — matching aegiscodex-dev's own
- * default effort.
+ * The budget a DeepSeek reasoning model runs on, resolved from EXACTLY ONE
+ * authority per call.
+ *
+ * A caller-stated number IS the budget, and is returned verbatim. For the
+ * non-pooled classes the renderer's max-tokens dropdown is the only budget
+ * control on offer — updateBudgetControls hides the effort row for them — so
+ * silently raising that number to an effort rung is precisely what made the
+ * figure beside the dropdown untrustworthy. The old form was
+ * `Math.max(stated, EFFORT_TOKEN_BUDGET[eff])`, which could only ever raise a
+ * deliberate cap: a caller asking for 1024 ran on 32768, and the number the
+ * UI displayed was never the number the call used.
+ *
+ * The effort rung is the DEFAULT, consulted only when no number was stated at
+ * all (the pooled class, which the renderer sends `effort` for and which the
+ * server sizes itself). This is the same rule doubledBudget() follows for its
+ * truncation retry: a stated cap is never overridden, by a rung or an order of
+ * magnitude.
+ *
+ * Truncated and empty turns are handled where they belong — the doubled-budget
+ * retry plus emptyTurnError — rather than by inflating the caller's ceiling up
+ * front. Escalating on a demonstrated empty turn is strictly cheaper than
+ * pre-emptively granting the top rung to every reasoning call.
+ *
+ * Everything else (non-DeepSeek models, non-reasoning DeepSeek ids like
+ * deepseek-chat) passes through untouched.
  */
-function deepseekReasoningFloor(model, maxTokens, effort) {
+function reasoningBudget(model, maxTokens, effort) {
   if (!DEEPSEEK_REASONING_MODEL_RE.test(String(model || ''))) return maxTokens;
+  const stated = Number(maxTokens);
+  if (Number.isFinite(stated) && stated > 0) return stated;
   const eff = effort === 'low' || effort === 'medium' ? effort : 'high';
-  return Math.max(Number(maxTokens) || 0, EFFORT_TOKEN_BUDGET[eff]);
+  return EFFORT_TOKEN_BUDGET[eff];
 }
 
 /** Relay model entries arrive as ids or objects; keep only real model ids. */
@@ -545,7 +565,24 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
         messages: opts.messages,
         model: opts.model,
         mode: opts.mode,
-        maxTokens: opts.maxTokens,
+        // Only a cap the caller STATED travels; an effort-derived one does not.
+        // The server derives its own budget from `effort` (aegis1 pass_budgets
+        // splits its ladder across workers + synthesis), so forwarding the
+        // derived number states one decision twice — and the copies had already
+        // drifted: 974adc5 doubled aegis1's ladder while this side stood still,
+        // leaving the client capping below the budget it displayed. The cap was
+        // never the one the renderer showed either (updateBudgetControls hides
+        // the max-tokens dropdown for the pooled class). Omitting the field is
+        // what tells aegis1 "no cap stated — let effort decide", the same
+        // contract aegiscodex-dev sends.
+        //
+        // A cap the caller DID state is a different thing, and dropping it was
+        // a bug: aegis1 reads a body max_tokens as a ceiling over its ladder,
+        // so omitting it does not bound the call — it grants the full top rung
+        // instead. A deliberate 4096 would have run at 32768, which is the same
+        // "only ever raise the caller's ceiling" failure the old
+        // Math.max(Number(maxTokens) || 0, EFFORT_TOKEN_BUDGET[eff]) had.
+        maxTokens: opts.statedMaxTokens,
         stream: opts.stream !== false,
         // The pooled (Nexus) brain is streamed, and an OpenAI-compatible SSE
         // stream reports no token usage unless asked. Without this the Aegis
@@ -638,7 +675,16 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
   async function chat(payload, onDelta) {
     const cls = payload && payload.class;
     const model = payload && payload.model;
-    const maxTokens = deepseekReasoningFloor(model, payload && payload.maxTokens, payload && payload.effort);
+    const maxTokens = reasoningBudget(model, payload && payload.maxTokens, payload && payload.effort);
+    // The caller's OWN number, kept apart from `maxTokens` above. That one
+    // collapses two different facts into a single value — "the caller stated
+    // 4096" and "effort implies 32768" — and the pooled path must treat them
+    // differently. A stated cap is a liability ceiling the server honours
+    // downward (aegis1 pass_budgets: total = min(ladder, max_tokens x passes));
+    // an effort-derived one is the server's own arithmetic stated twice, and
+    // sending it is how the two copies came to disagree. So the pooled call
+    // forwards only what the caller actually asked for.
+    const statedMaxTokens = Number(payload && payload.maxTokens) > 0 ? Number(payload.maxTokens) : undefined;
     // "Work autonomously" — routes this call through aegis1's pool_brain
     // worker fan-out (services/pool_brain.py: N reasoning workers + a
     // synthesis pass) instead of a single provider call. UI-gated to the
@@ -710,7 +756,7 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
       }
 
       const base = {
-        cls, model, mode: payload && payload.mode, maxTokens, autonomous, sessionId, signal, onDelta, cfg, apiKey, toolChoice,
+        cls, model, mode: payload && payload.mode, maxTokens, statedMaxTokens, autonomous, sessionId, signal, onDelta, cfg, apiKey, toolChoice,
         effort: payload && payload.effort,
         workers: payload && payload.workers,
         onReasoning,
@@ -834,6 +880,12 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
             ...opts,
             singlePass: true,
             maxTokens: doubledBudget(opts.maxTokens),
+            // Doubling applies to the pooled path only when the caller stated a
+            // number. With none stated, the server's effort ladder IS the
+            // budget, and sending doubledBudget's 8192 floor would *lower* it
+            // (aegis1 reads max_tokens as a ceiling over the ladder) — a
+            // "double the budget" retry that halves it at high effort.
+            statedMaxTokens: opts.statedMaxTokens ? doubledBudget(opts.statedMaxTokens) : undefined,
           });
           addUsage(res);
         }

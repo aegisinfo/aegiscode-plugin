@@ -72,7 +72,16 @@ const LIVE_CATALOG = [
   assert(cat.every((m) => typeof m.label === 'string' && m.label.length), 'every entry has a display label');
   const brain = cat.find((m) => m.id === 'nexus-brain');
   eq(brain.aliasOf, null, 'the canonical brain tier is not an alias');
-  assert(/3 workers/.test(brain.note), `the brain tier's note says what pinning it costs (got ${JSON.stringify(brain.note)})`);
+  // The note must state what pinning the tier COSTS — several billed provider
+  // calls per turn, not one — but not a frozen worker count. That count is
+  // sized per request (aegis1 estimate_workers clamps min(size-of-ask,
+  // EFFORT_MAX_WORKERS[effort])), so "3 workers" was true only for a medium
+  // rung on a medium ask, and pinning it in a label states a number the
+  // endpoint can contradict. Assert the shape and its governor instead.
+  assert(
+    /fan-out/.test(brain.note) && /effort/.test(brain.note),
+    `the brain tier's note states its cost shape — a multi-call fan-out sized by effort, never a frozen worker count (got ${JSON.stringify(brain.note)})`
+  );
   const alias = cat.find((m) => m.id === 'aegis-brain');
   eq(alias.aliasOf, 'nexus-brain', 'an alias tier records what it aliases');
   assert(alias.note.includes('nexus-brain'), `the alias note names the canonical id (got ${JSON.stringify(alias.note)})`);
