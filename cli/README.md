@@ -38,11 +38,21 @@ npm install -g aegiscode
 node cli/bin/aegiscode.js
 ```
 
-Requires Node 18+. Set your key once:
+Requires Node 18+. Save your key once — it goes to `~/.aegiscode/credentials.json`
+(mode `0600`) and is then picked up by every later launch, script and shell:
 
 ```bash
-export AEGIS_API_KEY="aegis_..."
+aegiscode login                    # prompts, no echo
+aegiscode login "aegis_..."        # or inline
+aegiscode key status               # masked key + which source is in use
+aegiscode logout                   # remove it
 ```
+
+`AEGIS_API_KEY` still works and still wins (useful in CI, or for a one-off);
+`aegiscode --key <key>` applies to a single run and is never saved. A key an
+older AEGIS CLI left in `~/.aegiscode/config.json` is picked up and copied into
+the 0600 store automatically — `/cloud status` says so if the plaintext copy is
+still there.
 
 ## Use
 
@@ -101,8 +111,8 @@ command for command — 75 entries across nine categories:
 | Session & context | `/clear` `/compact` `/cost` `/exit` `/new` `/recap` `/resume` `/rewind` `/agents` `/status` `/teleport` `/version` `/clone` `/schedule` |
 | Workspace | `/run` `/build` `/cd` `/copy` `/init` `/review` `/prs` |
 | Model & behavior | `/model` `/effort` `/thinking` `/theme` `/vim` `/router` `/confirm` `/yolo` `/permissions` `/hooks` `/skills` `/mcp` |
-| Data | `/context` `/export` `/tokens` |
-| Auth | `/credentials` `/byok` `/byok-set` `/byok-rm` |
+| Data | `/context` `/export` `/tokens` `/sync` |
+| Auth | `/key` `/login` `/logout` `/credentials` `/byok` `/byok-set` `/byok-rm` |
 | Support | `/help` `/doctor` `/troubleshooting` `/feedback` `/bug` `/issue` `/onboarding` `/benchmark` `/release-notes` `/billing` `/cloud` |
 | Aegis plugin | `/aegis-ask` `/aegis-status` `/aegis-recall` `/aegis-remember` `/memory` `/aegis-council` `/aegis-multi` `/aegis-print` `/aegis-import` `/tool` |
 | Fun | `/radio` `/waifu` |
@@ -119,10 +129,35 @@ the project and writes `AEGIS.md`, `/export` writes the transcript out,
 `/resume` and `/rewind` read the session store, `/cd` moves the working
 directory, `/doctor` runs diagnostics.
 
-The only two commands that answer "not available" are `/login` and `/logout`:
-their whole premise is Claude Code's own auth loop, which this client does not
-participate in — it authenticates with an AEGIS key (or your own provider key
-via `/byok-set`). They say so, and point at the working alternative.
+## Account key and cloud sync
+
+Three ways in, one store: `aegiscode login <key>`, `/key <api_key>` (or a bare
+`/key` to paste it echo-off), and `$AEGIS_API_KEY`. The first two persist;
+the env var outranks the store and needs no persistence. `/login` used to be an
+unavailable Claude Code auth-loop command pointing at `/byok-set` — which stores
+a *provider* key, so that advice sent the AEGIS key into the wrong slot. It is
+now the in-band way to set the account key, and `/logout` removes it.
+
+Conversation sync is the same `conversationSyncPush/Pull` surface the desktop
+uses, over the sessions this host already keeps in `~/.aegiscode/history.jsonl`:
+
+```bash
+/sync                 # push what is pending, then pull — the one you want
+/sync status          # local / pending / in-sync counts, last push and pull
+/sync on | off         # auto-push after each turn (off by default)
+/cloud                 # key + sync state in one panel
+/cloud activate        # turn on cloud memory for the account
+```
+
+Sync is **off by default** on purpose: the server charges a push for the growth
+of a session against the plan's synced-token ceiling, so nothing is uploaded
+until you ask. A refusal (HTTP 402) is reported as a quota refusal with the way
+out, not as "sync failed". Imported remote sessions land in the same store
+`/resume` reads, and are marked `imported` with estimated token counts — never
+passed off as measured here.
+
+There are currently **no** `unavailable` commands: every entry in the registry
+either runs or is a real handler that says honestly what it cannot do.
 
 ## The chatflow
 

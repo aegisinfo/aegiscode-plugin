@@ -35,7 +35,6 @@ function ensureHistoryDir() {
  */
 function appendHistory({ sessionId, prompt, reply, status, usage }) {
   try {
-    ensureHistoryDir();
     const entry = {
       ts: new Date().toISOString(),
       sessionId,
@@ -54,14 +53,40 @@ function appendHistory({ sessionId, prompt, reply, status, usage }) {
         : { input: estimateTokens(prompt), output: estimateTokens(reply || ''), real: false },
     };
     if (usage && typeof usage.costUsd === 'number') entry.costUsd = usage.costUsd;
-    const p = historyPath();
-    const prev = fs.existsSync(p) ? fs.readFileSync(p, 'utf8').split('\n').filter(Boolean) : [];
-    const lines = [...prev, JSON.stringify(entry)];
-    const trimmed = lines.slice(Math.max(0, lines.length - HISTORY_LIMIT));
-    fs.writeFileSync(p, trimmed.join('\n') + '\n');
+    return appendHistoryEntries([entry]);
   } catch (e) {
     // Persistence is best-effort; never crash the session over it.
     if (process.env.AEGIS_HIST_DEBUG) console.error('[history] write failed:', e);
+    return 0;
+  }
+}
+
+/**
+ * Append a batch of already-shaped entries in ONE read/trim/write pass.
+ *
+ * `appendHistory` re-reads and rewrites the whole file per exchange, which is
+ * fine for one turn at a time but quadratic for a caller with a list of them —
+ * importing 50 pulled sessions would rewrite the file 50 times, each pass
+ * re-parsing everything the previous pass just wrote. The single writer (and
+ * therefore the single place the file format is defined) stays here.
+ *
+ * @returns {number} entries written
+ */
+function appendHistoryEntries(entries) {
+  const list = (Array.isArray(entries) ? entries : []).filter(Boolean);
+  if (!list.length) return 0;
+  try {
+    ensureHistoryDir();
+    const p = historyPath();
+    const prev = fs.existsSync(p) ? fs.readFileSync(p, 'utf8').split('\n').filter(Boolean) : [];
+    const lines = [...prev, ...list.map((e) => JSON.stringify(e))];
+    const trimmed = lines.slice(Math.max(0, lines.length - HISTORY_LIMIT));
+    fs.writeFileSync(p, trimmed.join('\n') + '\n');
+    return list.length;
+  } catch (e) {
+    // Persistence is best-effort; never crash the session over it.
+    if (process.env.AEGIS_HIST_DEBUG) console.error('[history] write failed:', e);
+    return 0;
   }
 }
 
@@ -77,6 +102,11 @@ function readEntries() {
   } catch {
     return [];
   }
+}
+
+/** Every history record, oldest first. Public name for other modules. */
+function readHistoryEntries() {
+  return readEntries();
 }
 
 /** Newest-first list of own sessions, one per distinct sessionId. */
@@ -192,6 +222,8 @@ module.exports = {
   historyPath,
   ensureHistoryDir,
   appendHistory,
+  appendHistoryEntries,
+  readHistoryEntries,
   readOwnSessions,
   readSessionTranscript,
   sessionHistoryEntries,

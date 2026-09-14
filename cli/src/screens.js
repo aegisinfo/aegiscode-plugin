@@ -36,6 +36,7 @@ const { welcomeArtParts } = require('./art.js');
 const { renderDiffPreview } = require('./markdown.js');
 const render = require('./render.js');
 const { updateConfig, configExists } = require('./config.js');
+const credentials = require('./credentials.js');
 
 const VERSION = require('../package.json').version;
 
@@ -387,6 +388,115 @@ async function showWelcome(ctx, firstRun = true) {
   }
 }
 
+// ── the account key ──────────────────────────────────────────────────────────
+
+const KEY_URL = 'https://aegiscloud.org';
+
+/**
+ * The key screen's lines. Pure, so what the user is told is asserted directly.
+ *
+ * `value` is echoed back as bullets: this is the one screen in the product
+ * where the thing being typed is a secret, and a screen that echoes it would
+ * put the key in a scrollback buffer, a screenshot and a screen share.
+ */
+function keyLines(ctx, cols, { value = '', error = null, verify = false } = {}) {
+  const t = themeOf(ctx);
+  const lines = [];
+  lines.push([span(t.gold, '─'.repeat(Math.max(1, cols)))]);
+  lines.push([span(t.white + BOLD, 'Connect your AEGIS account')]);
+  lines.push([span('', '')]);
+  for (const l of wrapped(
+    `Paste an API key to use AEGIS Cloud. Get one free at ${KEY_URL}. ` +
+      'It is stored in your user config directory with owner-only permissions, so later launches and scripts pick it up without an export.',
+    cols,
+    t.white
+  )) {
+    lines.push(l);
+  }
+  lines.push([span('', '')]);
+  lines.push([
+    span(t.lavender, GLYPH.cursor),
+    span(t.gray, ' API key: '),
+    span(t.white, '•'.repeat(String(value).length)),
+    span(verify ? t.cyan : t.gray, verify ? '  verifying…' : ''),
+  ]);
+  if (error) lines.push([span(t.coral, `  ${error}`)]);
+  lines.push([span('', '')]);
+  lines.push([
+    span(t.gray, `  ${GLYPH.check} `),
+    span(t.gray, 'Enter to save'),
+    span(t.gray, ' · '),
+    span(t.gray, 'Esc to skip'),
+  ]);
+  return lines;
+}
+
+/**
+ * Ask for the account key. Resolves `{key}` when submitted, `{skipped:true}`
+ * when the user declines, `{exit:true}` on ctrl+c.
+ *
+ * `submit(key)` is the caller's verification+persistence step; its rejection
+ * message is shown on the screen and the user stays on it, because the failure
+ * mode this prevents is a key that is accepted into the config while the
+ * account behind it rejects every call.
+ */
+async function requestApiKey(ctx, o = {}) {
+  const submit = o.submit || (async () => ({ ok: true }));
+  const { cols } = getSize();
+  let value = '';
+  let error = null;
+  let verify = false;
+  const paintScreen = () => paint(keyLines(ctx, cols, { value, error, verify }));
+  paintScreen();
+
+  for (;;) {
+    const key = await nextKey();
+    if (key.name === KEY.ENTER) {
+      if (!value.trim()) return { skipped: true };
+      verify = true;
+      error = null;
+      paintScreen();
+      let res;
+      try {
+        res = await submit(value);
+      } catch (e) {
+        res = { ok: false, message: (e && e.message) || String(e) };
+      }
+      verify = false;
+      if (res && res.ok === false) {
+        error = res.message || 'that key was refused';
+        paintScreen();
+        continue;
+      }
+      return { key: value, result: res };
+    }
+    if (key.name === KEY.ESC) return { skipped: true };
+    if (key.name === KEY.CTRL_C || key.name === KEY.CTRL_D) return { exit: true };
+    if (key.name === KEY.BACKSPACE) {
+      value = value.slice(0, -1);
+      error = null;
+      paintScreen();
+      continue;
+    }
+    if (key.name === 'char') {
+      const ch = key.ch;
+      if (ch && ch >= ' ') {
+        value += ch;
+        error = null;
+        paintScreen();
+      }
+      continue;
+    }
+    // A paste arrives as its own event (events.js rushes multi-char reads);
+    // without this a pasted key is dropped on the floor.
+    if (key.name === 'paste' && key.text) {
+      value = (value + String(key.text)).replace(/\s+/g, '');
+      error = null;
+      paintScreen();
+    }
+  }
+}
+
 // ── the sequence ─────────────────────────────────────────────────────────────
 
 /**
@@ -398,8 +508,12 @@ async function showWelcome(ctx, firstRun = true) {
  * @param {() => boolean} [o.seen] an explicit "has run before" probe; defaults
  *                                 to the config file's existence
  * @param {(patch:object)=>void} [o.save] persist patch; defaults to updateConfig
- * @returns {Promise<{ok:boolean, firstRun:boolean, themeIndex:number}>} `ok`
- *          is false when the user declined the trust check or asked to exit.
+ * @param {() => boolean} [o.needsKey] true when no account key is configured —
+ *                                 the key screen is shown only then
+ * @param {(key:string)=>Promise<object>} [o.submitKey] verify + persist a key
+ * @returns {Promise<{ok:boolean, firstRun:boolean, themeIndex:number,
+ *          key:{set:boolean, skipped:boolean}}>} `ok` is false when the user
+ *          declined the trust check or asked to exit.
  */
 async function runOnboarding(ctx, o = {}) {
   const seen = o.seen || configExists;
@@ -407,8 +521,29 @@ async function runOnboarding(ctx, o = {}) {
   // Injectable so the *sequence* — which screens run, in what order, and what is
   // persisted — can be asserted without a terminal. The screens themselves are
   // tested directly through their pure line-builders.
-  const ui = o.ui || { showTrustCheck, showThemePicker, showWelcome };
-  if (o.continue) return { ok: true, firstRun: false, themeIndex: ctx.themeIndex };
+  const ui = {
+    showTrustCheck,
+    showThemePicker,
+    showWelcome,
+    requestApiKey: (c, opts) =>
+      requestApiKey(c, { submit: o.submitKey || (async () => ({ ok: true })), ...opts }),
+    // An injected `ui` overrides the screens it names and inherits the rest, so
+    // a caller testing the sequence does not have to supply a key screen it
+    // never wants to exercise.
+    ...(o.ui || {}),
+  };
+  // No key is the one state where the session cannot do anything at all, so it
+  // is asked for in-band rather than left to a shell export the user has to
+  // discover. Default reads the credential store so a caller that forgets to
+  // pass it still gets the right behaviour.
+  const needsKey = o.needsKey || (() => !credentials.hasApiKey());
+  // …but only where a question can actually be asked. Without this a library
+  // caller with no TTY reaches a screen that waits on a key queue nothing will
+  // ever feed — a hang instead of a missing credential.
+  const canPrompt = o.canPrompt || (() => !!(process.stdin && process.stdin.isTTY));
+  // Declared out here because both the sequence and its key step report on it.
+  const key = { set: false, skipped: false };
+  if (o.continue) return { ok: true, firstRun: false, themeIndex: ctx.themeIndex, key: { set: false, skipped: false } };
 
   // Onboarding runs *before* the session loop, and the session loop is what
   // normally attaches the key pump — so without this the first screen paints and
@@ -429,17 +564,29 @@ async function runOnboarding(ctx, o = {}) {
       // neither is ever shown again. Re-running this every launch greeted
       // returning users with "Let's get started." and discarded their session.
       const trusted = await ui.showTrustCheck(ctx);
-      if (!trusted) return { ok: false, firstRun: true, themeIndex: ctx.themeIndex };
+      if (!trusted) return { ok: false, firstRun: true, themeIndex: ctx.themeIndex, key };
       await ui.showThemePicker(ctx);
       save({ themeIndex: ctx.themeIndex, light: ctx.light });
+      if (await askKey()) return { ok: false, firstRun: true, themeIndex: ctx.themeIndex, key };
       const welcome = await ui.showWelcome(ctx, true);
-      if (welcome && welcome.exit) return { ok: false, firstRun: true, themeIndex: ctx.themeIndex };
-      return { ok: true, firstRun: true, themeIndex: ctx.themeIndex };
+      if (welcome && welcome.exit) return { ok: false, firstRun: true, themeIndex: ctx.themeIndex, key };
+      return { ok: true, firstRun: true, themeIndex: ctx.themeIndex, key };
     }
 
+    if (await askKey()) return { ok: false, firstRun: false, themeIndex: ctx.themeIndex, key };
     const welcome = await ui.showWelcome(ctx, false);
-    if (welcome && welcome.exit) return { ok: false, firstRun: false, themeIndex: ctx.themeIndex };
-    return { ok: true, firstRun: false, themeIndex: ctx.themeIndex };
+    if (welcome && welcome.exit) return { ok: false, firstRun: false, themeIndex: ctx.themeIndex, key };
+    return { ok: true, firstRun: false, themeIndex: ctx.themeIndex, key };
+  }
+
+  /** @returns {Promise<boolean>} true when the user asked to exit. */
+  async function askKey() {
+    if (!needsKey() || !canPrompt()) return false;
+    const res = await ui.requestApiKey(ctx);
+    if (res && res.exit) return true;
+    if (res && res.key) key.set = true;
+    else key.skipped = true;
+    return false;
   }
 }
 
@@ -449,6 +596,7 @@ module.exports = {
   WHATS_NEW,
   trustLines,
   themePickerLines,
+  keyLines,
   applyTheme,
   welcomeLines,
   boxes,
@@ -458,6 +606,8 @@ module.exports = {
   wrapPlain,
   showTrustCheck,
   showThemePicker,
+  requestApiKey,
   showWelcome,
   runOnboarding,
+  KEY_URL,
 };

@@ -12,6 +12,9 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const bin = join(__dirname, '..', 'cli', 'bin', 'aegiscode.js');
@@ -82,8 +85,19 @@ const base = `http://127.0.0.1:${stub.address().port}`;
 
 function run(args, { env = {}, input = null } = {}) {
   return new Promise((resolve) => {
+    // Every run gets its own empty data dir. Since the CLI persists a key
+    // (credentials.json) and can also read the legacy `aegiscloud.api_key` an
+    // older AEGIS CLI leaves in config.json, inheriting the developer's
+    // ~/.aegiscode would make "no key" cases pass or fail by accident.
+    const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aegiscode-run-'));
     const child = spawn(process.execPath, [bin, ...args], {
-      env: { ...process.env, AEGIS_API_KEY: 'aegis_placeholder_for_cli_run', AEGIS_API_BASE: base, ...env },
+      env: {
+        ...process.env,
+        AEGISCODE_HOME: homeDir,
+        AEGIS_API_KEY: 'aegis_placeholder_for_cli_run',
+        AEGIS_API_BASE: base,
+        ...env,
+      },
     });
     let stdout = '';
     let stderr = '';
@@ -95,7 +109,10 @@ function run(args, { env = {}, input = null } = {}) {
     child.stderr.on('data', (c) => {
       stderr += c;
     });
-    child.on('close', (code) => resolve({ code, stdout, stderr }));
+    child.on('close', (code) => {
+      fs.rmSync(homeDir, { recursive: true, force: true });
+      resolve({ code, stdout, stderr });
+    });
     if (input != null) {
       child.stdin.end(input);
     } else {

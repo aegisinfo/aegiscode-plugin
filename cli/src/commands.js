@@ -58,6 +58,9 @@ const { summarizeTranscript, recapLine } = require('./summarize.js');
 const { sessionAccounting, accountingFromUsage, estimateTokens } = require('./tokens.js');
 const { transcriptToMarkdown, transcriptToJSON, writeExportFile, lastAssistantText } = require('./export.js');
 const { detectDevCommand, runDevServer } = require('./devrun.js');
+const credentials = require('./credentials.js');
+const cloudsync = require('./cloudsync.js');
+const { maskKey } = require('./format.js');
 const { openUrl, URLS } = require('./system.js');
 const { sniffProject, buildAegisMd } = require('./init.js');
 const {
@@ -127,8 +130,117 @@ async function loadModels(c) {
  * The ÆGIS LLM routes are gated on the pooled brain being reachable — exactly
  * as the reference hides its ÆGIS routes when the backend is absent. `hidden`
  * is a function so visibility follows the environment at call time.
+ *
+ * It reads the *resolved* credential, not the environment: a key saved by
+ * `aegiscode login` lives in credentials.json, and checking only
+ * `process.env.AEGIS_API_KEY` here hid every AEGIS route from a user who had
+ * just successfully set one.
  */
-const cloudReady = () => !!process.env.AEGIS_API_KEY;
+const cloudReady = () => credentials.hasApiKey();
+
+// ── account key + cloud sync handlers ────────────────────────────────────────
+
+/** The account-key panel body, shared by /key, /login and /cloud. */
+function keyPanelLines(c, title = 'AEGIS account key') {
+  const st = c.keyStatus();
+  const lines = [
+    [span(C.gold + BOLD, title), span(BOLD_OFF, '')],
+    [span(C.gray, '─'.repeat(34))],
+    [
+      span(st.configured ? C.green : C.coral, `  ${st.configured ? '✔' : '⚠'}`),
+      span(C.white, '  key: '),
+      span(st.configured ? C.white : C.gray, st.configured ? maskKey(st.key) : 'not set'),
+      span(C.gray, `  (${credentials.sourceLabel(st.source)})`),
+    ],
+    [span(C.gray, `  stored in: ${st.path}${st.fileMode ? `  ${st.fileMode}` : ''}`)],
+  ];
+  if (st.verifiedAt) lines.push([span(C.gray, `  verified:  ${st.verifiedAt}`)]);
+  if (st.account && (st.account.plan || st.account.email)) {
+    lines.push([
+      span(C.gray, '  account:   '),
+      span(C.white, [st.account.plan, st.account.email].filter(Boolean).join(' · ')),
+    ]);
+  }
+  lines.push([
+    span(C.gray, '  memory:    '),
+    span(st.memoryToken ? C.green : C.gray, st.memoryToken ? 'token held (cloud sync ready)' : 'no token yet'),
+  ]);
+  if (!st.configured) {
+    lines.push([span(C.gray, '')]);
+    lines.push([span(C.white, '  Set one with /key <api_key>, or press Enter on /key to paste it.')]);
+    lines.push([span(C.gray, '  Free keys: https://aegiscloud.org')]);
+  }
+  if (st.legacyPlaintext) {
+    lines.push([span(C.gray, '')]);
+    lines.push([
+      span(C.coral, '  ⚠ a plaintext copy of the key is still in config.json (another AEGIS CLI wrote it).'),
+    ]);
+    lines.push([span(C.gray, '    Re-save with /key <api_key> and delete that block when convenient.')]);
+  }
+  return lines;
+}
+
+/**
+ * Take a key from the argument or an echo-off prompt, save it, and report what
+ * the account said. Shared by `/key`, `/login` and `/cloud key` so all three
+ * behave identically — the whole point is that there is one way to set a key.
+ */
+async function applyAccountKey(c, raw, { label = 'AEGIS API key' } = {}) {
+  let key = String(raw || '').trim();
+  if (!key) {
+    key = await c.readSecret(`${label} (kept off screen, Enter to cancel): `);
+  }
+  if (!key) {
+    note(c, 'no key given — /key <api_key> takes it inline, or press Enter on a bare /key to paste it');
+    return { ok: false };
+  }
+  const res = await c.setApiKey(key);
+  if (!res.ok) {
+    note(c, res.message || 'that key could not be saved');
+    return res;
+  }
+  if (res.error) {
+    note(c, `saved, but the account check failed: ${res.error.message}`);
+    note(c, 'the key is stored — /key status shows it; re-run /key <api_key> if it was mistyped');
+    return res;
+  }
+  const acct = (res.account && (res.account.email || res.account.plan)) || null;
+  done(c, `AEGIS key saved to ${res.path}${acct ? ` — signed in as ${acct}` : ' and verified'}`);
+  // The catalog is key-gated, so a freshly authenticated session should offer
+  // /model's picker without the user having to know to re-run it.
+  try {
+    await c.loadModels({ force: true });
+    const n = (c.state().models || []).length;
+    if (n) note(c, `${n} pinnable model${n === 1 ? '' : 's'} available — /model to pin one`);
+  } catch {}
+  return res;
+}
+
+/** Push + pull once, and report the counts (or the quota refusal). */
+async function runCloudSync(c, o = {}) {
+  if (!c.client.apiKey) {
+    note(c, `no key — ${credentials.HOW_TO_SET}`);
+    return null;
+  }
+  const res = await c.withWorking(() => cloudsync.syncNow(c.client, o));
+  const pushed = (res.push && res.push.pushed) || [];
+  const failed = [...((res.push && res.push.failed) || []), ...((res.pull && res.pull.failed) || [])];
+  const pulled = (res.pull && res.pull.imported) || 0;
+  if (pushed.length) {
+    done(c, `pushed ${pushed.length} session${pushed.length === 1 ? '' : 's'} (${pushed[0].messages} messages in the first)`);
+  } else if (res.push && res.push.skipped && res.push.skipped.length) {
+    note(c, `${res.push.skipped.length} session(s) had nothing to send`);
+  } else {
+    note(c, 'nothing to push — every local session is already in the cloud');
+  }
+  if (pulled) done(c, `pulled ${pulled} record${pulled === 1 ? '' : 's'} into the local store — /resume lists them`);
+  else if (res.pull && res.pull.ok) note(c, `cloud has ${res.pull.remote || 0} session(s); nothing newer locally`);
+  for (const f of failed) {
+    note(c, `${f.kind === 'quota' ? 'quota' : 'failed'}: ${f.message}`);
+    if (f.hint) note(c, f.hint);
+  }
+  return res;
+}
 
 /** Read + merge hook config from the standard settings files. */
 function readHooks() {
@@ -467,15 +579,32 @@ const COMMANDS = [
     },
   },
   {
-    name: 'login', hint: '', category: 'auth',
-    desc: 'Sign in to Claude Code',
-    unavailable: 'sign-in uses Claude Code auth, which this client does not have — it authenticates with your AEGIS key',
-    alt: '/byok-set',
+    name: 'login', aliases: ['signin'], args: ['value'], hint: '[<api_key>]', category: 'auth',
+    desc: 'Save your AEGIS API key',
+    handler: async (c, args) => {
+      // This used to be `unavailable` with `/byok-set` as its alternative —
+      // which was worse than useless: /byok-set stores a *provider* key
+      // server-side, so a user following that advice pasted their AEGIS key
+      // into a BYOK provider slot. Signing in to AEGIS Cloud *is* handing over
+      // an API key, and this is now where you give it one.
+      const arg = String(args.value || args._rest || '').trim();
+      await applyAccountKey(c, arg, { label: 'AEGIS API key' });
+      c.render();
+      return true;
+    },
   },
   {
-    name: 'logout', hint: '', category: 'auth',
-    desc: 'Sign out',
-    unavailable: 'there is no Claude Code sign-in here to end — aegiscode holds no session token of its own',
+    name: 'logout', args: [], hint: '', category: 'auth',
+    desc: 'Remove the saved AEGIS API key',
+    handler: async (c) => {
+      const res = c.forgetApiKey();
+      done(c, res.cleared ? `key removed from ${res.path}` : 'there was no saved key to remove');
+      if (credentials.legacyKeyOnDisk()) {
+        note(c, `a copy is still in ${configPath()} (another AEGIS CLI wrote it) — delete its "aegiscloud" block too`);
+      }
+      c.render();
+      return true;
+    },
   },
   {
     name: 'model', aliases: ['m'], args: ['sub'], hint: '[id|-]', category: 'model',
@@ -709,8 +838,19 @@ const COMMANDS = [
       let git = false;
       try { execSync('git rev-parse --git-dir', { cwd: process.cwd(), stdio: ['ignore', 'ignore', 'ignore'], timeout: 4000 }); git = true; } catch {}
       ok('git repo', git, git ? 'inside a work tree' : 'not a git repository');
-      const key = process.env.AEGIS_API_KEY || '';
-      ok('AEGIS_API_KEY', !!key, key ? 'set' : 'not set — export one (https://aegiscloud.org)');
+      const ks = credentials.keyStatus();
+      ok(
+        'AEGIS key',
+        ks.configured,
+        ks.configured
+          ? `${maskKey(ks.key)} via ${credentials.sourceLabel(ks.source)}`
+          : `not set — ${credentials.HOW_TO_SET} (free at https://aegiscloud.org)`
+      );
+      ok('credentials', true, `${ks.path}${ks.fileMode ? ` (${ks.fileMode})` : ''}`);
+      ok('cloud memory', ks.memoryToken, ks.memoryToken ? 'token held' : 'no memory token — /cloud activate');
+      if (ks.legacyPlaintext) {
+        ok('plaintext key', false, `a copy also sits in ${configPath()} (another AEGIS CLI) — /key re-saves it to ${ks.path}`);
+      }
       ok('config path', true, configPath());
       const lines = [[span(C.gold + BOLD, 'Doctor'), span(BOLD_OFF, '')], [span(C.gray, '─'.repeat(30))]];
       for (const [good, label, detail] of checks) {
@@ -1205,17 +1345,145 @@ const COMMANDS = [
     },
   },
   {
-    name: 'cloud', args: ['sub', 'value'], hint: '[status|key <api_key>|activate|deactivate]', category: 'support',
-    desc: 'Show ÆGIS cloud sync status',
+    name: 'cloud', args: ['sub', 'value'], hint: '[status|key <api_key>|activate|deactivate|sync [on|off|now]]', category: 'support',
+    desc: 'Show and control ÆGIS cloud sync',
     handler: async (c, args) => {
       const sub = (args.sub || '').toLowerCase();
-      if (['key', 'activate', 'deactivate'].includes(sub)) {
-        note(c, 'ÆGIS cloud key/sync is managed by the aegis CLI: run `aegis login` (free) — aegiscode does not store cloud keys.');
+      const rest = (args.value || args._rest || '').trim();
+
+      if (sub === 'key') {
+        await applyAccountKey(c, rest);
         c.render();
         return true;
       }
-      const st = c.state();
-      panel(c, panels.buildAegisStatus({ ...st, cloud: { key: st.online, sync: st.online } }, c.ctx));
+
+      if (sub === 'activate') {
+        if (!c.client.apiKey) {
+          note(c, `no key — ${credentials.HOW_TO_SET}`);
+          c.render();
+          return true;
+        }
+        try {
+          const res = await c.withWorking(() => c.client.memoryActivate());
+          const token = await c.client.getMemoryToken();
+          if (token) credentials.saveMemoryToken(token, { memorySubscribed: true });
+          done(c, res && res.ok === false ? 'the server refused activation' : 'cloud memory activated for this account');
+          if (res && res.token_limit) note(c, `quota: ${res.tokens_used || 0} / ${res.token_limit} synced tokens`);
+        } catch (e) {
+          note(c, `activation failed: ${e.message}`);
+        }
+        c.render();
+        return true;
+      }
+
+      if (sub === 'deactivate') {
+        // There is no /api/memory/deactivate on the server, so this clears the
+        // credential this host holds rather than pretending to unenrol the
+        // account. Saying which one it did is the difference between a control
+        // and a lie.
+        credentials.clearMemoryToken();
+        c.client.setApiKey(c.client.apiKey);
+        note(c, 'cloud memory token cleared locally — sync stops until /cloud activate re-issues one');
+        note(c, 'the account itself is still subscribed; manage the subscription at https://aegiscloud.org/subscribe');
+        c.render();
+        return true;
+      }
+
+      if (sub === 'sync' || sub === 'push' || sub === 'pull') {
+        const mode = sub === 'sync' ? (rest || 'status').toLowerCase() : sub;
+        if (mode === 'on' || mode === 'off') {
+          const on = mode === 'on';
+          c.setCloudSync(on);
+          note(c, on ? 'cloud sync on — /sync now pushes after each turn' : 'cloud sync off — nothing is sent until /sync now');
+          c.render();
+          return true;
+        }
+        if (mode === 'now') {
+          await runCloudSync(c);
+          c.render();
+          return true;
+        }
+        const st = cloudsync.status();
+        const rows = [
+          [span(C.gold + BOLD, 'Cloud sync'), span(BOLD_OFF, '')],
+          [span(C.gray, '─'.repeat(34))],
+          [span(C.white, `  ${c.cloudSyncEnabled() ? 'on' : 'off'}`), span(C.gray, c.cloudSyncEnabled() ? '  (auto-push each turn)' : '  (manual: /sync now)')],
+          [span(C.gray, `  local sessions: ${st.local}  ·  pending push: ${st.pending}  ·  in sync: ${st.synced}`)],
+          [span(C.gray, `  last push: ${st.lastPushAt ? new Date(st.lastPushAt).toLocaleString() : 'never'}  ·  last pull: ${st.lastPullAt ? new Date(st.lastPullAt).toLocaleString() : 'never'}`)],
+          [span(C.gray, `  state: ${st.path}`)],
+        ];
+        for (const e of st.errors.slice(0, 3)) {
+          rows.push([span(C.coral, `  ⚠ ${e.error}`)]);
+        }
+        panel(c, rows);
+        c.render();
+        return true;
+      }
+
+      // Default: the whole picture — key plus sync state.
+      const st = cloudsync.status();
+      panel(c, [
+        ...keyPanelLines(c, 'AEGIS cloud'),
+        [span(C.gray, '')],
+        [span(C.white + BOLD, '  Sync'), span(BOLD_OFF, '')],
+        [span(C.gray, `  ${c.cloudSyncEnabled() ? 'on' : 'off'}  ·  ${st.pending} pending  ·  ${st.synced} in sync  ·  ${st.importedRemote} pulled from cloud`)],
+        [span(C.gray, '  /cloud sync on | now | off')],
+      ]);
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'key', aliases: ['apikey', 'api-key'], args: ['value'], hint: '[<api_key>|status|clear]', category: 'auth',
+    desc: 'Save or show the AEGIS account key',
+    handler: async (c, args) => {
+      const arg = String(args.value || args._rest || '').trim();
+      const lower = arg.toLowerCase();
+      if (lower === 'status') {
+        panel(c, keyPanelLines(c));
+        c.render();
+        return true;
+      }
+      if (lower === 'clear' || lower === 'remove' || lower === 'rm') {
+        const res = c.forgetApiKey();
+        done(c, res.cleared ? `key removed from ${res.path}` : 'there was no saved key to remove');
+        if (credentials.legacyKeyOnDisk()) {
+          note(c, `a copy is still in ${configPath()} (written by another AEGIS CLI) — delete the "aegiscloud" block to finish the job`);
+        }
+        c.render();
+        return true;
+      }
+      await applyAccountKey(c, arg);
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'sync', aliases: ['cloudsync', 'cloud-sync'], args: ['mode'], hint: '[now|on|off|status]', category: 'data',
+    desc: 'Sync conversations with AEGIS Cloud',
+    hidden: (c) => !cloudReady(),
+    handler: async (c, args) => {
+      const mode = (args.mode || '').toLowerCase();
+      if (mode === 'on' || mode === 'off') {
+        c.setCloudSync(mode === 'on');
+        note(c, mode === 'on' ? 'cloud sync on' : 'cloud sync off — /sync now still runs a manual pass');
+        c.render();
+        return true;
+      }
+      if (mode === 'status') {
+        const st = cloudsync.status();
+        panel(c, [
+          [span(C.gold + BOLD, 'Cloud sync'), span(BOLD_OFF, '')],
+          [span(C.gray, '─'.repeat(34))],
+          [span(C.white, `  ${c.cloudSyncEnabled() ? 'on' : 'off'}`)],
+          [span(C.gray, `  local ${st.local}  ·  pending ${st.pending}  ·  in sync ${st.synced}`)],
+        ]);
+        c.render();
+        return true;
+      }
+      // Bare /sync and /sync now both do the thing: this is the command a user
+      // reaches for when they want their sessions in the cloud right now.
+      await runCloudSync(c);
       c.render();
       return true;
     },

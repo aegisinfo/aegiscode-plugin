@@ -25,6 +25,16 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 const require = createRequire(import.meta.url);
 
+// ── this file must not touch the developer's real ~/.aegiscode ───────────────
+//
+// The host now reads and writes persistent state in the data dir (session
+// history, the saved credential, the sync ledger), and these tests drive real
+// turns through the real dispatcher — so without this each run appended the
+// test's own exchanges to the developer's live session history.
+const __testHome = fs.mkdtempSync(path.join(os.tmpdir(), 'aegiscode-models-'));
+process.env.AEGISCODE_HOME = __testHome;
+process.on('exit', () => { try { fs.rmSync(__testHome, { recursive: true, force: true }); } catch {} });
+
 function assert(cond, msg) {
   if (!cond) throw new Error(`ASSERT FAILED: ${msg}`);
 }

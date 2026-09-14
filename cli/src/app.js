@@ -27,6 +27,9 @@ const { GLYPH, VERBS, themeOf, RESET, THEME_TABLE } = require('./theme.js');
 const { LiveRegion, termWidth, w } = require('./screen.js');
 const { parseLine, COMMANDS, visibleCommands } = require('./commands.js');
 const { updateConfig, loadPermissions, loadConfig, configExists } = require('./config.js');
+const credentials = require('./credentials.js');
+const cloudsync = require('./cloudsync.js');
+const { readSecret } = require('./secret.js');
 const { normalizeModelCatalog, pickerEntries, catalogIds } = require('./models.js');
 const { appendHistory, readSessionTranscript, readOwnSessions } = require('./history.js');
 const { snapshotCheckpoint } = require('./checkpoint.js');
@@ -50,7 +53,12 @@ function createApp(options = {}) {
   };
   const out = options.out || process.stdout;
   const err = options.err || process.stderr;
-  const client = options.client || createClient();
+  // The key comes from the credential store (env → credentials.json →
+  // config.json) rather than from the environment alone: an export does not
+  // survive a new shell, and until it is *stored* every one of those launches
+  // is "no key" with no in-band way to set one. An injected client keeps
+  // whatever key it was built with.
+  const client = options.client || createClient(credentials.clientOptions());
   const { TOOLS, toolList } = options.tools || createTools(client);
 
   // Tool-approval gate (exec/writeFile/editFile confirm before running).
@@ -148,6 +156,83 @@ function createApp(options = {}) {
       return { balance: session.balance, lastCost };
     } catch {
       return null; // no balance rights / offline: keep showing tokens
+    }
+  }
+
+  // ── the AEGIS account key ─────────────────────────────────────────────────
+  //
+  // Set/forget at runtime, for `/key` and `aegiscode login`. Both paths are the
+  // same three steps — persist, apply to the live client, invalidate the model
+  // catalog — because a key that is stored but not applied leaves the current
+  // session failing, and one that is applied but not stored is gone next launch.
+
+  /**
+   * Persist an account key and start using it immediately.
+   *
+   * `verify` spends one `/api/verify-api-key` round trip to catch a bad key at
+   * the moment it is entered rather than at the first prompt, and is also how
+   * the memory token (cloud sync's credential) is obtained — so a successful
+   * login leaves both credentials in the store.
+   */
+  async function setApiKey(raw, { verify = true } = {}) {
+    const saved = credentials.saveApiKey(raw);
+    if (!saved.ok) return saved;
+    client.setApiKey(saved.key);
+    modelCache.models = [];
+    modelCache.at = 0;
+    let account = null;
+    let error = null;
+    if (verify) {
+      try {
+        const info = (await client.verifyApiKey()) || {};
+        account = info;
+        const patch = { verifiedAt: new Date().toISOString() };
+        if (info.memory_token) patch.memoryToken = info.memory_token;
+        if (info.plan) patch.plan = info.plan;
+        patch.account = { plan: info.plan || null, email: info.email || null, valid: info.valid !== false };
+        credentials.writeCredentials(patch);
+        if (info.plan) session.plan = info.plan;
+        if (info.email) session.account = { ...(session.account || {}), email: info.email };
+      } catch (e) {
+        error = e;
+      }
+    }
+    return { ...saved, account, error };
+  }
+
+  /** Drop the stored key and stop authenticating this session. */
+  function forgetApiKey() {
+    const res = credentials.clearApiKey();
+    client.setApiKey('');
+    modelCache.models = [];
+    modelCache.at = 0;
+    return res;
+  }
+
+  function cloudSyncEnabled() {
+    try {
+      return loadConfig().cloudSync === true;
+    } catch {
+      return false;
+    }
+  }
+
+  function setCloudSync(on) {
+    return updateConfig({ cloudSync: on === true });
+  }
+
+  /**
+   * Copy a key found in config.json into the 0600 store, once, so the next run
+   * reads the tight copy. Never deletes the original — that file belongs to
+   * another product and holds the user's key.
+   */
+  function adoptLegacyKeyOnce() {
+    try {
+      const resolved = credentials.resolveApiKey();
+      if (resolved.source !== 'config') return [];
+      return credentials.adoptLegacy().adopted;
+    } catch {
+      return [];
     }
   }
 
@@ -448,7 +533,7 @@ function createApp(options = {}) {
         render.renderNotice(
           ctx(),
           'error',
-          'no AEGIS_API_KEY set — export one (https://aegiscloud.org) or run /byok-set'
+          `no AEGIS account key — ${credentials.HOW_TO_SET} (or set $${credentials.KEY_ENV})`
         )
       );
       return;
@@ -506,7 +591,7 @@ function createApp(options = {}) {
     const tool = TOOLS[name];
     if (!tool) throw new Error(`unknown tool: ${name}`);
     if (!client.apiKey) {
-      throw new Error('no AEGIS_API_KEY set — export one (https://aegiscloud.org)');
+      throw new Error(`no AEGIS account key — ${credentials.HOW_TO_SET}`);
     }
     const text = await tool.run(args || {});
     emit(render.renderToolResult(ctx(), name, text, width()));
@@ -725,6 +810,17 @@ function createApp(options = {}) {
       TOOLS,
       saveConfig: (patch) => updateConfig(patch),
       showThemePicker: () => showThemePicker(),
+      // Credential + cloud-sync surface for the /key, /cloud and /sync commands.
+      // Defined here on the app's context so the chatflow's Object.assign-based
+      // context inherits them too — one definition, both hosts.
+      keyStatus: () => credentials.keyStatus(),
+      setApiKey: (raw, o) => setApiKey(raw, o),
+      forgetApiKey: () => forgetApiKey(),
+      readSecret: (text) => readSecret(text, { stdin: process.stdin, stdout: out }),
+      cloudsync,
+      cloudSyncEnabled: () => cloudSyncEnabled(),
+      setCloudSync: (on) => setCloudSync(on),
+      adoptLegacyKey: () => adoptLegacyKeyOnce(),
     };
     Object.defineProperty(c, 'sessionId', {
       enumerable: true,
@@ -813,7 +909,7 @@ function createApp(options = {}) {
     try {
       let args = cmd.build(arg);
       if (cmd.secret) {
-        const key = await readSecret(`provider key for ${args.provider}: `);
+        const key = await askSecret(`provider key for ${args.provider}: `);
         if (!key) {
           emit(render.renderNotice(ctx(), 'warn', 'empty key — nothing sent'));
           return true;
@@ -828,52 +924,26 @@ function createApp(options = {}) {
     return true;
   }
 
-  /** Read a secret without echoing it (raw mode; falls back to plain input). */
-  function readSecret(promptText) {
-    if (!process.stdin.isTTY || typeof process.stdin.setRawMode !== 'function') {
-      return Promise.resolve('');
-    }
-    return new Promise((resolve) => {
-      const t = themeOf(ctx());
-      out.write(t.gray + promptText + RESET);
-      const stdin = process.stdin;
-      let buf = '';
-      stdin.setRawMode(true);
-      stdin.resume();
-      const onData = (chunk) => {
-        for (const ch of chunk.toString('utf8')) {
-          if (ch === '\r' || ch === '\n') {
-            stdin.setRawMode(false);
-            stdin.removeListener('data', onData);
-            out.write('\n');
-            return resolve(buf);
-          }
-          if (ch === '\x03') {
-            // ctrl+c
-            stdin.setRawMode(false);
-            stdin.removeListener('data', onData);
-            out.write('\n');
-            return resolve('');
-          }
-          if (ch === '\u007f') {
-            buf = buf.slice(0, -1);
-            out.write('\b \b');
-            continue;
-          }
-          buf += ch;
-          out.write('•');
-        }
-      };
-      stdin.on('data', onData);
-    });
+  /**
+   * Ask for a secret on this session's streams.
+   *
+   * The prompt loop itself lives in secret.js, shared with `aegiscode login` in
+   * the bin — one implementation, so the terminal host and the non-interactive
+   * entry point cannot differ in whether a key is echoed or masked. Only the
+   * prompt's colouring is the session's business.
+   */
+  function askSecret(promptText) {
+    const t = themeOf(ctx());
+    return readSecret(t.gray + promptText + RESET, { stdin: process.stdin, stdout: out });
   }
 
   // --- entry points ---------------------------------------------------------
 
   /** Non-interactive: one prompt, plain output, exit code. */
   async function runOnce(prompt, { json = false } = {}) {
+    adoptLegacyKeyOnce();
     if (!client.apiKey) {
-      err.write('aegiscode: no AEGIS_API_KEY set. Export your key first (https://aegiscloud.org).\n');
+      err.write(`aegiscode: no AEGIS account key. ${credentials.HOW_TO_SET}, or set $${credentials.KEY_ENV}.\n`);
       return 2;
     }
     const res = await ask(prompt);
@@ -958,6 +1028,39 @@ function createApp(options = {}) {
     } catch {
       /* persistence is best-effort */
     }
+    // Auto-sync hook: one place, reached by both the linear REPL and the
+    // chatflow's session loop, and only when the user turned it on. Off by
+    // default because a push is billed against the plan's synced-token ceiling
+    // (aegis1 charges the *growth* of a session), so uploading is a choice.
+    if (cloudSyncEnabled()) autoSync();
+  }
+
+  /**
+   * Push after a turn, in the background.
+   *
+   * Deliberately not awaited and deliberately quiet on success: this runs after
+   * every turn, and a line per turn would be noise. Failures are reported once
+   * per session per session-cycle — a quota refusal that repeats forever is a
+   * wall of text, not information — and never thrown, because the user's turn
+   * already succeeded by the time this runs.
+   */
+  let autoSyncNotes = new Set();
+  function autoSync() {
+    if (!client.apiKey) return;
+    Promise.resolve()
+      .then(() => cloudsync.push(client))
+      .then((res) => {
+        if (res && res.failed && res.failed.length) {
+          const f = res.failed[0];
+          if (autoSyncNotes.has(f.kind)) return;
+          autoSyncNotes.add(f.kind);
+          const hint = f.hint ? ` — ${f.hint}` : '';
+          emit(render.renderNotice(ctx(), f.kind === 'quota' ? 'warn' : 'error', `cloud sync: ${f.message}${hint}`));
+        }
+      })
+      .catch(() => {
+        /* offline is not worth interrupting a session over */
+      });
   }
 
   /** One line of session accounting, for ctrl+t and the meta row. */  function tokenSummary() {
@@ -1115,6 +1218,7 @@ function createApp(options = {}) {
       process.stdout.isTTY;
     if (tty) {
       restorePrefs();
+      adoptLegacyKeyOnce();
       // Onboarding runs in the normal buffer, before the session takes the
       // alternate screen — the reference's order. A declined trust check must
       // abort: the reference returns without ever reaching `session(ctx)`.
@@ -1122,8 +1226,31 @@ function createApp(options = {}) {
         continue: !!options.continue,
         seen: options.seen || configExists,
         save: (patch) => updateConfig(patch),
+        // With no key the session can do nothing, so ask for it here where the
+        // user is already answering questions — verified on submit, and saved
+        // 0600 so the next launch (and every script) has it.
+        needsKey: () => !client.apiKey,
+        submitKey: (key) => setApiKey(key),
       });
       if (!onboard.ok) return 0;
+      if (onboard.key && onboard.key.set) {
+        emit(
+          render.renderNotice(
+            ctx(),
+            'info',
+            `key saved to ${credentials.credentialsPath()} — no export needed from now on`
+          )
+        );
+      }
+      if (onboard.key && onboard.key.skipped && !client.apiKey) {
+        emit(
+          render.renderNotice(
+            ctx(),
+            'warn',
+            `no key saved — /key <api_key> or \`aegiscode login\` whenever you are ready`
+          )
+        );
+      }
       // A stored pin the platform does not advertise routes elsewhere in
       // silence (see validatePinnedModel) — checked once, here, where the user
       // can act on it. Not on `-p`: a network round-trip ahead of the first
@@ -1143,6 +1270,7 @@ function createApp(options = {}) {
       return 0;
     }
     restorePrefs();
+    adoptLegacyKeyOnce();
     return runLinearRepl();
   }
 
@@ -1168,6 +1296,13 @@ function createApp(options = {}) {
     recordTurn,
     persistTurn,
     restorePrefs,
+    setApiKey,
+    forgetApiKey,
+    adoptLegacyKeyOnce,
+    cloudSyncEnabled,
+    setCloudSync,
+    cloudsync,
+    keyStatus: () => credentials.keyStatus(),
     sessionId: () => commandCtx.sessionId,
     tokenSummary,
     resumeSession,

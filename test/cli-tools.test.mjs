@@ -13,10 +13,23 @@ import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 const require = createRequire(import.meta.url);
+
+// ── this file must not touch the developer's real ~/.aegiscode ───────────────
+//
+// The host now reads and writes persistent state in the data dir (session
+// history, the saved credential, the sync ledger), and these tests drive real
+// turns through the real dispatcher — so without this each run appended the
+// test's own exchanges to the developer's live session history.
+const __testHome = fs.mkdtempSync(path.join(os.tmpdir(), 'aegiscode-tools-'));
+process.env.AEGISCODE_HOME = __testHome;
+process.on('exit', () => { try { fs.rmSync(__testHome, { recursive: true, force: true }); } catch {} });
 
 function assert(cond, msg) {
   if (!cond) throw new Error(`ASSERT FAILED: ${msg}`);
@@ -300,9 +313,9 @@ try {
   const noKey = stubClient({ apiKey: '' });
   const nk = captureApp(noKey);
   await nk.app.handleLine('hello');
-  assert(nk.text().includes('no AEGIS_API_KEY'), 'a missing key is reported in-session');
+  assert(/no AEGIS account key/.test(nk.text()), 'a missing key is reported in-session');
   await nk.app.handleLine('/balance');
-  assert(nk.text().includes('no AEGIS_API_KEY'), 'and on a tool command');
+  assert(/no AEGIS account key/.test(nk.text()), 'and on a tool command');
 
   console.log('CLI tools test passed');
   console.log(`  registry: ${cliTools.length} tools, identical to the MCP host's tools/list`);

@@ -14,6 +14,9 @@
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
@@ -93,12 +96,23 @@ assert(all.length >= COMMANDS.length, 'allCommands includes every entry');
 eq(all.length, COMMANDS.length, 'allCommands returns exactly the registered entries');
 
 // Toggle the cloud gate so the hidden predicate is exercised both ways.
+//
+// The gate reads the *resolved* credential (env → credentials.json →
+// config.json), not the environment alone, so this must point the data dir at
+// an empty one: otherwise a developer with a stored key — or the legacy
+// `aegiscloud.api_key` an older AEGIS CLI leaves in ~/.aegiscode/config.json —
+// would silently make the "hidden" half of this test pass for the wrong reason.
+const gateHome = fs.mkdtempSync(path.join(os.tmpdir(), 'aegiscode-gate-'));
 const originalKey = process.env.AEGIS_API_KEY;
+const originalHome = process.env.AEGISCODE_HOME;
+process.env.AEGISCODE_HOME = gateHome;
 process.env.AEGIS_API_KEY = 'aegis_test_key';
 const visWithKey = visibleCommands();
 delete process.env.AEGIS_API_KEY;
 const visWithoutKey = visibleCommands();
 if (originalKey !== undefined) process.env.AEGIS_API_KEY = originalKey;
+if (originalHome === undefined) delete process.env.AEGISCODE_HOME;
+else process.env.AEGISCODE_HOME = originalHome;
 
 assert(visWithKey.some((c) => c.name === 'aegis-council'), 'with a key the gated /aegis-council is visible');
 assert(!visWithoutKey.some((c) => c.name === 'aegis-council'), 'with no key the gated /aegis-council is hidden');
@@ -150,9 +164,16 @@ eq(parseLine('/model').kind, 'command', '/model is a command');
 const quit = parseLine('/quit');
 eq(quit.kind, 'command', '/quit resolves');
 eq(quit.command.name, 'exit', '/quit resolves to the exit entry');
-const unavail = parseLine('/login');
-eq(unavail.kind, 'unavailable', '/login is unavailable');
-assert(typeof unavail.command.unavailable === 'string' && unavail.command.unavailable.length > 0, 'the unavailable entry carries a reason');
+// /login used to be `unavailable` with /byok-set as its alternative — which
+// sent the user to a *provider*-key command with their AEGIS key. It is now the
+// in-band way to store that key, and /logout removes it.
+const login = parseLine('/login');
+eq(login.kind, 'command', '/login is a real command');
+eq(login.command.name, 'login', 'and it resolves to the login entry');
+eq(typeof login.command.handler, 'function', 'with a handler, not an unavailable reason');
+const logout = parseLine('/logout');
+eq(logout.kind, 'command', '/logout is a real command');
+eq(typeof logout.command.handler, 'function', 'with a handler');
 eq(parseLine('/nope').kind, 'unknown', 'an unknown command is unknown');
 eq(parseLine('/nope').name, 'nope', 'the unknown name is reported');
 
@@ -411,10 +432,20 @@ for (const name of ['compact', 'recap']) {
       closeStream: () => {},
       setInput: () => {},
       exit: () => {},
-      client: { apiBase: 'http://stub', apiKey: 'k' },
+      client: { apiBase: 'http://stub', apiKey: 'k', setApiKey: () => '' },
       TOOLS: {},
       saveConfig: () => {},
       showThemePicker: () => {},
+      // The credential + cloud-sync surface (app.js's makeCommandContext): a
+      // handler called with no arguments must still run, so the stub mirrors
+      // the real context rather than the subset an older build happened to use.
+      keyStatus: () => ({ configured: false, key: '', source: 'none', path: '/stub/credentials.json', fileMode: null, memoryToken: false, legacyPlaintext: false }),
+      setApiKey: async () => ({ ok: true, key: 'k', path: '/stub/credentials.json' }),
+      forgetApiKey: () => ({ cleared: true, path: '/stub/credentials.json' }),
+      readSecret: async () => '',
+      cloudsync: require(join(root, 'cli', 'src', 'cloudsync.js')),
+      cloudSyncEnabled: () => false,
+      setCloudSync: () => {},
     };
     try {
       // `args` is the keyed positional object a real dispatch builds.

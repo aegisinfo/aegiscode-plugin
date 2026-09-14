@@ -24,10 +24,16 @@ Usage:
   aegiscode -p "question"       same, explicit
   echo "q" | aegiscode -p -     read the prompt from stdin
 
+Account:
+  aegiscode login [<key>]       save your AEGIS API key (prompts, no echo, if omitted)
+  aegiscode logout              remove the saved key
+  aegiscode key status          show which key is in use and where it came from
+
 Options:
   -m, --model <id>        pin a model id (see /models; default: server choice)
       --base <url>        API base (default $AEGIS_API_BASE or aegiscloud.org)
-      --key <key>         API key for this run (prefer $AEGIS_API_KEY)
+      --key <key>         API key for THIS RUN only — it is not saved. Use
+                           "aegiscode login" to store one for good.
       --json              with -p: emit JSON instead of text
       --no-stream         buffer the answer instead of streaming it
       --max-tokens <n>    output ceiling hint
@@ -59,8 +65,21 @@ function parseArgs(argv) {
     prompt: null,
     help: false,
     version: false,
+    command: null,
+    commandArg: null,
   };
   const rest = [];
+
+  // An account subcommand is `argv[0]` and nothing else — position 0 only, so
+  // `aegiscode -p "key"` (a one-shot prompt whose text happens to be one of
+  // these words) is never hijacked into an account operation.
+  const head = argv[0];
+  if (head && !head.startsWith('-') && ACCOUNT_COMMANDS.has(head)) {
+    const arg = argv[1];
+    opts.command = head;
+    opts.commandArg = arg && !arg.startsWith('-') ? arg : null;
+    argv = argv.slice(opts.commandArg ? 2 : 1);
+  }
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -127,6 +146,134 @@ function parseArgs(argv) {
   return opts;
 }
 
+/**
+ * Account subcommands: the in-band way to give this host a key.
+ *
+ * They exist because an `AEGIS_API_KEY` export was previously the *only* way
+ * in, and an export does not survive a new terminal. `--key` remains purely
+ * per-run (CI, a rotation test) so there is exactly one thing a user has to
+ * remember: `aegiscode login` saves it, `aegiscode logout` removes it.
+ */
+const ACCOUNT_COMMANDS = new Set(['login', 'logout', 'key']);
+
+/**
+ * Run `login` / `logout` / `key` and return a process exit code.
+ *
+ * Exit codes are meaningful because these are the commands a script calls:
+ * 0 = done, 1 = the server refused the credential, 2 = no credential and no
+ * way to ask for one (no TTY).
+ */
+async function runAccountCommand(command, arg, io = {}) {
+  const stdout = io.stdout || process.stdout;
+  const stderr = io.stderr || process.stderr;
+  const stdin = io.stdin || process.stdin;
+  const { credentials, readSecret, maskKey } = loadAccountDeps();
+
+  const where = () => credentials.credentialsPath();
+
+  if (command === 'logout' || (command === 'key' && ['clear', 'remove', 'rm'].includes(String(arg || '').toLowerCase()))) {
+    const res = credentials.clearApiKey();
+    stdout.write(
+      res.cleared
+        ? `aegiscode: key removed from ${res.path}\n`
+        : 'aegiscode: no saved key to remove\n'
+    );
+    if (credentials.legacyKeyOnDisk()) {
+      stdout.write(
+        'aegiscode: note — a plaintext copy is also in config.json, written by an older ' +
+          'AEGIS CLI; delete its "aegiscloud" block as well to finish removing it\n'
+      );
+    }
+    return 0;
+  }
+
+  if (command === 'key' && ['status', 'show', ''].includes(String(arg || '').toLowerCase())) {
+    const st = credentials.keyStatus();
+    if (io.json) {
+      stdout.write(
+        JSON.stringify(
+          {
+            configured: st.configured,
+            source: st.source,
+            source_label: credentials.sourceLabel(st.source),
+            path: st.path,
+            file_mode: st.fileMode,
+            masked: st.configured ? maskKey(st.key) : null,
+            memory_token: st.memoryToken,
+            verified_at: st.verifiedAt,
+            plaintext_copy_in_config: st.legacyPlaintext,
+          },
+          null,
+          2
+        ) + '\n'
+      );
+      return st.configured ? 0 : 1;
+    }
+    stdout.write(
+      [
+        `key:      ${st.configured ? maskKey(st.key) : 'not set'}`,
+        `source:   ${credentials.sourceLabel(st.source)}`,
+        `file:     ${st.path}${st.fileMode ? ` (${st.fileMode})` : ''}`,
+        `memory:   ${st.memoryToken ? 'token held (cloud sync ready)' : 'no token'}`,
+        st.verifiedAt ? `verified: ${st.verifiedAt}` : null,
+        st.legacyPlaintext
+          ? `note:     a plaintext copy also sits in config.json — re-save with \`aegiscode login\` to move it`
+          : null,
+      ]
+        .filter(Boolean)
+        .join('\n') + '\n'
+    );
+    return st.configured ? 0 : 1;
+  }
+
+  // `login [<key>]` and `key <api_key>`: take the key inline or ask for it.
+  let key = arg && arg !== 'status' ? String(arg).trim() : '';
+  if (!key) {
+    if (!stdin.isTTY) {
+      stderr.write(
+        'aegiscode: no terminal to prompt on — pass the key: `aegiscode login <api_key>`\n' +
+          '           (or set AEGIS_API_KEY for a single run)\n'
+      );
+      return 2;
+    }
+    key = await readSecret('AEGIS API key (kept off screen, Enter to cancel): ', { stdin, stdout });
+  }
+  if (!key) {
+    stderr.write('aegiscode: no key given — nothing saved\n');
+    return 2;
+  }
+
+  const { createApp } = require('../src/app.js');
+  const app = createApp({ interactive: false });
+  const res = await app.setApiKey(key);
+  if (!res.ok) {
+    stderr.write(`aegiscode: ${res.message || 'that key could not be saved'}\n`);
+    return 2;
+  }
+  const who = res.account && (res.account.email || res.account.plan);
+  stdout.write(`aegiscode: key saved to ${res.path}${who ? ` — ${who}` : ''}\n`);
+  if (res.error) {
+    const status = res.error.status;
+    stderr.write(`aegiscode: the account check failed: ${res.error.message}\n`);
+    if (status === 401 || status === 403) {
+      stderr.write('aegiscode: the key is stored but the server refused it — re-run with a fresh key\n');
+      return 1;
+    }
+    stderr.write('aegiscode: (stored anyway — the server could not be reached to confirm it)\n');
+    return 0;
+  }
+  stdout.write('aegiscode: verified — run `aegiscode` to start a session\n');
+  return 0;
+}
+
+/** Lazily required so `--version`/`--help` stay dependency-free and instant. */
+function loadAccountDeps() {
+  const credentials = require('../src/credentials.js');
+  const { readSecret } = require('../src/secret.js');
+  const { maskKey } = require('../src/format.js');
+  return { credentials, readSecret, maskKey };
+}
+
 function readStdin() {
   return new Promise((resolve) => {
     let buf = '';
@@ -162,6 +309,18 @@ async function main(argv = process.argv.slice(2)) {
   // anything constructs it.
   if (opts.base) process.env.AEGIS_API_BASE = opts.base;
   if (opts.key) process.env.AEGIS_API_KEY = opts.key;
+
+  // Account subcommands run before a session is built: they are one-shot,
+  // non-interactive, and must work in a script (`aegiscode login "$KEY"`) as
+  // well as at a prompt.
+  if (ACCOUNT_COMMANDS.has(opts.command)) {
+    return runAccountCommand(opts.command, opts.commandArg, {
+      json: opts.json,
+      stdin: process.stdin,
+      stdout: process.stdout,
+      stderr: process.stderr,
+    });
+  }
 
   const { createApp } = require('../src/app.js');
 
@@ -214,4 +373,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { main, parseArgs, HELP };
+module.exports = { main, parseArgs, HELP, ACCOUNT_COMMANDS, runAccountCommand };
