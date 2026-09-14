@@ -66,11 +66,28 @@ const FRAME_MS = 33; // ~30fps cap for streaming repaints
 
 // ── pure turn helpers ───────────────────────────────────────────────────────
 
+/**
+ * The shipped engine's shell tool is `exec` and its subagent tool is `task`
+ * (desktop/lib/local/tools.js). `Bash`/`Task` are Claude Code's names for the
+ * same two capabilities — this file was written against the reference's
+ * registry, so every branch below keyed on the reference's spelling and missed
+ * the tools that actually arrive: a shell row read "exec command" instead of
+ * "shell command", and a subagent row read "task command". Both spellings are
+ * accepted so either registry renders identically.
+ */
+function isShellTool(name) {
+  return name === 'exec' || name === 'Bash';
+}
+
+function isAgentTool(name) {
+  return name === 'task' || name === 'Task';
+}
+
 /** The noun a tool row uses: "shell command", "subagent", "read command"… */
 function toolLabel(name, n) {
   const base =
-    name === 'Bash' ? 'shell command'
-      : name === 'Task' ? 'subagent'
+    isShellTool(name) ? 'shell command'
+      : isAgentTool(name) ? 'subagent'
         : `${String(name).toLowerCase()} command`;
   return n > 1 ? base + 's' : base;
 }
@@ -234,10 +251,15 @@ function confirmLines(overlay, cols, ctx) {
   const t = themeOf(ctx);
   const lines = [];
   lines.push([span(t.gray, '─'.repeat(Math.min(Math.max(10, cols - 4), 80)))]);
-  lines.push([span(t.white, `${overlay.name} command`)]);
+  lines.push([span(t.white, `${isShellTool(overlay.name) ? 'shell' : overlay.name} command`)]);
   lines.push([span('', '')]);
+  // `exec` carries its subject in `command`; readFile/writeFile/editFile in
+  // `file_path`; glob/grep in `pattern`. Keying this on the reference's `Bash`
+  // sent every shell approval into the file branch, so the dialog that asks
+  // "Do you want to proceed?" showed an empty body — you were approving a
+  // command you could not see.
   const subject =
-    overlay.name === 'Bash'
+    isShellTool(overlay.name)
       ? String((overlay.args && overlay.args.command) || '')
       : String((overlay.args && (overlay.args.file_path || overlay.args.pattern)) || '');
   for (const l of wrapBlock(subject, Math.max(8, cols - 4))) lines.push([span(t.gray, l)]);
@@ -253,6 +275,38 @@ function confirmLines(overlay, cols, ctx) {
   lines.push([span('', '')]);
   lines.push([span(t.gray, 'Esc to cancel')]);
   return lines;
+}
+
+/**
+ * The accounting bits for a turn — model, tokens, the in/out split, €, elapsed
+ * and call count. Shared by the standalone `meta` row and the folded footer, so
+ * the two can never drift apart.
+ *
+ * `omitMs` drops the client-call time: when the bits ride on the `✻ Churned for
+ * 6s` row, that row already states the wall time, and printing a second,
+ * slightly different duration beside it reads as a discrepancy.
+ */
+function metaBits(m, t, { omitMs = false } = {}) {
+  const bits = [];
+  if (m.model) bits.push(span(t.blue, m.model));
+  if (m.tokens != null) bits.push(span(t.white, `${fmtTokens(m.tokens)} tok`));
+  if (m.input != null || m.output != null) {
+    bits.push(span(t.gray, `${fmtTokens(m.input || 0)}/${fmtTokens(m.output || 0)}`));
+  }
+  if (m.eur != null) bits.push(span(m.eur > 0 ? t.coral : t.green, fmtEur(m.eur)));
+  if (m.ms != null && !omitMs) bits.push(span(t.gray, fmtElapsed(m.ms)));
+  if (m.calls > 1) bits.push(span(t.gray, `${m.calls} calls`));
+  return bits;
+}
+
+/** Interleave accounting bits with the `·` separator. */
+function joinBits(bits, t) {
+  const line = [];
+  bits.forEach((b, i) => {
+    if (i) line.push(span(t.dim, ` ${GLYPH.bullet} `));
+    line.push(b);
+  });
+  return line;
 }
 
 /** Render one transcript row to span lines. */
@@ -285,32 +339,24 @@ function rowLines(msg, cols, ctx, now = Date.now()) {
     return out;
   }
   if (msg.role === 'done') {
-    // Real 2.1.211: "✻ Churned for 6s" — bloom glyph + gray text.
-    out.push([span(t.gray, GLYPH.bloom), span(t.gray, ` ${msg.text}`)]);
+    // Real 2.1.211: "✻ Churned for 6s" — bloom glyph + gray text. The turn's
+    // accounting rides on this same row (see the turn's finally block): one
+    // footer per turn instead of a done row plus a second `⎿` row beneath it.
+    const line = [span(t.gray, GLYPH.bloom), span(t.gray, ` ${msg.text}`)];
+    if (msg.meta) {
+      const bits = metaBits(msg.meta, t, { omitMs: true });
+      if (bits.length) line.push(span(t.dim, '  '), ...joinBits(bits, t));
+    }
+    out.push(line);
     return out;
   }
   if (msg.role === 'meta') {
     // Deliberate divergence from the reference: this client's reason to exist
     // is showing what a turn consumed, so the accounting line is a transcript
-    // row rather than something only /cost can reveal.
-    const m = msg.meta || {};
-    const bits = [];
-    if (m.model) bits.push(span(t.blue, m.model));
-    if (m.tokens != null) bits.push(span(t.white, `${fmtTokens(m.tokens)} tok`));
-    if (m.input != null || m.output != null) {
-      bits.push(span(t.gray, `${fmtTokens(m.input || 0)}/${fmtTokens(m.output || 0)}`));
-    }
-    if (m.eur != null) bits.push(span(m.eur > 0 ? t.coral : t.green, fmtEur(m.eur)));
-    if (m.ms != null) bits.push(span(t.gray, fmtElapsed(m.ms)));
-    if (m.calls > 1) bits.push(span(t.gray, `${m.calls} calls`));
-    if (bits.length) {
-      const line = [span(t.dim, `${GLYPH.hook}  `)];
-      bits.forEach((b, i) => {
-        if (i) line.push(span(t.dim, ` ${GLYPH.bullet} `));
-        line.push(b);
-      });
-      out.push(line);
-    }
+    // row rather than something only /cost can reveal. Kept for rows that have
+    // no `done` row to fold into (and for hosts that emit it standalone).
+    const bits = metaBits(msg.meta || {}, t);
+    if (bits.length) out.push([span(t.dim, `${GLYPH.hook}  `), ...joinBits(bits, t)]);
     return out;
   }
   if (msg.role === 'panel') {
@@ -463,7 +509,11 @@ function inputStart(buf, scroll) {
  */
 function inputLine(state, cols, ctx) {
   const t = themeOf(ctx);
-  const line = [span(t.gray, GLYPH.cursor), span('', ' '), span('', ' ')];
+  // Two cells ("❯ "), matching the reference. The cursor columns below are all
+  // `3 + w(text before the caret)`, which is only correct if the typed text
+  // starts in cell 3 — a third prefix cell pushed the text to cell 4 and left
+  // the caret one cell short, i.e. sitting *on* the last typed character.
+  const line = [span(t.gray, GLYPH.cursor), span('', ' ')];
   if (state.inputPrompt) {
     line.push(span(t.white, `${state.inputPrompt.title}: `));
     for (const ch of [...state.inputPrompt.buf]) line.push(span(t.white, ch));
@@ -783,7 +833,10 @@ async function runSession(host) {
       const secs = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
       const abortedFlag = !!(abort && abort.signal.aborted);
       msg.text = finalizeTurnText(msg.text, { aborted: abortedFlag, error: result && result.error });
-      push({ role: 'done', text: `${toolSeq > 0 ? DONE_VERBS[1] : DONE_VERBS[0]} for ${secs}s` }, { follow: false });
+      const footer = push(
+        { role: 'done', text: `${toolSeq > 0 ? DONE_VERBS[1] : DONE_VERBS[0]} for ${secs}s` },
+        { follow: false }
+      );
       suggestionIdx = turnCount + 1;
       turnCount++;
       abort = null;

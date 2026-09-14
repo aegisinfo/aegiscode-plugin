@@ -31,12 +31,16 @@ const NO_PIN = null;
  * and the brain tier is the one id whose *cost shape* a user needs before
  * pinning it: verified live 2026-09-14, `model: "nexus-brain"` streams
  * `pool-brain: 3 workers · effort=high · tier=brain · passes=4`, i.e. four
- * billed provider calls per turn, where a provider id is one.
+ * billed provider calls per turn, where a provider id is one. That count is
+ * not fixed — the endpoint sizes the fan-out from the ask and the /effort rung
+ * (aegis1 services/pool_brain.py estimate_workers + EFFORT_MAX_WORKERS), so the
+ * label states the shape (fan-out, sized by effort) rather than a number that
+ * only held for one prompt.
  */
 const ID_NOTES = Object.freeze({
   'openai-gpt4o-mini': 'OpenAI gpt-4o-mini, pooled',
   'anthropic-haiku': 'Anthropic Haiku, pooled',
-  'nexus-brain': 'pooled brain · 3 workers + synthesis',
+  'nexus-brain': 'pooled brain · multi-call fan-out, sized by /effort',
 });
 
 /** One raw entry (string id or object) → a catalog entry, or null when unusable. */
