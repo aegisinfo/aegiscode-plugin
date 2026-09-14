@@ -117,6 +117,28 @@ const noBrainAegis = { apiKey: 'k', async listModels() { return { models: [{ id:
 const noBrainModels = (await createLocalEngine({ aegis: noBrainAegis, settings, ollama, providers }).listModels('aegis')).models;
 assert(noBrainModels.length === 0, `a provider-only catalog yields no entries, got ${noBrainModels.length}`);
 
+// Regression: with no key, the default class must not fire a catalog call it
+// knows will 401. GET /api/v1/models answers `401 {"error":{"message":"No API
+// key"}}` (verified against aegiscloud.org), and Aegis Cloud is the class a
+// fresh install defaults to — so the doomed call is what a brand new user saw,
+// rendered as a raw "listModels failed: …" over the model picker instead of the
+// one instruction that helps. `needsKey` is that instruction's signal, and the
+// proof that no request went out is that this stub throws if called.
+let keylessListModelsCalled = false;
+const keylessAegis = {
+  apiKey: '',
+  async listModels() {
+    keylessListModelsCalled = true;
+    throw new Error('No API key');
+  },
+};
+const keyless = await createLocalEngine({ aegis: keylessAegis, settings, ollama, providers }).listModels('aegis');
+assert(keyless.needsKey === true, 'a keyless Aegis class reports needsKey so the renderer can offer the connect step');
+assert(Array.isArray(keyless.models) && keyless.models.length === 0, 'and offers no model list rather than a partial one');
+assert(keylessListModelsCalled === false, 'and makes no catalog request at all (the 401 was the bug, not the fix)');
+// A key that is present must still take the normal path (no behaviour change).
+assert((await engine.listModels('aegis')).needsKey === undefined, 'a configured Aegis class never reports needsKey');
+
 // chat routing per class
 await engine.chat({ class: 'aegis', prompt: 'hi', model: 'm1' }, () => {});
 assert(calls[calls.length - 1][0] === 'chatCompletion', 'aegis routes to chatCompletion');

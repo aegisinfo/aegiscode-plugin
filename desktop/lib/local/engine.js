@@ -473,6 +473,17 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
 
   async function listModels(cls) {
     if (cls === 'aegis') {
+      // The catalog is behind the account's key: GET /api/v1/models answers
+      // `401 {"error":{"message":"No API key"}}` without one (verified against
+      // aegiscloud.org). Aegis Cloud is the *default* class, so firing the call
+      // anyway painted a raw "listModels failed: … 401" over the default model
+      // picker for every user who had just installed the app and not yet
+      // pasted a key — the one state where the UI must say what unblocks it and
+      // not what went wrong. Report the missing key as a state (`needsKey`) and
+      // let the renderer invite the user to connect; nothing else about the
+      // class changes, and the model dropdown keeps its "server default (auto)"
+      // entry so the class is usable the moment a key lands.
+      if (!aegis.apiKey) return { class: cls, models: [], needsKey: true };
       const data = await aegis.listModels();
       return { class: cls, models: filterAegisCatalog(normalizeCatalog(data && data.models)) };
     }

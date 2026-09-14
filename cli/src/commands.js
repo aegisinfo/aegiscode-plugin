@@ -478,9 +478,24 @@ const COMMANDS = [
         await loadModels(c);
         const models = c.state().models || [];
         if (!models.length) {
-          note(c, 'No pinnable models advertised — /models lists what the server advertises.');
+          // Say why, and what unblocks it: an unreachable catalog is almost
+          // always a missing key or no network, and "no models advertised"
+          // read as "the platform has none" rather than "this client could not
+          // ask".
+          note(c, c.state().online
+            ? 'Could not read the model catalog (offline, or the server refused it) — /models retries.'
+            : // The key travels in the environment only (client/aegis.js reads
+              // AEGIS_API_KEY); /login is an unavailable command here, so
+              // pointing at it would send the user to a refusal.
+              'No API key set, so the model catalog cannot be read — export AEGIS_API_KEY (free at https://aegiscloud.org), then retry /model.');
           c.render();
           return true;
+        }
+        // A pin that is not in the catalog is not honoured — the pool answers
+        // from its own default with no error. Say so where the pin is visible
+        // rather than letting the reply look like the pinned model.
+        if (c.ctx.model && !models.some((m) => m.id === c.ctx.model)) {
+          note(c, `pinned model "${c.ctx.model}" is not in the catalog — the pool will answer with its own default; pick one below.`);
         }
         // The overlay's own copy promises /model add|remove (overlays.js, a
         // separate workstream); this build refuses both, so say here how a
@@ -516,6 +531,16 @@ const COMMANDS = [
       // dir, so the write stays inside that dir.
       c.saveConfig({ model: id, currentModelId: id });
       note(c, `Pinned model: ${id}`);
+      // The server accepts an id it does not advertise and answers from its own
+      // default — no error, a different model, and the spend attributed to the
+      // id that was pinned. Warn (never refuse: the catalog is cached, and
+      // refusing would break a pin made against a server that is briefly
+      // unreachable) so the mismatch is visible at the moment it is created.
+      await loadModels(c);
+      const models = c.state().models || [];
+      if (models.length && !models.some((m) => m.id === id)) {
+        note(c, `"${id}" is not in the AEGIS Cloud catalog — the pool will answer with its own default. /models lists the real ids.`);
+      }
       c.render();
       return true;
     },

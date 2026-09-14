@@ -43,7 +43,17 @@ function permissionsPath() {
 
 const DEFAULT_CONFIG = {
   themeIndex: 1,   // Dark mode
-  model: 'sonnet',
+  // No pinned model. This host runs on AEGIS Cloud, whose pinnable ids are the
+  // server's (`/models`) — a client-side default here would have to name one,
+  // and the one it named (`sonnet`) is not advertised by the platform at all:
+  // the pool accepts an unknown id and answers from its own default with no
+  // error, so the pin looked honoured while the reply came from another model.
+  // Worse, onboarding persists this object on first run (`updateConfig` merges
+  // DEFAULT_CONFIG under the patch), so the phantom pin was written to disk for
+  // every user who ever completed the trust check. `null` = no pin; the server
+  // chooses, and app.js's validatePinnedModel() clears a stored id the catalog
+  // does not advertise.
+  model: null,
   // Phase 6: the full model table (seeded from src/models.js MODELS on first
   // read by pickerModels()). 'currentModelId' mirrors `model` under the
   // aegiscode- name so /model add/remove/switch stay compatible both ways.

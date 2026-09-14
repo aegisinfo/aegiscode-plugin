@@ -27,6 +27,7 @@ const { GLYPH, VERBS, themeOf, RESET, THEME_TABLE } = require('./theme.js');
 const { LiveRegion, termWidth, w } = require('./screen.js');
 const { parseLine, COMMANDS, visibleCommands } = require('./commands.js');
 const { updateConfig, loadPermissions, loadConfig, configExists } = require('./config.js');
+const { normalizeModelCatalog, pickerEntries, catalogIds } = require('./models.js');
 const { appendHistory, readSessionTranscript, readOwnSessions } = require('./history.js');
 const { snapshotCheckpoint } = require('./checkpoint.js');
 const screens = require('./screens.js');
@@ -144,6 +145,71 @@ function createApp(options = {}) {
     } catch {
       return null; // no balance rights / offline: keep showing tokens
     }
+  }
+
+  // ── the AEGIS Cloud model catalog ──────────────────────────────────────────
+  //
+  // `/model` (and the alt+p chord that dispatches it) reads the pinnable ids
+  // from the server, and `state().models` is where it looks. That path had no
+  // source at all: `commands.js` calls `c.loadModels()` inside a `try {} catch
+  // {}`, `c.loadModels` was never defined on either command context, and
+  // `buildState()` hardcoded `models: []` — so the TypeError was swallowed and
+  // both `/model` and the picker reported "no models advertised" on a perfectly
+  // healthy account, forever. The ids themselves are the server's (see
+  // models.js), fetched here and cached, because the pool adds and retires
+  // providers without a client release.
+  const MODEL_CACHE_MS = 5 * 60_000;
+  const modelCache = { at: 0, models: [] };
+
+  /**
+   * Fetch (or return the cached) model catalog. Rejects when the account cannot
+   * read it at all — no key, offline, or a server error — which callers treat as
+   * "nothing to offer" rather than retrying per keystroke.
+   * @returns {Promise<Array<{id:string,label:string,note:string}>>}
+   */
+  async function loadModels({ force = false } = {}) {
+    const fresh = modelCache.models.length && Date.now() - modelCache.at < MODEL_CACHE_MS;
+    if (!force && fresh) return modelCache.models;
+    const data = await client.listModels();
+    modelCache.models = normalizeModelCatalog(data && data.models);
+    modelCache.at = Date.now();
+    return modelCache.models;
+  }
+
+  /**
+   * A pinned model id the server does not advertise is a *silent* fallback: the
+   * pool answers from its own default with no error, so the pin looks honoured
+   * while the reply came from another model — and the cost is attributed to the
+   * model that was pinned. Two shipped defaults did exactly that: `sonnet`
+   * (written into config.json by onboarding, merged in from DEFAULT_CONFIG, and
+   * never advertised by AEGIS Cloud) and any `provider/model` spelling a user
+   * typed by hand. Clears such a pin once, says so, and leaves the server's own
+   * default in its place.
+   *
+   * Best-effort and offline-safe: a catalog that cannot be read clears nothing.
+   */
+  async function validatePinnedModel() {
+    const pinned = commandCtx.model;
+    if (!pinned) return null;
+    let models;
+    try {
+      models = await loadModels();
+    } catch {
+      return null;
+    }
+    if (!models.length) return null;
+    if (catalogIds(models).has(String(pinned).toLowerCase())) return null;
+    commandCtx.model = null;
+    updateConfig({ model: null, currentModelId: null });
+    emit(
+      render.renderNotice(
+        ctx(),
+        'warn',
+        `pinned model "${pinned}" is not advertised by AEGIS Cloud — pin cleared, ` +
+          'the pool will choose; /models lists what you can pin.'
+      )
+    );
+    return pinned;
   }
 
   function bannerLines() {
@@ -517,7 +583,9 @@ function createApp(options = {}) {
       plan: session.plan || null,
       account: session.account || null,
       permissions: { mode: rules.defaultMode, rules },
-      models: [],
+      // The selectable (pickable) catalog, not the raw payload: alias tiers are
+      // dropped, live ids only (see models.js pickerEntries).
+      models: pickerEntries(modelCache.models),
       commands: visibleCommands(),
       transcript: transcript.slice(),
       sessions: [],
@@ -633,6 +701,10 @@ function createApp(options = {}) {
       runPrompt: (text) => runPrompt(text),
       ask: (text) => ask(text),
       runTool: (name, args) => runTool(name, args),
+      // The AEGIS catalog fetch `/model` and alt+p expect (see loadModels).
+      // Wired on the app's context so the chatflow's `Object.assign`-based
+      // context inherits it too — one definition, both hosts.
+      loadModels: (o) => loadModels(o),
       refreshSpend: () => refreshSpend(),
       state: () => buildState(),
       setInput: () => {},
@@ -916,6 +988,7 @@ function createApp(options = {}) {
       TOOLS,
       ask: (prompt, o) => ask(prompt, o),
       makeCommandContext: () => makeCommandContext(),
+      loadModels: (o) => loadModels(o),
       buildState: () => buildState(),
       dispatchLine: (line, c) => handleLine(line, c),
       refreshSpend: () => refreshSpend(),
@@ -1037,6 +1110,11 @@ function createApp(options = {}) {
         save: (patch) => updateConfig(patch),
       });
       if (!onboard.ok) return 0;
+      // A stored pin the platform does not advertise routes elsewhere in
+      // silence (see validatePinnedModel) — checked once, here, where the user
+      // can act on it. Not on `-p`: a network round-trip ahead of the first
+      // token would be a startup cost bought for a warning no script watches.
+      await validatePinnedModel();
       // `--continue` must load the last session *before* the loop starts, and
       // it has to be read here rather than captured at construction: the
       // history file is written by the loop itself.
@@ -1071,6 +1149,8 @@ function createApp(options = {}) {
     refreshSpend,
     bannerLines,
     makeHost,
+    loadModels,
+    validatePinnedModel,
     recordTurn,
     persistTurn,
     restorePrefs,

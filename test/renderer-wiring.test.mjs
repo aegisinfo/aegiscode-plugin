@@ -287,6 +287,26 @@ assert(
   'the transcript view is built with the real transcript element and the window frame clock'
 );
 
+// 5c. The default class with no key: the connect step. Aegis Cloud is what a
+//     fresh install lands on, and its catalog call is key-gated (401 without a
+//     key — engine.listModels reports that as `needsKey` instead). The hint
+//     that unblocks the user carries a real <a>, so it has to be built as a
+//     child node: assigning the string to textContent after appending would
+//     wipe the link and leave a dead "free key at aegiscloud.org" sentence —
+//     the same shape as the capNotice footgun documented in app.js.
+assert(
+  /data\.needsKey|needsKey\s*=\s*Boolean\(data\s*&&\s*data\.needsKey\)/.test(appCode),
+  'the renderer consumes the engine\'s needsKey state (a keyless catalog is not an error)'
+);
+assert(
+  /document\.createElement\('a'\)[\s\S]{0,400}?GET_AEGIS_KEY_URL[\s\S]{0,200}?appendChild/.test(appCode),
+  'the connect hint appends a real anchor to GET_AEGIS_KEY_URL rather than leaving an href in text'
+);
+assert(
+  /const GET_AEGIS_KEY_URL = 'https:\/\/aegiscloud\.org'/.test(appCode),
+  'the key URL has one definition (no drift to a second page)'
+);
+
 console.log(
   `renderer wiring tests passed (${localLoaded.length} local scripts, ` +
     `${declaredBy.size} globals, no orphans, transcript policy wired)`

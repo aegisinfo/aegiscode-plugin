@@ -205,9 +205,29 @@ for (const name of ['compact', 'recap']) {
   assert(loads >= 1, '/model with no argument calls c.loadModels()');
   assert(stateReadAfterLoad, '/model reads state().models only after loadModels() has run');
   assert(!opened.some((o) => o && o.type === 'model'), '/model never opens an empty model picker');
+  // An empty list is explained, and the explanation names the fix: "no models
+  // advertised" read as "the platform has none" rather than "this client could
+  // not ask". This stub has no key, so the key is what it must point at.
   assert(
-    pushed.some((r) => r.role === 'note' && /No pinnable models/.test(r.text || '')),
-    '/model notes the empty list honestly'
+    pushed.some((r) => r.role === 'note' && /No API key set/.test(r.text || '') && /aegiscloud\.org/.test(r.text || '')),
+    '/model says an unreadable catalog needs a key, and where to get one'
+  );
+}
+{
+  // Same empty list, but the client HAS a key: the honest reason is then the
+  // request itself (offline / refused), not the credential.
+  const pushed = [];
+  const stub = {
+    ctx: { model: null },
+    push: (row) => pushed.push(row),
+    render: () => {},
+    loadModels: async () => {},
+    state: () => ({ models: [], online: true }),
+  };
+  await findCommand('model').handler(stub, { _rest: '' });
+  assert(
+    pushed.some((r) => r.role === 'note' && /Could not read the model catalog/.test(r.text || '')),
+    '/model distinguishes an unreachable catalog from a missing key'
   );
 }
 {

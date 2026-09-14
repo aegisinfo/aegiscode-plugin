@@ -171,6 +171,11 @@ const CUSTOM_MODEL_PRESETS = {
 // already filters out of settings.list(); never render it as a provider row
 // even if a stale store still surfaces it (defect #1).
 const RESERVED_PROVIDERS = new Set(['__aegis', 'aegis']);
+// Where a user without a key gets one. The class picker defaults to Aegis Cloud
+// and the catalog is key-gated, so this is the first thing a new install needs;
+// it lives here rather than inline so the Model hint and any future "connect"
+// affordance cannot drift to two different pages.
+const GET_AEGIS_KEY_URL = 'https://aegiscloud.org';
 
 let pendingEl = null;
 let pendingSessionId = null;
@@ -1858,6 +1863,11 @@ async function loadModels(cls) {
   try {
     const data = await models.listModels(cls);
     const list = Array.isArray(data && data.models) ? data.models : [];
+    // No key on the default class: the engine reports the missing credential as
+    // a state instead of letting the catalog call 401 (see engine.listModels).
+    // The hint is where a user finds out they can connect at all — a raw
+    // "listModels failed" told them only that something was broken.
+    const needsKey = Boolean(data && data.needsKey);
     for (const m of list) {
       modelMeta.set(m.id, m);
       const opt = document.createElement('option');
@@ -1866,12 +1876,28 @@ async function loadModels(cls) {
       els.modelSelect.appendChild(opt);
     }
     let hint;
-    if (!list.length) {
+    if (needsKey) {
+      hint = null; // carries a link, built below
+    } else if (!list.length) {
       hint = cls === 'ollama' ? 'Ollama not running or no models pulled.' : 'No models listed.';
     } else {
       hint = `${list.length} model${list.length === 1 ? '' : 's'} available.`;
     }
     const ceiling = applyMaxTokensClamp(els.modelSelect.value);
+    if (needsKey) {
+      // The hint elements are bare <p>s, so the link has to be a real child
+      // node — a text assignment would wipe it (same shape as capNotice).
+      els.modelHint.textContent =
+        'Connect Aegis Cloud to load its models: paste your AEGIS API key in the Status card above (';
+      const a = document.createElement('a');
+      a.href = GET_AEGIS_KEY_URL;
+      a.target = '_blank';
+      a.rel = 'noreferrer noopener';
+      a.textContent = 'free key at aegiscloud.org';
+      els.modelHint.appendChild(a);
+      els.modelHint.appendChild(document.createTextNode('), then Save.'));
+      return;
+    }
     els.modelHint.textContent =
       ceiling < FLAT_CEILING ? `${hint} · max output: ${ceiling.toLocaleString()}` : hint;
   } catch (err) {
