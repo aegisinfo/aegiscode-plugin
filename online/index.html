@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<!-- frame-ancestors/sandbox/report-uri are silently ignored in a <meta> CSP
+     (they require an HTTP response header); omitted here to avoid a console
+     warning. The static host (predist/serve.mjs) has no server-side header
+     step, so this meta tag is the CSP for now. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https: http://localhost:*; base-uri 'none'; form-action 'none'" />
+<title>AEGIS Online</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark"></span>
+    <span class="brand-name">AEGIS <span class="brand-sub">Online</span></span>
+  </div>
+  <div class="topbar-right">
+    <span id="conn-dot" class="conn-dot" title="not connected"></span>
+    <span id="conn-text" class="conn-text">not connected</span>
+    <button id="settings-btn" class="icon-btn" type="button" title="Settings">⚙</button>
+  </div>
+</header>
+
+<main class="layout">
+  <aside class="sidebar" id="sidebar">
+    <section class="panel">
+      <h2 class="panel-title">Account</h2>
+      <label class="field-label" for="api-key-input">AEGIS API key</label>
+      <input id="api-key-input" class="text-input" type="password" placeholder="aegis_..." autocomplete="off" spellcheck="false" />
+      <div class="row">
+        <button id="save-key-btn" class="btn btn-primary" type="button">Save &amp; verify</button>
+        <button id="clear-key-btn" class="btn btn-ghost" type="button">Clear</button>
+      </div>
+      <div id="account-status" class="account-status">no key saved</div>
+      <div id="balance-row" class="balance-row hidden">
+        <span class="balance-label">Balance</span>
+        <span id="balance-value" class="balance-value">—</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2 class="panel-title">Model</h2>
+      <label class="field-label" for="model-select">Model</label>
+      <select id="model-select" class="text-input">
+        <option value="">server default</option>
+      </select>
+
+      <div class="mode-toggle" role="group" aria-label="Provider mode">
+        <button id="mode-aegis-btn" class="mode-btn mode-btn-active" type="button" data-mode="aegis">Aegis Cloud</button>
+        <button id="mode-byok-btn" class="mode-btn" type="button" data-mode="byok">BYOK</button>
+      </div>
+
+      <div id="byok-fields" class="byok-fields hidden">
+        <label class="field-label" for="byok-provider">Provider</label>
+        <select id="byok-provider" class="text-input">
+          <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="deepseek">DeepSeek</option>
+          <option value="gemini">Gemini</option>
+        </select>
+        <label class="field-label" for="byok-key-input">Provider API key</label>
+        <input id="byok-key-input" class="text-input" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+        <p class="hint">Sent for this request only — never stored by AEGIS.</p>
+      </div>
+    </section>
+
+    <section class="panel panel-grow">
+      <h2 class="panel-title">Memory</h2>
+      <div class="row">
+        <input id="memory-query" class="text-input" type="text" placeholder="search memory…" />
+        <button id="memory-search-btn" class="btn btn-ghost" type="button">Search</button>
+      </div>
+      <ul id="memory-results" class="memory-results"></ul>
+    </section>
+
+    <section class="panel">
+      <h2 class="panel-title">Conversation sync</h2>
+      <div class="row">
+        <button id="sync-push-btn" class="btn btn-ghost" type="button">Push this chat</button>
+        <button id="sync-pull-btn" class="btn btn-ghost" type="button">Pull sessions</button>
+      </div>
+      <ul id="sync-sessions" class="sync-sessions"></ul>
+    </section>
+  </aside>
+
+  <section class="chat-pane">
+    <div id="transcript" class="transcript">
+      <div class="welcome" id="welcome">
+        <h1>AEGIS Online</h1>
+        <p>Cloud chat, in the browser. Add your AEGIS key (or switch to BYOK) and start typing.</p>
+      </div>
+    </div>
+
+    <form id="composer" class="composer">
+      <textarea id="composer-input" class="composer-input" placeholder="Message AEGIS…" rows="1"></textarea>
+      <button id="send-btn" class="btn btn-primary composer-send" type="submit">Send</button>
+    </form>
+  </section>
+</main>
+
+<script src="vendor/aegis.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
