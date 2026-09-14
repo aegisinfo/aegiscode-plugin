@@ -1142,6 +1142,17 @@ body.memory-open {
   display: none;
 }
 
+/* Same trap, one row up: `.max-tokens-row` is display: flex, so the `hidden`
+   attribute did nothing on `#max-tokens-row`/`#effort-row` — which is how the
+   budget-control swap (effort for the pooled class, a token ceiling for the
+   others) would have shown BOTH controls at once, the exact state it exists to
+   prevent. `display: none` is also what lets a `<label>` be hidden, since
+   labels are inline by default and carry no author display rule. */
+.max-tokens-row[hidden],
+label[hidden] {
+  display: none;
+}
+
 .autonomous-controls {
   display: flex;
   align-items: center;

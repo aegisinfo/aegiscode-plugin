@@ -129,7 +129,14 @@ const ctx = { light: false };
 
 {
   const e = plain(chatflow.effortLine(ctx, 80));
-  assert(e.includes('high') && e.includes('/effort'), 'the effort line names the level and its command');
+  assert(e.includes('/effort'), 'the effort line names its command');
+  // No pin is the default state (the pool sizes each turn from the ask), and
+  // the line has to say so rather than naming a rung nobody chose.
+  assert(e.includes('auto'), `the effort line says auto when nothing is pinned: ${JSON.stringify(e)}`);
+  assert(
+    plain(chatflow.effortLine({ ...ctx, effort: 'medium' }, 80)).includes('medium'),
+    'and names the rung once one is pinned'
+  );
   // The reference leaves a 4-cell right margin; padLine fills the rest when the
   // frame is painted, so the raw line is cols-4 and must never exceed cols.
   assert(screen.lineWidth(chatflow.effortLine(ctx, 80)) <= 80, 'the effort line never exceeds the width');

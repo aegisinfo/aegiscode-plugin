@@ -76,8 +76,8 @@
           hidden
         />
 
-        <label for="max-tokens">Max tokens</label>
-        <div class="max-tokens-row">
+        <label for="max-tokens" id="max-tokens-label">Max tokens</label>
+        <div class="max-tokens-row" id="max-tokens-row">
           <select id="max-tokens">
             <option value="1024">1k</option>
             <option value="4096" selected>4k</option>
@@ -95,6 +95,23 @@
           </label>
         </div>
 
+        <!-- The pooled AEGIS Cloud class sizes a request's token budget
+             server-side from this ladder (effort -> low/medium/high ->
+             16384/32768/65536 total across the fan-out), so the max-tokens row
+             above is hidden for that class instead of being shown and silently
+             overridden: the server treats a body max_tokens as a ceiling, and
+             an effort rung as the budget. Shown for Ollama and custom
+             endpoints, where a per-call ceiling is the only control there is. -->
+        <div class="max-tokens-row" id="effort-row" hidden>
+          <label for="autonomous-effort">Effort</label>
+          <select id="autonomous-effort">
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+            <option value="auto" selected>auto</option>
+          </select>
+        </div>
+
         <label
           class="flow-toggle"
           for="autonomous-toggle"
@@ -106,14 +123,8 @@
           <span>work autonomously</span>
         </label>
         <div id="autonomous-controls" class="autonomous-controls" hidden>
-          <label for="autonomous-effort">Effort</label>
-          <select id="autonomous-effort">
-            <option value="low">low</option>
-            <option value="medium">medium</option>
-            <option value="high" selected>high</option>
-          </select>
           <label for="autonomous-workers">Workers</label>
-          <input type="number" id="autonomous-workers" min="1" max="8" step="1" value="3" />
+          <input type="number" id="autonomous-workers" min="1" max="8" step="1" />
         </div>
         <p class="hint" id="model-hint"></p>
       </section>

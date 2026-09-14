@@ -94,12 +94,26 @@ test('the model picker marks the active row and the current model', () => {
 });
 
 test('the effort picker marks the active row and the current level', () => {
-  const lines = strip(overlays.renderEffortPicker(2, 80, 'Medium'));
+  // Index 3 is High (Auto is row 0 — the default, which is the absence of a
+  // pin rather than a fourth rung).
+  const lines = strip(overlays.renderEffortPicker(3, 80, 'Medium'));
   const active = lines.find((l) => l.includes(theme.GLYPH.cursor));
   assert.ok(active && active.includes('High'), 'the ❯ cursor marks the selected effort');
   const current = lines.find((l) => l.includes(theme.GLYPH.check));
   assert.ok(current && current.includes('Medium'), 'the ✔ mark identifies the current effort');
   for (const l of lines) assert.ok(screen.w(l) <= 80, 'the effort picker fits the width');
+});
+
+test('the effort picker offers auto and marks it when nothing is pinned', () => {
+  const lines = strip(overlays.renderEffortPicker(0, 80, null));
+  assert.ok(lines.some((l) => l.includes('Auto')), 'auto is offered — it is the default state');
+  const current = lines.find((l) => l.includes(theme.GLYPH.check));
+  assert.ok(current && current.includes('Auto'),
+    `null is auto, and auto is what a null current marks: ${JSON.stringify(current)}`);
+  // The rows are the source of the values a selection stores, so the two can
+  // never disagree about which row means what.
+  assert.deepEqual(overlays.EFFORT_VALUES, [null, 'low', 'medium', 'high'],
+    'the picker order is the value order');
 });
 
 test('the resume list shows a search box and the session meta', () => {

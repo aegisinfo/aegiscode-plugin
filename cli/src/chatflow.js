@@ -164,7 +164,7 @@ const separatorLine = (cols, ctx) => [span(themeOf(ctx).dim, '─'.repeat(cols))
 /** The idle bottom-left line: which effort level the next turn runs at. */
 function effortLine(ctx, cols) {
   const t = themeOf(ctx);
-  const txt = `● ${ctx.effort || 'high'} · /effort`;
+  const txt = `● ${ctx.effort || 'auto'} · /effort`;
   const pad = ' '.repeat(Math.max(0, cols - [...txt].length - 4));
   return [span(t.gray, pad + txt)];
 }
@@ -1111,12 +1111,15 @@ async function runSession(host) {
         return;
       }
       if (type === 'effort') {
-        const levels = ['low', 'medium', 'high'];
-        const chosen = levels[overlay.sel || 0];
+        // The picker's own order, not a second copy of the level names: this
+        // used to re-declare ['low','medium','high'] here while the picker drew
+        // its own table, so the row a user picked and the value it stored were
+        // resolved through different lists.
+        const chosen = overlays.EFFORT_VALUES[overlay.sel || 0];
         overlay = null;
         ctx.effort = chosen;
         host.updateConfig({ effort: chosen });
-        note(`effort: ${chosen}`);
+        note(`effort: ${chosen || 'auto'}`);
         render();
         return;
       }

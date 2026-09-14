@@ -45,7 +45,18 @@ try {
   let body = JSON.parse(captured[captured.length - 1].opts.body);
   assert(!('model' in body), 'model must be omitted when absent');
   assert(!('mode' in body), 'mode must not be defaulted client-side');
-  assert(body.max_tokens === 4096, `default max_tokens should be 4096, got ${body.max_tokens}`);
+  // No invented token ceiling either. An unstated `max_tokens` used to default
+  // to 4096 here, and the server treats a body max_tokens as a per-pass ceiling
+  // *over* its effort ladder — so the client was silently capping every pass of
+  // a pooled fan-out at 4k and overriding the budget its own effort selected,
+  // while the UI displayed the ladder as if it had been honoured. Omitting the
+  // key is the documented way to ask for the server's own default.
+  assert(!('max_tokens' in body), `max_tokens must be omitted when unstated, got ${body.max_tokens}`);
+  // A ceiling the caller *does* state still travels — this is a cap, not a
+  // veto on caps.
+  await client.chatCompletion({ prompt: 'hi', maxTokens: 2048 });
+  body = JSON.parse(captured[captured.length - 1].opts.body);
+  assert(body.max_tokens === 2048, `a stated max_tokens must be forwarded, got ${body.max_tokens}`);
   assert(body.messages.length === 1 && body.messages[0].role === 'user', 'prompt wrapped as a user turn');
   assert(!JSON.stringify(body).includes('nexus'), 'no nexus-* id may appear in the body');
 

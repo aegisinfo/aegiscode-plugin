@@ -69,7 +69,10 @@ const ELEMENT_IDS = {
   modelPreset: 'model-preset',
   modelInput: 'model-input',
   maxTokens: 'max-tokens',
+  maxTokensLabel: 'max-tokens-label',
+  maxTokensRow: 'max-tokens-row',
   maxTokensAdaptive: 'max-tokens-adaptive',
+  effortRow: 'effort-row',
   autonomousToggle: 'autonomous-toggle',
   autonomousToggleWrap: 'autonomous-toggle-wrap',
   autonomousControls: 'autonomous-controls',
@@ -349,6 +352,35 @@ function updateAutonomousControlsVisibility() {
   if (!els.autonomousControls) return;
   const wrapVisible = els.autonomousToggleWrap && !els.autonomousToggleWrap.hidden;
   els.autonomousControls.hidden = !(wrapVisible && autonomousEnabled());
+}
+
+/**
+ * Which budget control applies to the selected class.
+ *
+ * Aegis Cloud is sized server-side from `effort`; the other three classes take
+ * a per-call token ceiling from the dropdown. Showing both at once is what made
+ * the token cap untrustworthy on the pooled class — the dropdown was displayed,
+ * read on every send, and then raised by the server's effort ladder, so the
+ * number beside it was never the budget the call ran on. Exactly one control is
+ * on offer now, and it is the one the request actually travels with.
+ */
+function updateBudgetControls(cls) {
+  const pooled = cls === AUTONOMOUS_CLASS;
+  if (els.effortRow) els.effortRow.hidden = !pooled;
+  if (els.maxTokensRow) els.maxTokensRow.hidden = pooled;
+  if (els.maxTokensLabel) els.maxTokensLabel.hidden = pooled;
+}
+
+/**
+ * The effort to send, or undefined for the classes the server does not size
+ * from it. `auto` means "let the server infer it from the ask" — the same thing
+ * the server already does for a request that names no effort, and a deliberate
+ * choice rather than the old silent fall-through to the top rung.
+ */
+function effortFor(cls) {
+  if (cls !== AUTONOMOUS_CLASS) return undefined;
+  const value = els.autonomousEffort && els.autonomousEffort.value;
+  return value && value !== 'auto' ? value : undefined;
 }
 
 // ---------------------------------------------------------------- UI helpers
@@ -1769,6 +1801,7 @@ async function loadModels(cls) {
     els.autonomousToggleWrap.hidden = cls !== AUTONOMOUS_CLASS;
   }
   updateAutonomousControlsVisibility();
+  updateBudgetControls(cls);
 
   const custom = CUSTOM_CLASSES.has(cls);
   els.modelSelect.hidden = custom;
@@ -2274,12 +2307,21 @@ async function send() {
   addMessage('user', prompt);
 
   const ceiling = applyMaxTokensClamp(model);
-  const maxTokens = maxTokensAdaptive() ? ceiling : parseInt(els.maxTokens.value, 10) || 4096;
+  // Aegis Cloud takes no token cap from here at all: the server sizes the call
+  // from `effort`, and a number in this position is a per-pass ceiling *over*
+  // that ladder (aegis1 services/pool_brain.py pass_budgets). Sending the
+  // dropdown's value anyway is what made "Max tokens: 4k" beside a turn a
+  // figure the turn never ran on. The row is hidden for this class as well, so
+  // the two controls can never disagree.
+  const maxTokens = cls === AUTONOMOUS_CLASS
+    ? undefined
+    : maxTokensAdaptive() ? ceiling : parseInt(els.maxTokens.value, 10) || 4096;
   const autonomous = cls === AUTONOMOUS_CLASS && autonomousEnabled();
-  // Only meaningful (and only sent) alongside `autonomous` — see
-  // aegis1 services/pool_brain.py parse_brain_request for the effort/workers
-  // clamping this feeds.
-  const effort = autonomous ? els.autonomousEffort.value : undefined;
+  // Sent for the pooled class whether or not the fan-out is ticked: the fan-out
+  // is enabled by the model id this class sends, so a turn that never entered
+  // autonomous mode still ran pooled and had no way to say how big it should
+  // be. `undefined` = "auto" = the server infers it from the ask.
+  const effort = effortFor(cls);
   const workers = autonomous ? parseInt(els.autonomousWorkers.value, 10) || undefined : undefined;
   // Reuse the open thread's session id (minted once, on its first message)
   // instead of a fresh one per send — a new id every turn is what made both
@@ -2378,7 +2420,11 @@ async function send() {
     if (data && data.model) bits.push(`model: ${data.model}`);
     else if (model) bits.push(`model: ${model}`);
     bits.push(classLabel(cls));
-    if (autonomous) bits.push(`autonomous (${effort}, ${workers || 3}w)`);
+    if (autonomous) bits.push(`autonomous (${effort || 'auto'}, ${workers || 'auto'}w)`);
+    // The budget rung is worth showing even without the fan-out: on the pooled
+    // class it is what sized the call, and a user cannot tell a 16k turn from a
+    // 64k one by looking at the answer.
+    else if (effort) bits.push(`effort: ${effort}`);
     const turnTokens = usageTokens(data && data.usage);
     if (turnTokens != null) bits.push(`tokens: ${turnTokens}`);
     addMessage('assistant', text, bits.join(' · ') || undefined, sessionId, toolLog);
@@ -2459,14 +2505,23 @@ async function init() {
     updateAutonomousControlsVisibility();
   });
 
-  // Effort/worker count for the pool_brain fan-out (aegis1
-  // services/pool_brain.py parse_brain_request reads `effort`/`workers` off
-  // the request body) — opt-in per machine, remembered across restarts.
+  // Budget control for the pooled class: which rung of the server's effort
+  // ladder sizes the call, or "auto" to let the server infer it from the ask
+  // (aegis1 services/pool_brain.py parse_brain_request). Opt-in per machine,
+  // remembered across restarts; a stored value from a build whose list was
+  // short (low/medium/high, no "auto") falls through to the markup's default
+  // rather than assigning an option that no longer exists.
   const savedEffort = localStorage.getItem(AUTONOMOUS_EFFORT_KEY);
-  if (savedEffort) els.autonomousEffort.value = savedEffort;
+  if (savedEffort && Array.from(els.autonomousEffort.options).some((o) => o.value === savedEffort)) {
+    els.autonomousEffort.value = savedEffort;
+  }
   els.autonomousEffort.addEventListener('change', () => {
     localStorage.setItem(AUTONOMOUS_EFFORT_KEY, els.autonomousEffort.value);
   });
+  // Worker count for the fan-out. Left empty by default on purpose: an empty
+  // field is what tells the server to size the fan-out from the ask
+  // (parse_brain_request's auto path) instead of the old client-side default of
+  // 3, which made every turn a 4-pass fan-out.
   const savedWorkers = localStorage.getItem(AUTONOMOUS_WORKERS_KEY);
   if (savedWorkers) els.autonomousWorkers.value = savedWorkers;
   els.autonomousWorkers.addEventListener('change', () => {
@@ -2484,6 +2539,11 @@ async function init() {
 
   els.classSelect.addEventListener('change', () => {
     localStorage.setItem(CLASS_KEY, els.classSelect.value);
+    // Apply the budget-control choice immediately rather than waiting for the
+    // model list: loadModels() is async, and until it resolves the previous
+    // class's control would still be on screen — showing a token cap on a
+    // pooled turn, or hiding the effort rung it runs on.
+    updateBudgetControls(els.classSelect.value);
     loadModels(els.classSelect.value);
   });
 

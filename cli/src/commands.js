@@ -46,6 +46,7 @@ const { execSync } = require('node:child_process');
 const { span } = require('./screen.js');
 const { C, BOLD, BOLD_OFF } = require('./theme.js');
 const panels = require('./panels.js');
+const overlays = require('./overlays.js');
 const {
   updateConfig, loadConfig, loadPermissions, savePermissions, addPermissionRule,
   DEFAULT_PERMISSIONS, permissionsPath, configPath,
@@ -93,7 +94,13 @@ const CATEGORIES = [
 
 const categoryLabel = (id) => (CATEGORIES.find((cat) => cat.id === id) || {}).label || id;
 
-const EFFORT_LEVELS = ['low', 'medium', 'high'];
+// One table, shared with the picker that draws it. The two used to be separate
+// lists — this one a string array, chatflow.js's own copy of the same three
+// strings, and overlays.js's label/note rows — so adding a level meant editing
+// three places, and the index a picker row reported was mapped back to a value
+// through whichever list happened to be in scope. EFFORT_VALUES is the picker's
+// own order, `null` first for "auto".
+const EFFORT_LEVELS = overlays.EFFORT_VALUES;
 
 // ── Small handler helpers ─────────────────────────────────────────────────────
 
@@ -348,12 +355,12 @@ const COMMANDS = [
     },
   },
   {
-    name: 'effort', args: ['level'], hint: '[low|medium|high]', category: 'model',
-    desc: 'Set effort level for model usage',
+    name: 'effort', args: ['level'], hint: '[auto|low|medium|high]', category: 'model',
+    desc: 'Set the token budget the pool sizes each turn from',
     handler: async (c, args) => {
       const level = (args.level || '').toLowerCase();
-      if (level && !EFFORT_LEVELS.includes(level)) {
-        note(c, `Unknown effort level "${args.level}". Use ${EFFORT_LEVELS.join(', ')}.`);
+      if (level && level !== 'auto' && !EFFORT_LEVELS.includes(level)) {
+        note(c, `Unknown effort level "${args.level}". Use auto, ${EFFORT_LEVELS.filter(Boolean).join(', ')}.`);
         c.render();
         return true;
       }
@@ -361,9 +368,14 @@ const COMMANDS = [
         c.openOverlay({ type: 'effort', sel: Math.max(0, EFFORT_LEVELS.indexOf(c.ctx.effort)) });
         return true;
       }
-      c.ctx.effort = level;
-      c.saveConfig({ effort: level });
-      note(c, `Effort level: ${level}`);
+      // 'auto' is the absence of a pin, not a fourth rung: it is stored as null
+      // so nothing is sent and the server sizes the turn from the ask.
+      const pinned = level === 'auto' ? null : level;
+      c.ctx.effort = pinned;
+      c.saveConfig({ effort: pinned });
+      note(c, pinned
+        ? `Effort level: ${pinned} — the pool sizes this turn's token budget from it`
+        : 'Effort level: auto — the pool sizes each turn from the ask');
       c.render();
       return true;
     },

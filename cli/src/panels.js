@@ -202,7 +202,9 @@ function buildStatus(state, ctx = {}) {
   add('Working directory', s.cwd);
   add('Home', s.home);
   add('Model', s.model);
-  add('Effort', s.effort);
+  // `null` = auto: the pool sizes each turn from the ask, so the row says so
+  // rather than vanishing (add() skips empty values).
+  add('Effort', s.effort || 'auto');
   if (s.thinking != null) add('Thinking', s.thinking ? 'on' : 'off');
   if (s.stream != null) add('Streaming', s.stream === false ? 'off' : 'on');
   if (s.vim != null) add('Vim keymap', s.vim ? 'on' : 'off');

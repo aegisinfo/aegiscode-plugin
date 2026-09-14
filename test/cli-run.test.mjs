@@ -121,9 +121,21 @@ try {
     streamed.stream_options && streamed.stream_options.include_usage === true,
     'the CLI asks the server for usage on the streaming path'
   );
-  assert(streamed.max_tokens > 0, 'a max_tokens ceiling is sent');
+  // No token ceiling from the client unless the user asked for one: the server
+  // sizes a pooled call from `effort`, and a number here is a per-pass ceiling
+  // *over* that ladder (aegis1 services/pool_brain.py pass_budgets). The old
+  // `max_tokens || 4096` in client/aegis.js invented a cap on every request and
+  // took the budget decision away from the effort the caller chose.
+  assert(streamed.max_tokens === undefined, `an unpinned run sends no max_tokens: ${streamed.max_tokens}`);
   assert(!streamed.mode, 'an unset mode is never invented');
   assert(!streamed.model, 'an unpinned model is omitted so the server routes');
+
+  // ...and a pinned one still travels, because a ceiling the user typed is the
+  // ceiling they asked for.
+  const cappedRun = await run(['--max-tokens', '2048', '-p', 'short please']);
+  assert(cappedRun.code === 0, 'a --max-tokens run exits 0');
+  const cappedReq = seen.chat[seen.chat.length - 1];
+  assert(cappedReq.max_tokens === 2048, `--max-tokens is forwarded: ${cappedReq.max_tokens}`);
 
   // ── --json ───────────────────────────────────────────────────────────────
   const json = await run(['--json', '-p', 'hello again']);

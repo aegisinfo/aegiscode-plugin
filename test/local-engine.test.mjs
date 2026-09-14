@@ -206,13 +206,19 @@ await engine.chat({ class: 'aegis', prompt: 'hi', model: 'm1', autonomous: true,
   assert(args.extra.workers === 5, `workers forwarded: ${JSON.stringify(args.extra)}`);
 }
 
-// effort/workers are dropped when NOT autonomous — never sent bare, and never
-// sent when autonomous is on but the value itself is falsy/omitted.
+// effort and workers part company here. `workers` sizes a fan-out, so it is
+// withheld from a turn that is not running one. `effort` picks the budget rung
+// and travels either way: the fan-out is enabled by the *model id* this class
+// sends (`nexus-brain`), so a non-autonomous turn is still a pooled call — it
+// used to be one the caller could not size at all, which is how a one-word
+// prompt ended up on the server's own top-of-ladder default.
 await engine.chat({ class: 'aegis', prompt: 'hi', model: 'm1', effort: 'high', workers: 4 }, () => {});
 {
   const [, args] = calls[calls.length - 1];
   assert(!('brain' in args.extra), 'non-autonomous turn sets no brain flag');
-  assert(!('effort' in args.extra) && !('workers' in args.extra), `effort/workers withheld without autonomous: ${JSON.stringify(args.extra)}`);
+  assert(!('workers' in args.extra), `workers withheld without autonomous: ${JSON.stringify(args.extra)}`);
+  assert(args.extra.effort === 'high',
+    `effort still sizes the pooled call: ${JSON.stringify(args.extra)}`);
 }
 await engine.chat({ class: 'aegis', prompt: 'hi', model: 'm1', autonomous: true }, () => {});
 {

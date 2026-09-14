@@ -177,27 +177,38 @@ function renderModelPicker(models, sel = 0, width = 80, height = 24, current = n
 // ── Effort picker overlay (/effort) ──────────────────────────────────────────
 
 const EFFORT_LEVELS = [
-  { label: 'Low', note: 'Fastest, most efficient' },
+  { label: 'Auto', value: null, note: 'Sized per turn from the ask (default)' },
+  { label: 'Low', note: 'Fastest, cheapest budget' },
   { label: 'Medium', note: 'Balanced' },
-  { label: 'High', note: 'Highest quality, slowest' },
+  { label: 'High', note: 'Highest budget, slowest' },
 ];
+
+// The picker's order reduced to the values a selection means, so the row a user
+// picks and the value the session stores can never come from two different
+// lists (commands.js validates against this, chatflow.js resolves the overlay
+// through it). `null` is "auto" — no rung pinned.
+const EFFORT_VALUES = EFFORT_LEVELS.map((lv) => (lv.value === undefined ? lv.label.toLowerCase() : lv.value));
 
 /**
  * @param {number} sel selected index
  * @param {number} width
- * @param {string|null} current the currently-selected effort level
+ * @param {string|null} current the currently-selected effort level (null = auto)
  * @param {Array} [levels] override the level table
  */
 function renderEffortPicker(sel = 0, width = 80, current = null, levels = EFFORT_LEVELS) {
   const lines = [];
   lines.push(blank(width));
   lines.push([span('', ' '), span(C.white + BOLD, 'Select effort'), span(BOLD_OFF, '')]);
-  lines.push([span('', ' '), span(C.gray, 'Controls how much reasoning the model puts into each turn.')]);
+  lines.push([span('', ' '), span(C.gray, 'Sets the token budget the pool sizes each turn from.')]);
   lines.push(blank(width));
   for (let i = 0; i < levels.length; i++) {
     const lv = levels[i];
     const active = i === sel;
-    const cur = current != null && String(current).toLowerCase() === String(lv.label).toLowerCase();
+    // `current == null` is auto, which is the first row's own value — matching
+    // on the label alone would never mark the default as the current choice.
+    const cur = current == null
+      ? lv.value === null
+      : String(current).toLowerCase() === String(lv.label).toLowerCase();
     const left = active ? span(C.lavender, GLYPH.cursor) : span('', ' ');
     const nameSpan = active ? span(C.lavender, lv.label) : span(C.white, lv.label);
     const mark = cur ? span(C.green, ' ' + GLYPH.check) : span('', '');
@@ -283,4 +294,6 @@ module.exports = {
   renderModelPicker,
   renderEffortPicker,
   renderResumeList,
+  EFFORT_LEVELS,
+  EFFORT_VALUES,
 };

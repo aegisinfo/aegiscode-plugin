@@ -87,7 +87,11 @@ function createApp(options = {}) {
   const commandCtx = {
     light: opts.light,
     model: opts.model,
-    effort: 'high',
+    // `null` = "auto": send no effort, so the server sizes the turn from the
+    // ask. This is the *budget* control on the pooled class (aegis1 sizes the
+    // token ladder from it), which is why it is not defaulted to a rung here —
+    // pinning one would make every turn cost what that rung grants.
+    effort: null,
     thinking: false,
     themeIndex: opts.light ? 2 : 1,
     vim: false,
@@ -371,6 +375,14 @@ function createApp(options = {}) {
           model: commandCtx.model || undefined,
           system: opts.system,
           maxTokens: opts.maxTokens,
+          // `effort` is the pooled budget control, and it travels on every turn
+          // — this host only ever runs the 'aegis' class, whose calls are sized
+          // server-side from it (aegis1 services/pool_brain.py). It used to be
+          // held in the session state and rendered in the status line without
+          // ever reaching the wire, so /effort changed the display and nothing
+          // about what the turn cost. `null` (auto) is omitted so the server
+          // infers the rung from the ask.
+          effort: commandCtx.effort || undefined,
           // false asks the engine for the buffered (non-stream) wire form, so
           // `--no-stream` and piped runs get a single body rather than SSE.
           stream: commandCtx.stream !== false,
@@ -1073,6 +1085,8 @@ function createApp(options = {}) {
       return;
     }
     if (!opts.model && cfg.model) commandCtx.model = cfg.model;
+    // `null` in the config is "auto" and is deliberately not assigned over the
+    // default — there is nothing to restore, because nothing is pinned.
     if (cfg.effort) commandCtx.effort = cfg.effort;
     if (typeof cfg.vim === 'boolean') commandCtx.vim = cfg.vim;
     if (cfg.lastRecap) commandCtx.lastRecap = cfg.lastRecap;

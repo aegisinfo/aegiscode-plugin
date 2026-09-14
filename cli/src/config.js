@@ -59,7 +59,12 @@ const DEFAULT_CONFIG = {
   // aegiscode- name so /model add/remove/switch stay compatible both ways.
   models: null,
   currentModelId: null,
-  effort: 'high',
+  // `null` = no effort pinned, i.e. "auto": each turn is sized by the server
+  // from the ask itself (aegis1 services/pool_brain.py estimate_effort). The
+  // old 'high' was a *pin* on the top rung of the budget ladder — the most the
+  // server can grant — so the CLI's default turn was the most expensive one it
+  // could make, and /effort could only ever move it down.
+  effort: null,
   vim: false,
   lastCwd: '',
 };

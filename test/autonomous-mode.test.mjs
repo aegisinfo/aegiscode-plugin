@@ -125,7 +125,19 @@ function harness(replies) {
     'the single pass is pinned to the band the workers run on (not the cheapest id in the pool)'
   );
   assert(calls[1].maxTokens === 8192, 'the retry still doubles the budget (that is what it is for)');
-  assert(!('workers' in calls[1].extra) && !('effort' in calls[1].extra), 'no fan-out tuning on a single pass');
+  // `workers` is fan-out tuning and has no meaning on a single pass. `effort`
+  // is different: it is the budget rung, and it is now sent on every pooled
+  // dispatch — the fan-out is triggered by the model id this class sends
+  // (`nexus-brain`), so a caller that never ticked "work autonomously" still
+  // ran a pooled call and previously had no way to say how big it should be,
+  // leaving the server on its own top-of-ladder default. An inert field to the
+  // server on this path (aegis1 reads effort only under the fan-out), but a
+  // deliberate one: it keeps the request honest about what it asked for.
+  assert(!('workers' in calls[1].extra), 'no fan-out sizing on a single pass');
+  assert(
+    calls[1].extra.effort === 'high',
+    'the effort rung still travels, so the pass is not silently resized'
+  );
 }
 
 // (d) Same for the empty-turn write-up pass.

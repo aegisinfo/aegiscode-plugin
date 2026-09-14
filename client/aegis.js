@@ -278,6 +278,13 @@ function createClient(opts = {}) {
    *                 so a reasoning-only stream still counts as unanswered.
    *   - `idleTimeoutMs`  override the stalled-stream watchdog for this call
    *                 (a worker fan-out is legitimately silent between passes)
+   *   - `maxTokens`  output ceiling. Omitted from the body when absent so the
+   *                 server's own budget applies — on a pooled request that is
+   *                 the `effort` ladder, and a number sent from here caps it.
+   *   - `effort` / `workers`  pooled-brain budget rung and fan-out size.
+   *                 Forwarded only inside `extra`, as the server reads them off
+   *                 the body (aegis1 services/pool_brain.py parse_brain_request)
+   *                 and sizes the budget from them.
    */
   async function chatCompletion({
     prompt,
@@ -298,9 +305,17 @@ function createClient(opts = {}) {
     // model the server picks its default (no client-invented tier id). `mode`
     // is a legacy server-side shorthand — forwarded verbatim only when the
     // caller supplies it, never defaulted, never built into a model id.
+    //
+    // `max_tokens` is omitted entirely when the caller states none, rather than
+    // defaulted here. The server has its own budget ladder (`mode`/`effort` on
+    // the pooled path) and treats a body max_tokens as a *ceiling* over it, so
+    // an invented 4096 was not a harmless default: it capped every pass of a
+    // pooled-brain fan-out at 4096 and overrode the ladder the caller's effort
+    // selected. Omitting it is the documented way to say "server default" (see
+    // mcp/tools.js's max_tokens description).
     const body = {
       messages: buildMessages(messages, system, prompt),
-      max_tokens: maxTokens || 4096,
+      ...(maxTokens ? { max_tokens: maxTokens } : {}),
       ...(extra || {}),
     };
     if (model) body.model = model;

@@ -584,13 +584,18 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
           // model as the fan-out, one sample instead of four — otherwise
           // dropping the fan-out would have quietly changed the model too.
           ...(brainFlag === false ? { mode: 'brain' } : {}),
-          // Only meaningful (and only sent) alongside a running fan-out — aegis1
-          // services/pool_brain.py parse_brain_request reads `effort`/
-          // `workers` straight off the body and clamps them itself
-          // (EFFORT_LEVELS / MAX_WORKERS), so no client-side validation here.
-          // Keyed on the effective brain flag, not on `autonomous`: an opted-out
-          // single pass carries no fan-out tuning it cannot use.
-          ...(brainFlag === true && opts.effort ? { effort: opts.effort } : {}),
+          // `effort` is the budget rung, and it is sent whenever the caller has
+          // one — not only alongside a fan-out. The fan-out is triggered by the
+          // model id (this class sends ``nexus-brain``), so a caller that never
+          // ticked "work autonomously" still ran a pooled call and had no way to
+          // say how big it should be: the server fell through to its own default
+          // rung. That is how a one-word prompt came to reserve the top of the
+          // ladder. A single-pass pass carries it too — inert on that path, but
+          // it keeps the request honest about what it asked for.
+          ...(opts.effort ? { effort: opts.effort } : {}),
+          // Only meaningful with a running fan-out — aegis1 services/pool_brain.py
+          // parse_brain_request reads `workers` straight off the body and clamps
+          // it itself (MAX_WORKERS), so no client-side validation here.
           ...(brainFlag === true && opts.workers ? { workers: opts.workers } : {}),
           // The pool forwards `tools` to the provider and returns tool_calls
           // (aegis1 app.py:7765 → provider, pool_brain synthesis keeps them).
