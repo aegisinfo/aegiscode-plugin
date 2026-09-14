@@ -48,11 +48,49 @@ export AEGIS_API_KEY="aegis_..."
 
 ```bash
 aegiscode                        # interactive session
+aegiscode --continue             # skip onboarding, resume the last session
 aegiscode "why is the sky blue"  # one-shot, prints the answer and the tokens
 aegiscode -p "..." --json        # machine-readable
 echo "q" | aegiscode -p -        # prompt on stdin
 aegiscode -m deepseek/deepseek-v4-flash -p "..."   # pin a model
 ```
+
+## First run
+
+A genuine first run walks the reference's onboarding before the session starts —
+the order is `aegiscodex-dev`'s:
+
+```
+────────────────────────────────────────────────────────────────────────────────
+Accessing workspace:
+/home/you/project
+
+Quick safety check: Is this a project you created or one you trust? …
+AEGIS Code will be able to read, edit, and execute files here.
+
+Security guide
+
+❯ 1.Yes, I trust this folder
+  2.No, exit
+
+Enter to confirm · Esc to cancel
+```
+
+then the theme picker (the reference's 7 rows — Auto, Dark/Light, plus
+colourblind-friendly and ANSI-only variants, each previewed as a real diff in
+that palette), then the welcome screen with the mark, a **Tips for getting
+started** box and a **What's new** box. The chosen row is written to
+`~/.aegiscode/config.json`, so `Welcome back!` is what you get next time and the
+picker never reappears.
+
+Declining the trust check **ends the process** rather than continuing — the
+folder you just refused to vouch for is not read, edited or executed in.
+`--continue` skips onboarding entirely.
+
+Preferences survive a restart: model, effort, theme and vim mode are restored on
+launch, and an explicit flag (`-m`, `--light`) always outranks the stored value.
+
+## Use
 
 In a session, plain text is a prompt. `/help` lists commands, grouped by
 category, the way `aegiscodex-dev` does. The registry is that client's, ported
@@ -93,7 +131,7 @@ alternate-screen frame of header rule, transcript viewport, spinner/effort line,
 input line and status line, driven by a raw key stream.
 
 ```
-╭───────────────────────────── AEGIS Code v6.2.0 ─────────────────────────────╮
+╭───────────────────────────── AEGIS Code v6.3.0 ─────────────────────────────╮
 ❯ summarise what changed in the token accounting
 ● Three things changed, and one of them was costing you money:
 
@@ -138,9 +176,14 @@ What the loop does, in the order a turn happens:
   transcript live (and scrolling up is anchored to an absolute line index, so an
   arriving delta does not drag the reader back to the bottom); everything else
   you type is replayed into the input line afterwards.
-- **Overlays**: `/` the palette, `alt+p` the model picker, `/effort` the effort
-  picker, `/resume` the session list, `?` the shortcut grid, and a centred
-  Yes/No dialog when a mutating tool needs approval.
+- **Overlays**: `/` the palette (fuzzy-ranked, with `Tab` to complete to the
+  highlighted command), `alt+p` the model picker, `/effort` the effort picker,
+  `/resume` the session list, `?` the shortcut grid, `ctrl+o` permissions, and a
+  centred Yes/No dialog when a mutating tool needs approval. `Esc` closes an
+  overlay, and clears the input line when nothing is open.
+- **Every turn is persisted** to `~/.aegiscode/history.jsonl`, with a transcript
+  checkpoint alongside it, so `/resume`, `/cost`, `/clear` and `/rewind` all have
+  something real to read. On exit the session prints how to come back to it.
 
 Anything that is not a real terminal — a pipe, `-p`, a CI run — stays a linear
 transcript written once to scrollback, so output remains pipeable and

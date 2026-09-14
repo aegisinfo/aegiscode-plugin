@@ -156,6 +156,280 @@ assert(typeof unavail.command.unavailable === 'string' && unavail.command.unavai
 eq(parseLine('/nope').kind, 'unknown', 'an unknown command is unknown');
 eq(parseLine('/nope').name, 'nope', 'the unknown name is reported');
 
+// ── Defect A: /compact and /recap forward the second callModel argument ──────
+//
+// summarize.js invokes callModel(prompt, { model, signal }) — the second
+// argument carries the AbortSignal the chatflow's withWorking supplied. If the
+// handler drops it, `c.ask(prompt)` never sees the signal and Esc cannot abort
+// the running provider call. Pre-fix, `opts` is undefined here.
+for (const name of ['compact', 'recap']) {
+  const signal = { aborted: false, addEventListener() {}, removeEventListener() {} };
+  let recorded;
+  const pushed = [];
+  const stub = {
+    ctx: { model: 'test-model' },
+    sessionId: 's-test',
+    transcript: [{ role: 'user', text: 'hello' }, { role: 'assistant', text: 'world' }],
+    push: (row) => pushed.push(row),
+    note: (t) => pushed.push({ role: 'note', text: t }),
+    panel: (lines) => pushed.push({ role: 'panel', lines }),
+    render: () => {},
+    withWorking: async (fn) => fn(signal),
+    ask: async (prompt, opts) => { recorded = opts; return { text: 'summary' }; },
+    saveConfig: () => {},
+  };
+  await findCommand(name).handler(stub, { _rest: '' });
+  assert(recorded, `/${name} calls c.ask`);
+  assert(recorded.signal === signal, `/${name} forwards the abort signal object the handler was given`);
+  assert(recorded.model === 'test-model', `/${name} forwards the model through to c.ask`);
+}
+
+// ── Defect C: /model loads the list first and never opens an empty picker ────
+{
+  let loads = 0;
+  let stateReadAfterLoad = false;
+  const pushed = [];
+  const opened = [];
+  const stub = {
+    ctx: { model: null },
+    transcript: [],
+    push: (row) => pushed.push(row),
+    note: (t) => pushed.push({ role: 'note', text: t }),
+    panel: (lines) => pushed.push({ role: 'panel', lines }),
+    render: () => {},
+    openOverlay: (o) => opened.push(o),
+    loadModels: async () => { loads++; },
+    state: () => { stateReadAfterLoad = loads > 0; return { models: [] }; },
+  };
+  await findCommand('model').handler(stub, { _rest: '' });
+  assert(loads >= 1, '/model with no argument calls c.loadModels()');
+  assert(stateReadAfterLoad, '/model reads state().models only after loadModels() has run');
+  assert(!opened.some((o) => o && o.type === 'model'), '/model never opens an empty model picker');
+  assert(
+    pushed.some((r) => r.role === 'note' && /No pinnable models/.test(r.text || '')),
+    '/model notes the empty list honestly'
+  );
+}
+{
+  let loads = 0;
+  const pushed = [];
+  const stub = {
+    ctx: { model: null },
+    push: (row) => pushed.push(row),
+    render: () => {},
+    loadModels: async () => { loads++; },
+    state: () => ({ models: [] }),
+  };
+  await findCommand('model').handler(stub, { sub: 'list', _rest: 'list' });
+  assert(loads >= 1, '/model list calls c.loadModels() before building the panel');
+}
+
+// ── Defect B: /run binds the dev-server job to the session ──────────────────
+//
+// runDevServer spawns a real child, so this drives it in a throwaway cwd whose
+// dev script just sleeps for a minute, asserts openStream was handed the job
+// (and that the stray unresolved tool row is gone), then stops the job in a
+// finally. A temp AEGISCODE_HOME keeps any config write off the real home.
+{
+  const os = require('node:os');
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'aegiscode-run-'));
+  fs.writeFileSync(
+    path.join(tmp, 'package.json'),
+    JSON.stringify({ name: 'run-fixture', scripts: { dev: 'node -e "setTimeout(()=>{},60000)"' } })
+  );
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'aegiscode-runhome-'));
+  const prevCwd = process.cwd();
+  const prevHome = process.env.AEGISCODE_HOME;
+  process.env.AEGISCODE_HOME = home;
+  const opened = [];
+  const closed = [];
+  const pushed = [];
+  let job = null;
+  const stub = {
+    ctx: { model: null, cwd: tmp },
+    sessionId: 'run-test',
+    transcript: [],
+    push: (row) => pushed.push(row),
+    note: (t) => pushed.push({ role: 'note', text: t }),
+    panel: (lines) => pushed.push({ role: 'panel', lines }),
+    render: () => {},
+    openOverlay: () => {},
+    closeOverlay: () => {},
+    askInput: async () => null,
+    withWorking: async (fn) => fn(new AbortController().signal),
+    runPrompt: async () => {},
+    ask: async () => ({ text: '' }),
+    runTool: async () => '',
+    refreshSpend: async () => null,
+    state: () => ({ models: [] }),
+    loadModels: async () => {},
+    setInput: () => {},
+    exit: () => {},
+    client: {},
+    TOOLS: {},
+    openStream: (j) => { opened.push(j); job = j; },
+    closeStream: (j) => { closed.push(j); },
+    saveConfig: () => {},
+    showThemePicker: () => {},
+  };
+  try {
+    process.chdir(tmp);
+    await findCommand('run').handler(stub, { _rest: '' });
+    assert(opened.length === 1, '/run calls openStream exactly once');
+    assert(job && job === opened[0], '/run hands the spawned job to openStream');
+    assert(job.label === 'npm run dev', 'the job carries the command as its label for the status line');
+    assert(
+      typeof job.stop === 'function' && job.done && typeof job.done.then === 'function',
+      'the job exposes stop() and a done promise'
+    );
+    assert(!pushed.some((r) => r.role === 'tool'), '/run leaves no unresolved {role:"tool"} row behind');
+    job.stop();
+    await Promise.race([job.done, new Promise((r) => setTimeout(r, 8000))]);
+    assert(closed.includes(job), '/run calls closeStream(job) once the job exits');
+  } finally {
+    try { if (job && typeof job.stop === 'function') job.stop(); } catch {}
+    process.chdir(prevCwd);
+    if (prevHome === undefined) delete process.env.AEGISCODE_HOME;
+    else process.env.AEGISCODE_HOME = prevHome;
+    fs.rmSync(tmp, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+}
+
+// ── /init <file> cannot write outside the working directory ─────────────────
+{
+  const os = require('node:os');
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'aegiscode-init-'));
+  const prevCwd = process.cwd();
+  const prevHome = process.env.AEGISCODE_HOME;
+  process.env.AEGISCODE_HOME = tmp;
+  const pushed = [];
+  const stub = {
+    ctx: { cwd: tmp },
+    transcript: [],
+    push: (row) => pushed.push(row),
+    note: (t) => pushed.push({ role: 'note', text: t }),
+    panel: (lines) => pushed.push({ role: 'panel', lines }),
+    render: () => {},
+    saveConfig: () => {},
+  };
+  try {
+    process.chdir(tmp);
+    await findCommand('init').handler(stub, { file: '../../escape', _rest: '../../escape' });
+    const escaped = path.resolve(tmp, '../../escape');
+    assert(!fs.existsSync(escaped), '/init refuses the escaping path and writes nothing');
+    assert(!fs.readdirSync(tmp).includes('escape'), '/init leaves no escape file inside the project either');
+    assert(
+      pushed.some((r) => r.role === 'note' && /outside/.test(r.text || '')),
+      '/init notes the refusal honestly'
+    );
+  } finally {
+    process.chdir(prevCwd);
+    if (prevHome === undefined) delete process.env.AEGISCODE_HOME;
+    else process.env.AEGISCODE_HOME = prevHome;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+// ── every handler runs against the frozen context without throwing ──────────
+//
+// A handler that throws on its normal path is a command the user cannot use,
+// and the only way to notice before shipping is to call it. Each one gets the
+// same stub `c` the chatflow provides, an empty arg set, and a temp
+// AEGISCODE_HOME so nothing writes to a real config or session store. Argless
+// invocation is deliberate: it is the state a user lands in by typing the bare
+// command, which is exactly where an unguarded `args.x.y` blows up.
+{
+  const os = require('node:os');
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'aegiscode-cmdsmoke-'));
+  const prevHome = process.env.AEGISCODE_HOME;
+  process.env.AEGISCODE_HOME = home;
+
+  const failures = [];
+  const ran = [];
+  for (const c of COMMANDS) {
+    if (typeof c.handler !== 'function') continue;
+    if (c.unavailable) continue;
+    const pushed = [];
+    const ctx = {
+      model: null,
+      effort: 'high',
+      thinking: false,
+      themeIndex: 1,
+      light: false,
+      vim: false,
+      stream: true,
+      cwd: home,
+      sessionId: 'smoke',
+      lastRecap: null,
+    };
+    const stub = {
+      ctx,
+      sessionId: 'smoke',
+      transcript: [],
+      push: (row) => pushed.push(row),
+      note: (t) => pushed.push({ role: 'note', text: t }),
+      panel: (lines) => pushed.push({ role: 'panel', lines }),
+      render: () => {},
+      openOverlay: () => {},
+      closeOverlay: () => {},
+      askInput: async () => null,
+      withWorking: async (fn) => fn(new AbortController().signal),
+      runPrompt: async () => {},
+      ask: async () => ({ text: '', usage: null, model: null, ms: 0, interrupted: false }),
+      runTool: async () => '',
+      refreshSpend: async () => null,
+      state: () => ({ version: '0.0.0', cwd: home, home, tokens: {}, permissions: { mode: 'ask', rules: {} } }),
+      loadModels: async () => {},
+      openStream: () => {},
+      closeStream: () => {},
+      setInput: () => {},
+      exit: () => {},
+      client: { apiBase: 'http://stub', apiKey: 'k' },
+      TOOLS: {},
+      saveConfig: () => {},
+      showThemePicker: () => {},
+    };
+    try {
+      // `args` is the keyed positional object a real dispatch builds.
+      await c.handler(stub, { _rest: '' });
+      ran.push(c.name);
+    } catch (e) {
+      failures.push(`/${c.name}: ${(e && e.message) || e}`);
+    }
+  }
+
+  if (prevHome === undefined) delete process.env.AEGISCODE_HOME;
+  else process.env.AEGISCODE_HOME = prevHome;
+  fs.rmSync(home, { recursive: true, force: true });
+
+  assert(
+    failures.length === 0,
+    `every handler runs with no arguments (${failures.length} threw):\n    ${failures.join('\n    ')}`
+  );
+  assert(ran.length >= 50, `the smoke actually exercised the handlers (ran ${ran.length})`);
+  console.log(`  handlers: ${ran.length} ran with no arguments, none threw`);
+
+  // Running every handler must not touch the working tree. /export and /init
+  // wrote to `process.cwd()` instead of the command context's cwd, so this very
+  // smoke test was dropping `aegiscodex-export-*.md` and `AEGIS.md` into the
+  // repository root on every run — and, worse, writing into the directory the
+  // user had just left with /cd.
+  const strays = fs
+    .readdirSync(process.cwd())
+    .filter((n) => n === 'AEGIS.md' || /^aegiscodex-export-/.test(n));
+  assert(
+    strays.length === 0,
+    `the command smoke test must not write into the working directory (found ${strays.join(', ')})`
+  );
+}
+
 console.log('CLI commands test passed');
 console.log(`  commands: ${COMMANDS.length} entries (${all.length} listed, ${vis.length} visible with this env)`);
 console.log(`  categories: ${CATEGORIES.length} · effort levels: ${EFFORT_LEVELS.join('/')}`);

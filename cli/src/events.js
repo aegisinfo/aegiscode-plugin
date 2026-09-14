@@ -249,6 +249,36 @@ function drainQueue() {
 }
 
 /** Test seam: forget attached stdin, timers and queued keys. */
+/** True once a key stream is attached — i.e. whether nextKey() has a source. */
+function isKeyStreamAttached() {
+  return !!attachedStdin;
+}
+
+/**
+ * Tear the pump down, removing the data listener.
+ *
+ * `resetKeyStream()` deliberately only *drops the reference* (it is used
+ * between tests and after a child-process handover), which leaves the listener
+ * registered on stdin. Attaching again would then run two pumps over the same
+ * bytes and dispatch every keystroke twice. Onboarding attaches before the
+ * session loop does, so it needs a real detach rather than a reset.
+ */
+function detachKeyStream() {
+  if (attachedStdin && onData) {
+    try {
+      attachedStdin.removeListener('data', onData);
+    } catch {
+      /* stream already gone */
+    }
+    try {
+      if (typeof attachedStdin.setRawMode === 'function') attachedStdin.setRawMode(false);
+    } catch {
+      /* not a TTY */
+    }
+  }
+  resetKeyStream();
+}
+
 function resetKeyStream() {
   clearTimeout(escTimer);
   clearTimeout(pasteTimer);
@@ -270,6 +300,8 @@ module.exports = {
   suspendKeyStream,
   resumeKeyStream,
   isKeyStreamSuspended,
+  isKeyStreamAttached,
+  detachKeyStream,
   nextKey,
   nextKeyTimeout,
   requeueKeys,

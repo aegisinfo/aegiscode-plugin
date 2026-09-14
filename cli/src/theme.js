@@ -127,9 +127,69 @@ const DONE_VERBS = ['Churned', 'Worked'];
 
 const THEMES = { dark: C, light: LIGHT };
 
-/** The palette object for a context. Colours are always derived from one of the
- *  two theme objects — never typed inline. */
+/**
+ * The two extra palette families the reference's theme picker offers.
+ *
+ * `cb` is the colourblind-friendly variant: the red/green pair (the one that
+ * carries meaning in diffs and errors) is remapped to the blue/orange axis so
+ * the two remain distinguishable under deuteranopia and protanopia. `ansi` uses
+ * the terminal's own 16-colour table, for terminals whose truecolour output is
+ * remapped anyway — the whole point being that the *terminal* decides, not us.
+ */
+const CB_DARK = { ...C, green: RGB(86, 182, 194), red: RGB(255, 146, 43), gold: RGB(255, 203, 71) };
+const CB_LIGHT = { ...LIGHT, green: RGB(30, 130, 145), red: RGB(200, 100, 20), gold: RGB(150, 110, 0) };
+
+// 16-colour SGR foregrounds. Written as escape strings rather than RGB triples
+// because the variant exists precisely to hand the decision to the terminal.
+const A = (n) => `\x1b[${n}m`;
+const ANSI_DARK = {
+  gold: A(93), coral: A(91), lavender: A(94), blue: A(94), green: A(92),
+  red: A(91), gray: A(90), dim: A(90), white: A(97), black: A(40),
+  darkBg: '\x1b[48;5;236m',
+};
+const ANSI_LIGHT = {
+  gold: A(33), coral: A(31), lavender: A(34), blue: A(34), green: A(32),
+  red: A(31), gray: A(90), dim: A(37), white: A(30), black: A(47),
+  darkBg: '\x1b[48;5;254m',
+};
+
+/**
+ * The theme picker's table, copied from `aegiscodex-dev/src/screens.js` THEMES
+ * (names and notes verbatim). `light` is the flag the reference sets on commit
+ * (`ctx.light = sel === 2 || sel === 4 || sel === 6`); `palette` is what this
+ * client resolves the row to, since it has no terminal-background probe and so
+ * resolves "Auto" to the dark palette.
+ */
+const THEME_TABLE = [
+  { name: 'Auto', note: '(match terminal)', light: false, palette: C },
+  { name: 'Dark mode', note: '', light: false, palette: C },
+  { name: 'Light mode', note: '', light: true, palette: LIGHT },
+  { name: 'Dark mode', note: '(colorblind-friendly)', light: false, palette: CB_DARK },
+  { name: 'Light mode', note: '(colorblind-friendly)', light: true, palette: CB_LIGHT },
+  { name: 'Dark mode', note: '(ANSI colors only)', light: false, palette: ANSI_DARK },
+  { name: 'Light mode', note: '(ANSI colors only)', light: true, palette: ANSI_LIGHT },
+];
+
+/** The palette object for a theme-picker row index (out-of-range → dark). */
+function themeForIndex(i) {
+  const row = THEME_TABLE[i];
+  return row ? row.palette : C;
+}
+
+/**
+ * The palette object for a context. Colours are always derived from one of the
+ * theme objects — never typed inline.
+ *
+ * The light flag alone decides for the three default-brightness rows (indices
+ * 0–2), which keeps `themeOf({light:true}) === LIGHT` and `themeOf({}) === C`
+ * exactly as before. The colourblind and ANSI families are only consulted when
+ * `themeIndex` actually names one of them (3–6), so an app that seeds
+ * `themeIndex` to 0/1 for light/dark is unaffected.
+ */
 function themeOf(ctx) {
+  if (ctx && typeof ctx.themeIndex === 'number' && ctx.themeIndex >= 3 && ctx.themeIndex <= 6) {
+    return themeForIndex(ctx.themeIndex);
+  }
   return ctx && ctx.light ? LIGHT : C;
 }
 
@@ -148,7 +208,13 @@ module.exports = {
   RESET_BG,
   C,
   LIGHT,
+  CB_DARK,
+  CB_LIGHT,
+  ANSI_DARK,
+  ANSI_LIGHT,
   THEMES,
+  THEME_TABLE,
+  themeForIndex,
   GLYPH,
   VERBS,
   DONE_VERBS,

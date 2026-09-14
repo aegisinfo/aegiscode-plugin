@@ -35,6 +35,7 @@ Options:
       --width <cols>      force a render width (useful for piping/logs)
       --yolo              skip tool-approval prompts (exec/writeFile/editFile
                            run without asking) — same as the in-session /yolo
+  -c, --continue          skip onboarding and resume the most recent session
   -h, --help              this text
   -v, --version           print the version
 
@@ -54,6 +55,7 @@ function parseArgs(argv) {
     light: false,
     width: null,
     yolo: false,
+    continue: false,
     prompt: null,
     help: false,
     version: false,
@@ -108,6 +110,10 @@ function parseArgs(argv) {
         break;
       case '--yolo':
         opts.yolo = true;
+        break;
+      case '-c':
+      case '--continue':
+        opts.continue = true;
         break;
       case '--width':
         opts.width = Number(next());
@@ -180,6 +186,7 @@ async function main(argv = process.argv.slice(2)) {
     width: opts.width ? () => opts.width : undefined,
     interactive: !prompt && Boolean(process.stdin.isTTY),
     confirmMode: !opts.yolo,
+    continue: opts.continue,
   });
 
   if (prompt) return app.runOnce(prompt, { json: opts.json });
@@ -190,7 +197,12 @@ async function main(argv = process.argv.slice(2)) {
     );
     return 2;
   }
-  return app.runInteractive();
+  const code = await app.runInteractive();
+  // The reference leaves a resume hint on exit; without one there is no way to
+  // discover that a session was persisted at all (`/resume` lists them, but a
+  // user who just quit is not looking at a command list).
+  process.stdout.write(`\nResume this session with:\n  aegiscode --continue   (or /resume for the list)\n`);
+  return code;
 }
 
 if (require.main === module) {

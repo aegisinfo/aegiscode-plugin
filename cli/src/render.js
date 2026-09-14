@@ -416,6 +416,10 @@ module.exports = {
   renderNotice,
   mdLines,
   inline,
+  // Welcome-mark pieces, shared with the onboarding screens so there is exactly
+  // one renderer for the mascot/moon/whale mark rather than two that can drift.
+  artRow,
+  tintWhale,
   // Style helpers kept for legacy consumers.
   fg,
   bg,

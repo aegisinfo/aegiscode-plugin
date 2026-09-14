@@ -258,7 +258,16 @@ eq(plain(chatflow.rowLines({ role: 'note', text: 'careful' }, 80, ctx)), '· car
 {
   const grid = chatflow.shortcutsGrid(80, ctx);
   const t = plain(grid);
-  assert(t.includes('for commands') && t.includes('to auto-accept'), 'the shortcuts grid keeps the reference rows');
+  // The grid lists only bindings this CLI actually handles; the dead reference
+  // chords (shift+tab "to auto-accept", '@' for file paths) were removed.
+  assert(
+    t.includes('for commands') && t.includes('for shortcuts') && t.includes('for permissions'),
+    'the shortcuts grid lists the bindings this CLI handles'
+  );
+  assert(
+    !t.includes('to auto-accept') && !t.includes('shift + tab') && !t.includes('for file paths'),
+    'and no longer advertises the inert reference chords'
+  );
   const confirm = plain(chatflow.confirmLines({ name: 'Bash', args: { command: 'rm -rf x' }, sel: 0 }, 80, ctx));
   assert(confirm.includes('Do you want to proceed?'), 'the approval dialog asks the question');
   assert(confirm.includes('rm -rf x'), 'and shows what would run');

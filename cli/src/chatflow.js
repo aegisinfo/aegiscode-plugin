@@ -207,7 +207,12 @@ function statusLine(state, cols, ctx) {
   return padLine(left, cols);
 }
 
-/** The `?` shortcuts grid. */
+/**
+ * The `?` shortcuts grid. Every row advertised here is a key this CLI actually
+ * handles — the reference sheet also lists chords this host never wired up
+ * (shift+tab, `\`+return, `@`, ctrl+z/v/g…), and a cheat-sheet of dead keys is
+ * worse than none. Add a row only alongside its handler in `handleKey`.
+ */
 function shortcutsGrid(cols, ctx) {
   const t = themeOf(ctx);
   const cell = (a, b, c, d) => [
@@ -215,13 +220,12 @@ function shortcutsGrid(cols, ctx) {
     span('', '  '), span(t.white, c), span(t.gray, ' ' + d),
   ];
   return [
-    cell('/', 'for commands', 'shift + tab', 'to auto-accept'),
-    cell('?', 'for shortcuts', 'ctrl + c', 'to quit'),
-    cell('\\ + return', 'for newline', 'ctrl + o', 'for permissions'),
-    cell('@', 'for file paths', 'alt + p', 'to switch model'),
+    cell('/', 'for commands', '?', 'for shortcuts'),
+    cell('ctrl + c', 'to quit', 'ctrl + o', 'for permissions'),
+    cell('alt + p', 'to switch model', 'alt + t', 'to toggle thinking'),
     cell('esc', 'to interrupt a turn', 'ctrl + l', 'to clear the screen'),
-    [span('', '  '), span(t.white, 'ctrl + t'), span(t.gray, ' to show tokens'), span('', '  '), span(t.white, 'ctrl + r'), span(t.gray, ' to resume a session')],
-    [span('', '  '), span(t.white, '↑ / ↓'), span(t.gray, ' for history', span(' ', 1)), span('', '  '), span(t.white, 'tab'), span(t.gray, ' to complete a command')],
+    cell('ctrl + t', 'to show tokens', 'ctrl + r', 'to resume a session'),
+    cell('↑ / ↓', 'for history', 'tab', 'to complete a command'),
   ];
 }
 
@@ -787,6 +791,11 @@ async function runSession(host) {
       // Accounting: fold the turn's usage into the session tallies, ask the
       // ledger what it settled at, and show both — tokens beside €.
       host.recordTurn(result);
+      // Persist the finished exchange for /resume. Guarded: the test host stub
+      // deliberately omits persistTurn, and the accounting below must still run.
+      if (host.persistTurn) {
+        host.persistTurn(prompt, result, abortedFlag ? 'stopped' : (result && result.error) ? 'error' : 'done');
+      }
       let lastCost = null;
       try {
         const spend = await host.refreshSpend();
@@ -925,10 +934,11 @@ async function runSession(host) {
         render();
       },
       showThemePicker: () => {
-        ctx.light = !ctx.light;
-        ctx.themeIndex = ctx.light ? 0 : 1;
-        host.updateConfig({ themeIndex: ctx.themeIndex });
-        note(`theme: ${ctx.light ? 'light' : 'dark'}`);
+        // The app owns the real picker (the 7-row onboarding screen on a TTY,
+        // the light/dark toggle off one). The loop only repaints after it — the
+        // old inline toggle hardcoded themeIndex 0/1, which no longer names
+        // Light/Dark in theme.js's THEME_TABLE (2 is "Light mode").
+        if (host.showThemePicker) host.showThemePicker();
         render();
       },
     });
@@ -1023,6 +1033,23 @@ async function runSession(host) {
     return true;
   };
 
+  // The number of rows the active overlay currently renders, so DOWN can clamp
+  // the highlight to the last row instead of running off the end of the list.
+  const overlayRowCount = () => {
+    if (!overlay) return 0;
+    if (overlay.type === 'palette') {
+      return fuzzy.fuzzyRankWithAliases(
+        paletteQuery(overlay.query),
+        host.visibleCommands(),
+        (c) => c.name,
+        (c) => c.aliases || []
+      ).length;
+    }
+    if (overlay.type === 'model' || overlay.type === 'resume') return (overlay.items || []).length;
+    if (overlay.type === 'effort') return 3;
+    return 0;
+  };
+
   const handleOverlayKey = async (key) => {
     const type = overlay.type;
     if (key.name === KEY.ESC || key.name === KEY.CTRL_C) {
@@ -1033,6 +1060,24 @@ async function runSession(host) {
     if (type === 'shortcuts' || type === 'panel') {
       overlay = null;
       render();
+      return;
+    }
+    if (key.name === KEY.TAB && type === 'palette') {
+      // Tab completes the query to the highlighted command, ranking with the
+      // same function the palette rendered with so the row completed is the
+      // row Enter would run. Nothing highlighted (no matches) → do nothing.
+      const list = fuzzy.fuzzyRankWithAliases(
+        paletteQuery(overlay.query),
+        host.visibleCommands(),
+        (c) => c.name,
+        (c) => c.aliases || []
+      );
+      const chosen = list[overlay.sel || 0];
+      if (chosen) {
+        overlay.query = chosen.name;
+        overlay.sel = 0;
+        render();
+      }
       return;
     }
     if (key.name === KEY.ENTER) {
@@ -1092,7 +1137,8 @@ async function runSession(host) {
       return;
     }
     if (key.name === KEY.DOWN) {
-      overlay.sel = (overlay.sel || 0) + 1;
+      const max = Math.max(0, overlayRowCount() - 1);
+      overlay.sel = Math.min(max, (overlay.sel || 0) + 1);
       render();
       return;
     }
@@ -1131,6 +1177,22 @@ async function runSession(host) {
     if (overlay) {
       await handleOverlayKey(key);
       return;
+    }
+    // A bare '/' opens the palette and a bare '?' the shortcuts grid — the
+    // reference opens both on the keystroke (main.js:1542-1543), not after
+    // Enter. With text already in the line both insert literally, so '/model'
+    // and 'why?' still type.
+    if (key.name === 'char' && !editor.buf) {
+      if (key.ch === '/') {
+        overlay = { type: 'palette', query: '', sel: 0 };
+        render();
+        return;
+      }
+      if (key.ch === '?') {
+        overlay = { type: 'shortcuts' };
+        render();
+        return;
+      }
     }
     // vim normal-mode motions (only when the buffer is empty, so j/k do not
     // fight typed text).
@@ -1258,7 +1320,17 @@ async function runSession(host) {
       return;
     }
     if (key.name === KEY.TAB) {
-      completeTab();
+      // completeTab cycles command names; when it finds nothing, flash the
+      // reference's hint in the idle line — the alt+t nudge on an empty buffer,
+      // a "Tab completes" reminder once text is typed (main.js:1598-1606).
+      // hintUntil/hintText were declared and rendered but never set.
+      if (!completeTab()) {
+        hintText = editor.buf ? 'Tab completes commands' : 'Use alt+t to toggle thinking';
+        hintUntil = Date.now() + 2500;
+        setTimeout(() => {
+          if (Date.now() >= hintUntil) render();
+        }, 2600);
+      }
       render();
       return;
     }
@@ -1274,7 +1346,9 @@ async function runSession(host) {
       return;
     }
     if (key.name === KEY.CTRL_W) {
-      editor.wordDelete();
+      // Word-rubout: step the cursor back a word, no deletion — the reference's
+      // Ctrl+W (main.js:1624). LineEditor.wordBack is the method that exists.
+      editor.wordBack();
       render();
       return;
     }
@@ -1292,12 +1366,39 @@ async function runSession(host) {
       await dispatch('/resume');
       return;
     }
+    if (key.name === KEY.CTRL_O) {
+      // Keybinding parity: Ctrl+O opens the permissions panel (main.js:1644),
+      // which /permissions already renders in this CLI.
+      await dispatch('/permissions');
+      return;
+    }
     if (key.name === KEY.PAGE_UP || key.name === KEY.PAGE_DOWN || key.name === 'wheel') {
       applyLiveScroll(key);
       return;
     }
     if (key.name === 'alt' && key.ch === 'p') {
       await dispatch('/model');
+      return;
+    }
+    if (key.name === 'alt' && key.ch === 't') {
+      // Toggle extended thinking, using the same shape/value as /thinking so
+      // the chord and the command cannot disagree (commands.js: thinking).
+      const want = !(ctx.thinking === true);
+      ctx.thinking = want;
+      host.updateConfig({ thinking: want });
+      note(`Thinking blocks: ${want ? 'expanded' : 'collapsed'}`);
+      render();
+      return;
+    }
+    if (key.name === KEY.ESC) {
+      // A bare Esc on an idle line clears it (readline's rule; the reference
+      // clears the buffer, main.js:1675). The vim insert-mode Esc above is a
+      // distinct motion and must not be shadowed by this.
+      if (editor.buf) {
+        editor.buf = '';
+        editor.cursor = 0;
+        render();
+      }
       return;
     }
     if (key.name === KEY.CTRL_C) {
@@ -1311,12 +1412,11 @@ async function runSession(host) {
       return;
     }
     if (key.name === KEY.CTRL_D) {
-      if (!editor.buf) {
-        await endSession();
-        return;
-      }
-      editor.delete();
-      render();
+      // Ctrl+D is EOF: it ends the session only on an empty line. With text in
+      // the buffer the reference never deletes-forward (main.js:1673), so a
+      // stray Ctrl+D must neither drop a character nor kill the session.
+      if (!editor.buf) await endSession();
+      return;
     }
   };
 

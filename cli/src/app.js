@@ -23,11 +23,13 @@ const os = require('node:os');
 const { randomUUID } = require('node:crypto');
 const { createTools, createClient, usageTokens } = require('./deps.js');
 const { createEngine } = require('./engine.js');
-const { GLYPH, VERBS, themeOf, RESET } = require('./theme.js');
+const { GLYPH, VERBS, themeOf, RESET, THEME_TABLE } = require('./theme.js');
 const { LiveRegion, termWidth, w } = require('./screen.js');
 const { parseLine, COMMANDS, visibleCommands } = require('./commands.js');
-const { updateConfig, loadPermissions } = require('./config.js');
-const { readSessionTranscript } = require('./history.js');
+const { updateConfig, loadPermissions, loadConfig, configExists } = require('./config.js');
+const { appendHistory, readSessionTranscript, readOwnSessions } = require('./history.js');
+const { snapshotCheckpoint } = require('./checkpoint.js');
+const screens = require('./screens.js');
 const chatflow = require('./chatflow.js');
 const overlays = require('./overlays.js');
 const render = require('./render.js');
@@ -86,7 +88,7 @@ function createApp(options = {}) {
     model: opts.model,
     effort: 'high',
     thinking: false,
-    themeIndex: opts.light ? 0 : 1,
+    themeIndex: opts.light ? 2 : 1,
     vim: false,
     stream: opts.stream,
     cwd: process.cwd(),
@@ -382,6 +384,7 @@ function createApp(options = {}) {
     try {
       res = await ask(prompt, { history });
     } catch (e) {
+      persistTurn(prompt, { text: '', error: e.message }, 'error');
       emit(render.renderTurn(ctx(), { role: 'error', text: e.message }, width()));
       return;
     }
@@ -389,6 +392,7 @@ function createApp(options = {}) {
     if (res.text) transcript.push({ role: 'assistant', text: res.text });
 
     const tokens = recordTurn(res);
+    persistTurn(prompt, res, res.interrupted ? 'stopped' : res.error ? 'error' : 'done');
 
     const spend = await refreshSpend();
 
@@ -598,10 +602,19 @@ function createApp(options = {}) {
     }
   }
 
+  /**
+   * The theme picker. On a real terminal this is the onboarding screen; anywhere
+   * else (`/theme` in a pipe, a test with no TTY) it stays the light/dark toggle
+   * it has always been, so a non-interactive caller never blocks on a key.
+   */
   async function showThemePicker() {
-    commandCtx.light = !commandCtx.light;
-    commandCtx.themeIndex = commandCtx.light ? 0 : 1;
-    emit(render.renderNotice(ctx(), 'ok', `theme: ${commandCtx.light ? 'light' : 'dark'}`));
+    if (options.readline || !process.stdin.isTTY || !process.stdout.isTTY || options.chatflow === false) {
+      commandCtx.light = !commandCtx.light;
+      commandCtx.themeIndex = commandCtx.light ? 2 : 1;
+      emit(render.renderNotice(ctx(), 'ok', `theme: ${commandCtx.light ? 'light' : 'dark'}`));
+      return commandCtx.themeIndex;
+    }
+    return screens.showThemePicker(commandCtx);
   }
 
   /** Build the FROZEN command context `c` a handler runs against. */
@@ -827,8 +840,43 @@ function createApp(options = {}) {
     return tokens;
   }
 
-  /** One line of session accounting, for ctrl+t and the meta row. */
-  function tokenSummary() {
+  /**
+   * Persist one finished exchange: the history row and a transcript checkpoint.
+   *
+   * `appendHistory` and `snapshotCheckpoint` were both dead code — nothing ever
+   * called them, so `history.jsonl` was never created. Every consumer of it
+   * degraded silently rather than loudly: `/resume` could never find a stored
+   * session, `/cost` summed zero rows, `/clear`'s prune was a no-op, and
+   * `/rewind` always answered "No checkpoints yet". The session loop is the only
+   * place that sees the prompt *and* its reply, so it is the place that writes.
+   *
+   * Best-effort by construction: the two writers swallow their own failures, and
+   * accounting must never be able to break a turn.
+   */
+  function persistTurn(prompt, res, status = 'done') {
+    try {
+      const usage = res && res.usage;
+      appendHistory({
+        sessionId: commandCtx.sessionId,
+        prompt,
+        reply: (res && res.text) || '',
+        status,
+        usage: usage
+          ? {
+              input: Number(usage.input_tokens ?? usage.prompt_tokens ?? 0) || 0,
+              output: Number(usage.output_tokens ?? usage.completion_tokens ?? 0) || 0,
+              cacheRead: Number(usage.cache_read_input_tokens ?? 0) || 0,
+              cacheWrite: Number(usage.cache_creation_input_tokens ?? 0) || 0,
+            }
+          : null,
+      });
+      snapshotCheckpoint(commandCtx.sessionId, transcript);
+    } catch {
+      /* persistence is best-effort */
+    }
+  }
+
+  /** One line of session accounting, for ctrl+t and the meta row. */  function tokenSummary() {
     return (
       `${fmtTokens(session.tokens)} tok ` +
       `(${fmtTokens(session.inputTokens)} in / ${fmtTokens(session.outputTokens)} out) · ` +
@@ -872,6 +920,8 @@ function createApp(options = {}) {
       dispatchLine: (line, c) => handleLine(line, c),
       refreshSpend: () => refreshSpend(),
       updateConfig: (patch) => updateConfig(patch),
+      showThemePicker: () => showThemePicker(),
+      persistTurn: (prompt, res, status) => persistTurn(prompt, res, status),
       visibleCommands: () => visibleCommands(),
       tokensFor: (usage) => usageTokens(usage),
       recordTurn: (res) => recordTurn(res),
@@ -927,6 +977,43 @@ function createApp(options = {}) {
   }
 
   /**
+   * Restore persisted preferences into the live context. The reference does this
+   * at startup (`main.js:290-296`); this client never called `loadConfig()` on
+   * launch at all, so a model or effort chosen in a previous session was written
+   * to disk and then ignored on the next run.
+   *
+   * An explicit CLI flag always wins over the stored value — `aegiscode -m x`
+   * must mean `x`, not "x unless the config disagrees".
+   */
+  function restorePrefs() {
+    // An embedded/injected readline is a programmatic caller: it gets a
+    // deterministic context rather than whatever happens to be on disk.
+    if (options.readline) return;
+    // A fresh install has no expressed preference to restore. Applying
+    // DEFAULT_CONFIG here would silently pin the user to a model they never
+    // chose, which is the opposite of "remember what I picked".
+    if (!configExists()) return;
+    let cfg;
+    try {
+      cfg = loadConfig();
+    } catch {
+      return;
+    }
+    if (!opts.model && cfg.model) commandCtx.model = cfg.model;
+    if (cfg.effort) commandCtx.effort = cfg.effort;
+    if (typeof cfg.vim === 'boolean') commandCtx.vim = cfg.vim;
+    if (cfg.lastRecap) commandCtx.lastRecap = cfg.lastRecap;
+    // THEME_TABLE lives in theme.js, not screens.js: reading it off the screens
+    // module yielded undefined, and only on a *second* launch (the first has no
+    // config to restore, so this branch never ran) — so the very first run
+    // appeared to work and every run after it died on startup.
+    if (!opts.light && typeof cfg.themeIndex === 'number' && THEME_TABLE[cfg.themeIndex]) {
+      commandCtx.themeIndex = cfg.themeIndex;
+      commandCtx.light = !!THEME_TABLE[cfg.themeIndex].light;
+    }
+  }
+
+  /**
    * Interactive entry point. On a real terminal this is the full chatflow
    * (alternate screen, header, transcript viewport, spinner, effort line,
    * input line, status line, overlays). Anywhere else — a pipe, a test with an
@@ -940,9 +1027,30 @@ function createApp(options = {}) {
       process.stdin.isTTY &&
       process.stdout.isTTY;
     if (tty) {
+      restorePrefs();
+      // Onboarding runs in the normal buffer, before the session takes the
+      // alternate screen — the reference's order. A declined trust check must
+      // abort: the reference returns without ever reaching `session(ctx)`.
+      const onboard = await screens.runOnboarding(commandCtx, {
+        continue: !!options.continue,
+        seen: options.seen || configExists,
+        save: (patch) => updateConfig(patch),
+      });
+      if (!onboard.ok) return 0;
+      // `--continue` must load the last session *before* the loop starts, and
+      // it has to be read here rather than captured at construction: the
+      // history file is written by the loop itself.
+      if (options.continue) {
+        const last = readOwnSessions(1)[0];
+        if (last) {
+          commandCtx.continueSession = last.id;
+          await resumeSession({ id: last.id });
+        }
+      }
       await chatflow.runSession(makeHost());
       return 0;
     }
+    restorePrefs();
     return runLinearRepl();
   }
 
@@ -964,6 +1072,9 @@ function createApp(options = {}) {
     bannerLines,
     makeHost,
     recordTurn,
+    persistTurn,
+    restorePrefs,
+    sessionId: () => commandCtx.sessionId,
     tokenSummary,
     resumeSession,
     makeCommandContext,

@@ -52,6 +52,7 @@ const {
 } = require('./config.js');
 const { copyToClipboard } = require('./clipboard.js');
 const { snapshotCheckpoint, listCheckpoints, loadCheckpoint } = require('./checkpoint.js');
+const screens = require('./screens.js');
 const { summarizeTranscript, recapLine } = require('./summarize.js');
 const { sessionAccounting, accountingFromUsage, estimateTokens } = require('./tokens.js');
 const { transcriptToMarkdown, transcriptToJSON, writeExportFile, lastAssistantText } = require('./export.js');
@@ -101,6 +102,19 @@ const panel = (c, lines) => c.push({ role: 'panel', lines });
 const tip = (c, text) => c.push({ role: 'tip', text });
 const done = (c, text) => c.push({ role: 'done', text });
 const shortCwd = () => process.cwd().split('/').filter(Boolean).pop() || '~';
+
+/**
+ * Refresh the pinnable-model list on the session context before reading it.
+ * `c.loadModels()` (owned by the app/chatflow) fetches from the server and
+ * records the result on `c.state().models`; it is best-effort — offline it
+ * rejects, and the caller falls through to the honest empty note rather than
+ * opening an empty picker.
+ */
+async function loadModels(c) {
+  try {
+    await c.loadModels();
+  } catch {}
+}
 
 /**
  * The ÆGIS LLM routes are gated on the pooled brain being reachable — exactly
@@ -190,13 +204,17 @@ const COMMANDS = [
         c.render();
         return true;
       }
-      note(c, `Running ${cmd} in ${shortCwd()} — output streams below.`);
-      c.push({ role: 'tool', label: 'Bash', args: cmd });
+      note(c, `Running ${cmd} in ${shortCwd()} — output streams below, Esc stops it.`);
       const job = runDevServer(cmd, {
         cwd: process.cwd(),
         onLine: (line) => c.push({ role: 'note', text: `  ${line}` }),
       });
+      // Bind the job to the session so the status line draws "esc to stop" and
+      // Esc actually stops it (the reference's openStream/closeStream contract).
+      if (!job.label) job.label = cmd;
+      c.openStream(job);
       job.done.then(({ code, stopped }) => {
+        c.closeStream(job);
         done(c, stopped ? `${cmd} stopped` : `${cmd} exited (code ${code})`);
         c.render();
       });
@@ -290,7 +308,7 @@ const COMMANDS = [
       c.render();
       const summary = await c.withWorking((signal) =>
         summarizeTranscript(c.transcript, {
-          callModel: (p) => c.ask(p).then((r) => r.text),
+          callModel: (p, opts) => c.ask(p, opts).then((r) => r.text),
           model: c.ctx.model,
           signal,
         }));
@@ -375,7 +393,12 @@ const COMMANDS = [
           : 'Clipboard unavailable; nothing copied.');
       } else {
         try {
-          const p = writeExportFile(body, isJson ? 'json' : 'md');
+          // Honour the command context's cwd. The handler used to fall through
+          // to writeExportFile's own `process.cwd()` default, so /export wrote
+          // into whatever directory the process happened to be in — which meant
+          // running the command smoke test (it invokes every handler) littered
+          // the repository root with aegiscodex-export-*.md files.
+          const p = writeExportFile(body, isJson ? 'json' : 'md', c.ctx.cwd || process.cwd());
           note(c, `Exported conversation to ${p}`);
         } catch (e) {
           note(c, `/export: ${e.message}`);
@@ -399,9 +422,23 @@ const COMMANDS = [
     desc: 'Create an AEGIS.md file in the project',
     handler: async (c, args) => {
       const file = (args.file || 'AEGIS.md').trim();
-      const p = path.join(process.cwd(), file);
+      // The command context's cwd, not process.cwd(): /cd moves the session to
+      // another directory, and a handler that reads process.cwd() then writes
+      // the file into the directory the user just left. It also means the
+      // command smoke test (which invokes every handler) no longer drops an
+      // AEGIS.md into the repository root.
+      const cwd = c.ctx.cwd || process.cwd();
+      const p = path.resolve(cwd, file);
+      // Refuse a path that resolves outside the project — the reference's /init
+      // takes no argument, and `path.join(cwd, '../../x')` writes outside it.
+      const root = cwd.endsWith(path.sep) ? cwd : cwd + path.sep;
+      if (p !== cwd && !p.startsWith(root)) {
+        note(c, `/init: refusing to write outside the project directory (${p}).`);
+        c.render();
+        return true;
+      }
       if (fs.existsSync(p)) { note(c, `${file} already exists — not overwriting.`); c.render(); return true; }
-      const sniff = sniffProject(process.cwd());
+      const sniff = sniffProject(cwd);
       try {
         fs.writeFileSync(p, buildAegisMd(sniff) + '\n');
       } catch (e) {
@@ -410,7 +447,7 @@ const COMMANDS = [
         return true;
       }
       note(c, `Created ${p} (${sniff.lang})`);
-      if (fs.existsSync(path.join(process.cwd(), 'node_modules')) && !fs.existsSync(path.join(process.cwd(), '.gitignore'))) {
+      if (fs.existsSync(path.join(cwd, 'node_modules')) && !fs.existsSync(path.join(cwd, '.gitignore'))) {
         tip(c, 'Add "node_modules/" to a .gitignore before committing.');
       }
       c.render();
@@ -435,10 +472,25 @@ const COMMANDS = [
       const id = (args.sub || '').trim();
       if (!id) {
         note(c, `model: ${c.ctx.model || 'server default'}`);
-        c.openOverlay({ type: 'model', items: c.state().models || [], sel: 0, current: c.ctx.model });
+        // Populate the picker from the server first — app.js's state().models
+        // is empty until loadModels() has run, so an unguarded read renders an
+        // empty picker whose Enter does nothing.
+        await loadModels(c);
+        const models = c.state().models || [];
+        if (!models.length) {
+          note(c, 'No pinnable models advertised — /models lists what the server advertises.');
+          c.render();
+          return true;
+        }
+        // The overlay's own copy promises /model add|remove (overlays.js, a
+        // separate workstream); this build refuses both, so say here how a
+        // model is actually selected.
+        note(c, '/model <id> pins one for this session; /models lists what the server advertises.');
+        c.openOverlay({ type: 'model', items: models, sel: 0, current: c.ctx.model });
         return true;
       }
       if (id === 'list') {
+        await loadModels(c);
         const models = c.state().models || [];
         if (!models.length) note(c, 'No pinnable models advertised — /models lists the server\'s ids.');
         else panel(c, panels.buildModelList(c.ctx.model, models, c.ctx));
@@ -452,13 +504,17 @@ const COMMANDS = [
       }
       if (id === '-') {
         c.ctx.model = null;
-        // Session-scoped pin only (matches the plugin's existing /model): this
-        // never writes ~/.aegiscode/config.json, so a test run stays hermetic.
+        c.saveConfig({ model: null, currentModelId: null });
         note(c, 'Model pin cleared — the server will choose.');
         c.render();
         return true;
       }
       c.ctx.model = id;
+      // Persist, so the next launch restores it. app.js's restorePrefs() reads
+      // this on startup; without the write it had nothing to restore and the
+      // pin silently evaporated at exit. Tests point AEGISCODE_HOME at a temp
+      // dir, so the write stays inside that dir.
+      c.saveConfig({ model: id, currentModelId: id });
       note(c, `Pinned model: ${id}`);
       c.render();
       return true;
@@ -487,7 +543,7 @@ const COMMANDS = [
       c.render();
       const line = await c.withWorking((signal) =>
         recapLine(c.transcript, {
-          callModel: (p) => c.ask(p).then((r) => r.text),
+          callModel: (p, opts) => c.ask(p, opts).then((r) => r.text),
           model: c.ctx.model,
           signal,
         }));
@@ -580,8 +636,13 @@ const COMMANDS = [
     handler: async (c, args) => {
       const m = (args.mode || '').toLowerCase();
       if (m === 'dark' || m === 'light') {
-        c.ctx.light = m === 'light';
-        c.ctx.themeIndex = c.ctx.light ? 0 : 1;
+        // Resolve through the theme table rather than hardcoding an index, so
+        // "light" names the same row the picker would have named: index 2
+        // ("Light mode"), not index 0 ("Auto"). themeIndex is what the
+        // colorblind/ANSI palettes key off, so a wrong index silently selects
+        // the wrong palette rather than merely displaying a wrong label.
+        const want = m === 'light' ? 2 : 1;
+        screens.applyTheme(c.ctx, want);
       } else {
         await c.showThemePicker();
       }
