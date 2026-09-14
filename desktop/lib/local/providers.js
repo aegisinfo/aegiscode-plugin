@@ -235,27 +235,69 @@ function openaiToAnthropicTool(tool) {
   };
 }
 
+/**
+ * Idle budget for a direct-provider stream: the longest silence tolerated
+ * between two real SSE `data:` frames. Without it `reader.read()` below waits
+ * forever on a provider that holds the socket open and never answers — the
+ * host hangs with no error and no way out but force-quit. Measured between
+ * payloads, never reset by a keep-alive: DeepSeek answers a stalled request
+ * with ": keep-alive" comments and nothing else, indefinitely, so a watchdog
+ * that treats those as progress can never fire.
+ * Generous enough that a slow reasoning model mid-answer is untouched.
+ */
+const SSE_IDLE_TIMEOUT_MS = 2 * 60_000;
+
 /** Read an SSE body, invoking onEvent(json) for each parsed `data:` payload. */
-async function readSSE(res, onEvent) {
+async function readSSE(res, onEvent, { idleTimeoutMs = SSE_IDLE_TIMEOUT_MS } = {}) {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let lastPayloadAt = Date.now();
+  let keepAlives = 0;
+  const readWithIdleTimeout = async () => {
+    let timer;
+    const remaining = Math.max(0, idleTimeoutMs - (Date.now() - lastPayloadAt));
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(
+          keepAlives > 0
+            ? `stream stalled - only keep-alives for ${idleTimeoutMs / 1000}s`
+            : `stream stalled - no data for ${idleTimeoutMs / 1000}s`
+        ));
+      }, remaining);
+    });
+    try {
+      return await Promise.race([reader.read(), timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
   for (;;) {
-    const { done, value } = await reader.read();
+    let done, value;
+    try {
+      ({ done, value } = await readWithIdleTimeout());
+    } catch (err) {
+      reader.cancel().catch(() => {});
+      throw err;
+    }
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split('\n');
     buffer = lines.pop(); // keep the trailing partial line
     for (const raw of lines) {
       const line = raw.trim();
-      if (!line.startsWith('data:')) continue;
+      if (!line.startsWith('data:')) {
+        if (line.startsWith(':')) keepAlives++;
+        continue;
+      }
+      lastPayloadAt = Date.now(); // a real frame: the stream is still speaking
       const payload = line.slice(5).trim();
       if (!payload || payload === '[DONE]') continue;
       let json;
       try {
         json = JSON.parse(payload);
       } catch {
-        continue; // keepalive / partial line
+        continue; // partial line
       }
       onEvent(json);
     }
@@ -263,7 +305,7 @@ async function readSSE(res, onEvent) {
 }
 
 /** POST with stream:true; streams SSE events or falls back to plain JSON. */
-async function requestStream({ url, headers, body, signal, onEvent }) {
+async function requestStream({ url, headers, body, signal, onEvent, idleTimeoutMs }) {
   const res = await fetch(url, {
     method: 'POST',
     headers,
@@ -282,7 +324,7 @@ async function requestStream({ url, headers, body, signal, onEvent }) {
 
   const contentType = res.headers.get('content-type') || '';
   if (contentType.includes('text/event-stream')) {
-    await readSSE(res, onEvent);
+    await readSSE(res, onEvent, { idleTimeoutMs });
     return;
   }
 

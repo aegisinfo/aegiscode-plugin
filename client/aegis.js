@@ -489,13 +489,26 @@ function createClient(opts = {}) {
     // default Nexus turn (brain model id, checkbox off) dying at 60s — with
     // the server already past its own fan-out deadline and every worker
     // billed. See idleBudgetFor().
+    // The budget is measured from the last real `data:` frame, not from the
+    // last read. SSE keep-alive comments (": keep-alive") are transport
+    // framing, and a stalled upstream can emit them forever: a watchdog armed
+    // per read() is reset by every one of them and so never fires, which is
+    // exactly the hang this guard exists to prevent. Only a parsed payload
+    // moves `lastPayloadAt` below.
     const idleMs = idleBudgetFor(res, idleTimeoutMs);
+    let lastPayloadAt = Date.now();
+    let keepAlives = 0;
     async function readWithIdleTimeout() {
       let timer;
+      const remaining = Math.max(0, idleMs - (Date.now() - lastPayloadAt));
       const timeout = new Promise((_, reject) => {
         timer = setTimeout(() => {
-          reject(new Error(`stream stalled - no data for ${idleMs / 1000}s`));
-        }, idleMs);
+          reject(new Error(
+            keepAlives > 0
+              ? `stream stalled - only keep-alives for ${idleMs / 1000}s`
+              : `stream stalled - no data for ${idleMs / 1000}s`
+          ));
+        }, remaining);
       });
       try {
         return await Promise.race([reader.read(), timeout]);
@@ -520,7 +533,11 @@ function createClient(opts = {}) {
 
       for (const rawLine of lines) {
         const line = rawLine.trim();
-        if (!line.startsWith('data:')) continue;
+        if (!line.startsWith('data:')) {
+          if (line.startsWith(':')) keepAlives++;
+          continue;
+        }
+        lastPayloadAt = Date.now(); // a real frame: the stream is still speaking
         const payload = line.slice(5).trim();
         if (!payload || payload === '[DONE]') continue;
         let json;
