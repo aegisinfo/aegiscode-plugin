@@ -54,6 +54,10 @@ older AEGIS CLI left in `~/.aegiscode/config.json` is picked up and copied into
 the 0600 store automatically — `/cloud status` says so if the plaintext copy is
 still there.
 
+That one file is shared: the MCP plugin and AEGIS Desktop read the same store, so
+signing in here signs you in everywhere (see [One memory, shared with AEGIS
+Desktop](#one-memory-shared-with-aegis-desktop)).
+
 ## Use
 
 ```bash
@@ -139,7 +143,7 @@ a *provider* key, so that advice sent the AEGIS key into the wrong slot. It is
 now the in-band way to set the account key, and `/logout` removes it.
 
 Conversation sync is the same `conversationSyncPush/Pull` surface the desktop
-uses, over the sessions this host already keeps in `~/.aegiscode/history.jsonl`:
+uses, over the sessions this host keeps in `~/.aegiscode/history.jsonl`:
 
 ```bash
 /sync                 # push what is pending, then pull — the one you want
@@ -155,6 +159,31 @@ until you ask. A refusal (HTTP 402) is reported as a quota refusal with the way
 out, not as "sync failed". Imported remote sessions land in the same store
 `/resume` reads, and are marked `imported` with estimated token counts — never
 passed off as measured here.
+
+## One memory, shared with AEGIS Desktop
+
+`~/.aegiscode/` is the data dir for **every** AEGIS host — this CLI, AEGIS
+Desktop and the MCP plugin built on the same account:
+
+| File | What it holds | Written by |
+|---|---|---|
+| `credentials.json` | the account key, mode 0600 | `aegiscode login`, `/key`, the desktop's Settings pane |
+| `sessions.json` | every conversation, one record per session | both hosts, live |
+| `history.jsonl` | this host's per-exchange ledger (feeds `/cost`) | the CLI |
+| `config.json` | preferences, permissions | the CLI |
+
+Sign in once and all three hosts are signed in: they resolve the key with the
+same precedence (`$AEGIS_API_KEY` → `credentials.json` → an older `config.json`),
+and when two hosts hold a key the **most recently saved one wins** — so rotating
+it from the terminal does not leave the app 401-ing on a stale string.
+
+Sessions are shared too, and not only through the cloud. `/resume` lists a
+thread typed in the desktop, and the desktop's session list shows a thread typed
+here — same file, no sync and no network. An upgrade adopts a desktop install's
+private `sessions.json` into the shared store once, so no existing conversation
+is lost. Records carry `origin`, and terminal sessions are **not** enrolled in
+the desktop's push queue (that would spend the account's synced-token quota as a
+side effect of typing in a shell); this host's own `/sync` covers them.
 
 There are currently **no** `unavailable` commands: every entry in the registry
 either runs or is a real handler that says honestly what it cannot do.
@@ -216,9 +245,11 @@ What the loop does, in the order a turn happens:
   `/resume` the session list, `?` the shortcut grid, `ctrl+o` permissions, and a
   centred Yes/No dialog when a mutating tool needs approval. `Esc` closes an
   overlay, and clears the input line when nothing is open.
-- **Every turn is persisted** to `~/.aegiscode/history.jsonl`, with a transcript
-  checkpoint alongside it, so `/resume`, `/cost`, `/clear` and `/rewind` all have
-  something real to read. On exit the session prints how to come back to it.
+- **Every turn is persisted** to `~/.aegiscode/history.jsonl` and mirrored into
+  the shared `~/.aegiscode/sessions.json`, with a transcript checkpoint alongside
+  them, so `/resume`, `/cost`, `/clear` and `/rewind` all have something real to
+  read — and the desktop app sees the same conversations. On exit the session
+  prints how to come back to it.
 
 Anything that is not a real terminal — a pipe, `-p`, a CI run — stays a linear
 transcript written once to scrollback, so output remains pipeable and

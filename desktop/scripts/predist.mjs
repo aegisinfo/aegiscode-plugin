@@ -22,6 +22,12 @@ const destDir = join(desktop, 'vendor');
 const staged = [
   ['client', 'aegis.js'],
   ['client', 'foreign-memory.js'],
+  // The shared account-credential store and the unified session store. Both are
+  // pure Node, and both are read by the terminal host and the MCP plugin too —
+  // they are staged here for the same reason the client is: the packaged app
+  // cannot reach outside its own directory.
+  ['client', 'credentials.js'],
+  ['client', 'session-store.js'],
 ];
 
 mkdirSync(destDir, { recursive: true });

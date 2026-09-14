@@ -5,6 +5,17 @@
  * (or $AEGISCODE_HOME). Keeps the file bounded (oldest entries dropped past
  * HISTORY_LIMIT lines).
  *
+ * history.jsonl is this host's *ledger*: one record per exchange, carrying the
+ * token/cost numbers `/cost` aggregates. It stays the CLI's own format.
+ *
+ * What changed with the shared store (`client/session-store.js`) is that every
+ * recorded exchange is ALSO mirrored into `<dir>/sessions.json`, the store the
+ * desktop app and the MCP plugin read. That file is what makes a terminal turn
+ * show up in the GUI's session list — and, in the other direction, what lets
+ * `/resume` open a session that was typed in the desktop, without cloud sync
+ * and without a key. `readResumeList` merges both sources by id, so no session
+ * is listed twice.
+ *
  * Ported from aegiscodex-dev/src/history.js (ESM → CommonJS). The data dir now
  * comes from config.js's shared `aegisDir()` helper.
  */
@@ -13,9 +24,12 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { aegisDir } = require('./config.js');
+const { sessionStore } = require('./shared.js');
 const { estimateTokens } = require('./tokens.js');
 
 const HISTORY_LIMIT = 500;
+/** Which host wrote a mirrored record, so either side can tell them apart. */
+const SOURCE = 'aegiscode-cli';
 
 function historyPath() {
   return path.join(aegisDir(), 'history.jsonl');
@@ -82,11 +96,41 @@ function appendHistoryEntries(entries) {
     const lines = [...prev, ...list.map((e) => JSON.stringify(e))];
     const trimmed = lines.slice(Math.max(0, lines.length - HISTORY_LIMIT));
     fs.writeFileSync(p, trimmed.join('\n') + '\n');
+    mirrorToSharedStore(list);
     return list.length;
   } catch (e) {
     // Persistence is best-effort; never crash the session over it.
     if (process.env.AEGIS_HIST_DEBUG) console.error('[history] write failed:', e);
     return 0;
+  }
+}
+
+/**
+ * Mirror freshly-recorded exchanges into the shared session store, so the
+ * desktop and the MCP plugin can see this host's sessions.
+ *
+ * Only *writes* mirror — a read of history.jsonl never re-imports itself, which
+ * is what would otherwise duplicate every exchange on every launch. A mirror
+ * failure must never cost the user the history line it accompanies, so this is
+ * called after the ledger write and swallows its own errors.
+ */
+function mirrorToSharedStore(entries) {
+  for (const e of entries) {
+    try {
+      sessionStore.recordExchange(aegisDir(), {
+        sessionId: e.sessionId,
+        prompt: e.prompt,
+        reply: e.reply,
+        status: e.status,
+        cwd: e.cwd,
+        ts: e.ts,
+        tokens: e.tokens,
+        costUsd: e.costUsd,
+        origin: SOURCE,
+      });
+    } catch (err) {
+      if (process.env.AEGIS_HIST_DEBUG) console.error('[history] mirror failed:', err);
+    }
   }
 }
 
@@ -129,14 +173,36 @@ function readOwnSessions(limit = 8) {
   return items;
 }
 
-/** Rebuild the transcript (user/assistant pairs) of a session, oldest first. */
+/**
+ * Rebuild the transcript (user/assistant pairs) of a session, oldest first.
+ *
+ * history.jsonl wins when it has records for the id (this host's own ledger,
+ * complete with the exchanges the shared store may have trimmed). Otherwise the
+ * session came from another host — a desktop thread — and the shared store is
+ * the only place its messages exist, so /resume can open it too.
+ */
 function readSessionTranscript(sessionId) {
-  return readEntries()
+  const own = readEntries()
     .filter((e) => e.sessionId === sessionId)
     .flatMap((e) => [
       { role: 'user', text: e.prompt },
       { role: 'assistant', text: e.reply || '(no response)' },
     ]);
+  if (own.length) return own;
+  try {
+    return sessionStore.readTranscript(aegisDir(), sessionId);
+  } catch {
+    return [];
+  }
+}
+
+/** Sessions in the shared store written by another host (the desktop app). */
+function readSharedStoreSessions(limit = 8) {
+  try {
+    return sessionStore.listSummaries(aegisDir(), limit);
+  } catch {
+    return [];
+  }
 }
 
 /** All history records for one session, oldest first (power /cost). */
@@ -190,11 +256,22 @@ function aggregateSessionUsage(sessionId) {
 }
 
 /**
- * Sessions for the /resume overlay: own Aegiscode sessions merged with real
- * Claude Code sessions from ~/.claude/history.jsonl, newest first.
+ * Sessions for the /resume overlay: own Aegiscode sessions, sessions written
+ * into the shared store by another host (the desktop app), and real Claude Code
+ * sessions from ~/.claude/history.jsonl — newest first, deduplicated by id.
+ *
+ * The dedup matters: an own session is mirrored into the shared store, so
+ * without it every terminal session would be listed twice, once from each
+ * source.
  */
 function readResumeList(limit = 8, ownLimit = 5, claudeLimit = 8) {
   const items = readOwnSessions(ownLimit);
+  const seen = new Set(items.map((i) => i.id));
+  const sharedItems = readSharedStoreSessions(ownLimit).filter((i) => {
+    if (seen.has(i.id)) return false;
+    seen.add(i.id);
+    return true;
+  });
   const claudeItems = [];
   const histPath = `${os.homedir()}/.claude/history.jsonl`;
   try {
@@ -204,7 +281,8 @@ function readResumeList(limit = 8, ownLimit = 5, claudeLimit = 8) {
       try {
         const j = JSON.parse(l);
         const meta = j.extra && JSON.parse(j.extra);
-        if (meta && meta.sessionId) {
+        if (meta && meta.sessionId && !seen.has(meta.sessionId)) {
+          seen.add(meta.sessionId);
           const c = (j.cwd || '').split('/').filter(Boolean).pop() || '~';
           const t = (j.summary || '').slice(0, 60);
           claudeItems.push({ id: meta.sessionId, cwd: c, summary: t, time: j.timestamp, own: false });
@@ -212,13 +290,14 @@ function readResumeList(limit = 8, ownLimit = 5, claudeLimit = 8) {
       } catch {}
     }
   } catch {}
-  return [...items, ...claudeItems]
+  return [...items, ...sharedItems, ...claudeItems]
     .sort((a, b) => (String(a.time || '') < String(b.time || '') ? 1 : -1))
     .slice(0, limit);
 }
 
 module.exports = {
   HISTORY_LIMIT,
+  SOURCE,
   historyPath,
   ensureHistoryDir,
   appendHistory,
@@ -226,6 +305,7 @@ module.exports = {
   readHistoryEntries,
   readOwnSessions,
   readSessionTranscript,
+  readSharedStoreSessions,
   sessionHistoryEntries,
   pruneSessionHistory,
   aggregateSessionUsage,

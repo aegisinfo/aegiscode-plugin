@@ -12,9 +12,19 @@
 'use strict';
 
 const { createClient } = require('../client/aegis.js');
+const credentials = require('../client/credentials.js');
 const { createTools } = require('./tools.js');
 
-const aegis = createClient();
+// The account credential is resolved the same way in all three hosts: the
+// environment first, then the 0600 store the terminal host writes with
+// `aegiscode login` (or /key), then a legacy config.json. This host used to
+// read `AEGIS_API_KEY` from the environment alone, so a user who signed in from
+// the CLI still met "No AEGIS_API_KEY is set" here — the credential existed,
+// this process just would not look at it.
+//
+// `client/` is inside the tree the plugin ships (mcp/ + client/), so this needs
+// no dependency on the CLI package to work when installed.
+const aegis = createClient(credentials.clientOptions());
 // The tool registry lives in ./tools.js, shared with the terminal host
 // (cli/) so the two hosts cannot drift apart. This file owns the JSON-RPC
 // plumbing and nothing else.
@@ -23,7 +33,21 @@ const API_KEY = aegis.apiKey;
 const API_BASE = aegis.apiBase;
 const SERVER_NAME = 'aegis';
 // Keep in sync with .claude-plugin/plugin.json "version".
-const SERVER_VERSION = '0.3.0';
+const SERVER_VERSION = '0.3.1';
+
+/** The one instruction that actually resolves a missing key. */
+function missingKeyText() {
+  const { path } = credentials.keyStatus();
+  return [
+    'No AEGIS API key is configured for this session.',
+    '',
+    'Set one with any of:',
+    '  • `aegiscode login` in a terminal (saves it to ' + path + ', mode 0600)',
+    '  • export AEGIS_API_KEY=… in the environment Claude Code was launched from',
+    '',
+    'Then restart Claude Code. Get a key at https://aegiscloud.org.',
+  ].join('\n');
+}
 
 // ---------------------------------------------------------------------------
 // JSON-RPC / MCP plumbing
@@ -86,13 +110,7 @@ async function handleMessage(msg) {
         }
         if (!API_KEY) {
           reply(id, {
-            content: [
-              {
-                type: 'text',
-                text:
-                  'No AEGIS_API_KEY is set. Add your aegis_ key to the environment (see the plugin README) and restart Claude Code. Get a key at https://aegiscloud.org.',
-              },
-            ],
+            content: [{ type: 'text', text: missingKeyText() }],
             isError: true,
           });
           return;

@@ -36,6 +36,17 @@ try {
 }
 const { createClient } = sharedClient;
 
+// The shared credential store (`client/credentials.js`) — the same 0600 file
+// the terminal host writes with `aegiscode login` and the MCP plugin reads. The
+// app resolves its own account key through it, so signing in once serves all
+// three hosts; see resolveStartupKey() and persistApiKey() below.
+let credentials;
+try {
+  credentials = require('../client/credentials.js');
+} catch {
+  credentials = require('./vendor/credentials.js');
+}
+
 let electron = null;
 try {
   // In plain Node (CI smoke test, `node --check`) this either throws
@@ -666,14 +677,24 @@ function resolveUserDataDir(app) {
  * Wire the real LocalEngine registry: settings store + ollama/providers
  * transports + the shared cloud client. Transport-only — no brain logic.
  */
-function createEngine(aegis, { app, safeStorage, dir: dirOverride } = {}) {
-  const dir = dirOverride || resolveUserDataDir(app);
-  const settings = createSettingsStore({ dir, safeStorage });
+function createEngine(aegis, { app, safeStorage, dir: dirOverride, sessionsDir: sessionsOverride } = {}) {
+  // Settings (the safeStorage-encrypted key, window state, provider entries)
+  // stay in Electron's userData: they are this host's own, and the key is only
+  // readable by this process.
+  const settingsDir = dirOverride || resolveUserDataDir(app);
+  const settings = createSettingsStore({ dir: settingsDir, safeStorage });
   // Relocate a pre-fix `settings['aegis']` key into the reserved namespace so
   // it stops showing up as a provider. Ciphertext-level, so safe pre-'ready'.
   settings.migrateLegacyAegisKey();
   const engine = createLocalEngine({ aegis, settings, ollama, providers });
-  return { engine, sessionsDir: dir, settings };
+  // Sessions/memory live in the SHARED data dir ($AEGISCODE_HOME or
+  // ~/.aegiscode) — the same file the terminal host and the MCP plugin read —
+  // so a thread started in either shows up in the other without cloud sync and
+  // without a key. resolveStoreDir() also adopts a pre-unification
+  // userData/sessions.json, once, when the shared store is still empty, so an
+  // upgrade does not look like every conversation was deleted.
+  const sessionsDir = sessionsOverride || sessionStore.resolveStoreDir(settingsDir);
+  return { engine, sessionsDir, settingsDir, settings };
 }
 
 /**
@@ -1233,7 +1254,7 @@ function bootstrap() {
     else pendingDeepLink = parsed;
   });
 
-  const aegis = createClient();
+  const aegis = createClient(credentials.clientOptions());
   const dataDir = resolveUserDataDir(app);
 
   // One settings store backs both the provider settings surface and the AEGIS
@@ -1248,7 +1269,17 @@ function bootstrap() {
   // Persist the in-app AEGIS key in its own reserved namespace, encrypted —
   // never as a provider named 'aegis' (that coupling let the Settings pane's
   // "Remove" delete the AEGIS key; defect #1).
-  const persistApiKey = (key) => settings.setAegisKey(key);
+  //
+  // Mirrored into the shared 0600 store as well, so one sign-in covers this app,
+  // `aegiscode` and the MCP plugin instead of each host needing its own. The
+  // app's copy stays the encrypted one; resolveStartupKey() compares their
+  // `savedAt` stamps so whichever host wrote last is the key in force.
+  const persistApiKey = (key) => {
+    const result = settings.setAegisKey(key);
+    if (key) credentials.saveApiKey(key);
+    else credentials.clearApiKey();
+    return result;
+  };
 
   // Native "reply ready" notification: main.js is exactly where every
   // chatCompletion/model:chat call already resolves (withReplyNotify above),
@@ -1565,8 +1596,19 @@ function bootstrap() {
     // Hydrate the client from the persisted key BEFORE the renderer issues any
     // status/model call, so class/model dropdowns populate immediately when a
     // key was saved in-app (safeStorage is usable only after app ready).
-    const persistedKey = settings.aegisRawKey();
-    if (persistedKey) aegis.setApiKey(persistedKey);
+    //
+    // `$AEGIS_API_KEY` still outranks both stores: createClient() already read
+    // it, and nothing here may shadow an explicit export.
+    const envKey = credentials.normalizeApiKey(process.env[credentials.KEY_ENV]);
+    if (!envKey) {
+      const chosen = credentials.preferNewest(settings.aegisRawKey(), settings.aegisKeySavedAt());
+      if (chosen.key) {
+        aegis.setApiKey(chosen.key);
+        // The shared store is the newer write: bring this host's encrypted copy
+        // up to date so a CLI rotation does not have to be redone in Settings.
+        if (chosen.source === 'shared') settings.setAegisKey(chosen.key);
+      }
+    }
     // Apply whatever was last saved (or the default): ship the shortcut only
     // when app.isPackaged || the settings flag is on — see
     // shouldEnableGlobalShortcut — so a plain `electron .` dev run never

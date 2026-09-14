@@ -38,6 +38,11 @@ const VENDOR = path.join(CLI_DIR, 'vendor');
 const FILES = [
   'client/aegis.js',
   'client/foreign-memory.js',
+  // The account credential store and the unified session store. Shared with the
+  // desktop app and the MCP plugin so all three see one key and one session
+  // list; `src/shared.js` resolves them from here in an installed package.
+  'client/credentials.js',
+  'client/session-store.js',
   'mcp/tools.js',
   'desktop/renderer/usage.js',
   // The agent-loop engine (persistent shell, editFile/grep/exec, Task

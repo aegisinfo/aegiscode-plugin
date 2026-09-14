@@ -726,7 +726,7 @@ const COMMANDS = [
     desc: 'Switch to a previous session',
     handler: async (c) => {
       const items = readResumeList();
-      if (!items.length) { note(c, 'No previous sessions found in ~/.aegiscode/history.jsonl'); c.render(); return true; }
+      if (!items.length) { note(c, 'No previous sessions found — conversations from this host and from AEGIS Desktop both land in ~/.aegiscode/sessions.json'); c.render(); return true; }
       c.openOverlay({ type: 'resume', items, sel: 0 });
       return true;
     },

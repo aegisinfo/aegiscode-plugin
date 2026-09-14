@@ -13,14 +13,16 @@
  */
 
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 
-/** Data directory: $AEGISCODE_HOME or ~/.aegiscode. */
-function aegisDir() {
-  const override = process.env.AEGISCODE_HOME;
-  if (override && String(override).trim()) return path.resolve(String(override).trim());
-  return path.join(os.homedir(), '.aegiscode');
+// The data dir is defined once, in the shared credential module, because the
+// desktop app and the MCP plugin now read and write the same store: a second
+// definition here is how the hosts would drift back apart.
+const { credentials } = require('./shared.js');
+
+/** Data directory: $AEGISCODE_HOME or ~/.aegiscode (see client/credentials.js). */
+function aegisDir(env) {
+  return credentials.aegisHome(env);
 }
 
 function configPath() {

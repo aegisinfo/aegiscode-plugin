@@ -46,7 +46,9 @@ curl -fsSL https://raw.githubusercontent.com/aegisinfo/aegiscode-plugin/main/ins
 ### Manual install
 
 ```bash
-# 1. Save your key
+# 1. Save your key — one file, shared with the desktop app and the CLI
+aegiscode login                       # prompts, no echo, saves to ~/.aegiscode/credentials.json
+# …or, if you don't have the CLI installed:
 echo 'export AEGIS_API_KEY="aegis_your_key_here"' >> ~/.bashrc   # or ~/.zshrc
 
 # 2. Inside Claude Code
@@ -55,6 +57,11 @@ echo 'export AEGIS_API_KEY="aegis_your_key_here"' >> ~/.bashrc   # or ~/.zshrc
 
 # 3. Restart Claude Code, then run /aegis-status
 ```
+
+The plugin resolves the credential the same way the other AEGIS hosts do —
+`$AEGIS_API_KEY` first, then `~/.aegiscode/credentials.json` — so a key saved by
+`aegiscode login` or in the desktop's Settings works here with no environment
+variable to keep in sync.
 
 ### Slash commands
 
@@ -187,10 +194,14 @@ Pick any of four transports from the model-class picker:
 | **Custom OpenAI-compatible** (LM Studio, OpenRouter, vLLM, …) | direct from the desktop app | main process — never sent to the renderer |
 | **Anthropic-compatible** (Claude, or any Messages-format gateway) | direct from the desktop app | main process |
 
-Conversations persist locally (`sessions.json`) and sync to AEGIS cloud memory
-via a pending queue that flushes on each "Sync now" or heartbeat retry. The
-**remember** button on any assistant reply pins that message to cross-machine
-memory — queued locally if you're offline.
+Conversations persist locally to `~/.aegiscode/sessions.json` — the same file
+the CLI and the MCP plugin read, so a thread typed in the terminal shows up in
+the app's session list with no sync and no key — and sync to AEGIS cloud memory
+via a pending queue that flushes on each "Sync now" or heartbeat retry. (A
+pre-upgrade install's private `sessions.json` in Electron's userData is adopted
+into the shared store once, so nothing is lost.) The **remember** button on any
+assistant reply pins that message to cross-machine memory — queued locally if
+you're offline.
 
 ### Install
 
@@ -251,7 +262,7 @@ const aegis = require('./client/aegis.js');   // Node
 
 | Symptom | Fix |
 |---|---|
-| `aegis` tools error with "no API key" | The MCP server reads `AEGIS_API_KEY` from the environment at launch. Export it, then **restart Claude Code** — setting it while Claude Code is running has no effect. |
+| `aegis` tools error with "no API key" | The MCP server resolves the key from `$AEGIS_API_KEY` and then `~/.aegiscode/credentials.json`. Set one (`aegiscode login`, or an export) and **restart Claude Code** — setting it while Claude Code is running has no effect. |
 | `AEGIS_API_KEY` is set but tools still fail | Placeholders are rejected by the installer. Confirm the real key is exported in *this* shell: `echo $AEGIS_API_KEY`. |
 | Installer exits with a Node version error | Node 18+ is required (the MCP server uses global `fetch`). Check with `node -v`. |
 | Installer exits with "Claude Code CLI not found" | Install Claude Code first: https://claude.com/claude-code. Only the plugin surface needs it — the desktop app does not. |

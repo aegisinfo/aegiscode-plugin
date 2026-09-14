@@ -186,11 +186,25 @@ function createSettingsStore({ dir, safeStorage } = {}) {
     return decrypt(cfg.key);
   }
 
+  /**
+   * When this host last wrote its own AEGIS key (ISO string, or null).
+   *
+   * The shared credential file records the same thing, and startup compares the
+   * two so the most recently saved key wins. Without a stamp the app cannot tell
+   * "I saved this last week" from "the user ran `aegiscode login` a minute ago
+   * with a rotated key", and would silently keep presenting the stale one.
+   */
+  function aegisKeySavedAt() {
+    const cfg = load()[AEGIS_KEY_NAMESPACE] || {};
+    return cfg.savedAt || null;
+  }
+
   function setAegisKey(key) {
     const data = load();
     data[AEGIS_KEY_NAMESPACE] = {
       ...(data[AEGIS_KEY_NAMESPACE] || {}),
       key: key ? encrypt(key) : null,
+      savedAt: key ? new Date().toISOString() : null,
     };
     save(data);
     return aegisKey();
@@ -278,6 +292,7 @@ function createSettingsStore({ dir, safeStorage } = {}) {
     maskKey,
     aegisKey,
     aegisRawKey,
+    aegisKeySavedAt,
     setAegisKey,
     migrateLegacyAegisKey,
     quickLauncherConfig,

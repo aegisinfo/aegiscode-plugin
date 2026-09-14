@@ -68,8 +68,8 @@ try {
   assert(init.result && init.result.serverInfo, 'initialize should return serverInfo');
   assert(init.result.serverInfo.name === 'aegis', 'server name should be "aegis"');
   assert(
-    init.result.serverInfo.version === '0.3.0',
-    `server version should be 0.3.0, got ${init.result.serverInfo.version}`
+    init.result.serverInfo.version === '0.3.1',
+    `server version should be 0.3.1, got ${init.result.serverInfo.version}`
   );
 
   // 2. tools/list must expose the public tool surface
