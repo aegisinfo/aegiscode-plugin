@@ -279,14 +279,11 @@ function renderMeta(ctx, meta = {}, width = 80) {
   const bits = [];
   if (meta.model) bits.push(`${t.blue}${meta.model}${RESET}`);
   if (meta.tokens != null) bits.push(`${t.white}${fmtTokens(meta.tokens)} tok${RESET}`);
-  // The producer (chatflow.js's accounting row) pushes the split flat, as
-  // `input`/`output` — reading it as `meta.usage.input` here meant the pair was
-  // never printed on this path even though the docstring above promises it.
-  // Both shapes are accepted: `usage` is what the desktop's renderer hands over.
-  const split = meta.usage && typeof meta.usage === 'object' ? meta.usage : meta;
-  const { input, output } = split;
-  if (Number.isFinite(input) || Number.isFinite(output)) {
-    bits.push(`${t.gray}${fmtTokens(input || 0)}/${fmtTokens(output || 0)}${RESET}`);
+  if (meta.usage) {
+    const { input, output } = meta.usage;
+    if (Number.isFinite(input) || Number.isFinite(output)) {
+      bits.push(`${t.gray}${fmtTokens(input || 0)}/${fmtTokens(output || 0)}${RESET}`);
+    }
   }
   if (meta.eur != null) bits.push(`${meta.eur > 0 ? t.coral : t.green}${fmtEur(meta.eur)}${RESET}`);
   if (meta.ms != null) bits.push(`${t.gray}${fmtElapsed(meta.ms)}${RESET}`);
