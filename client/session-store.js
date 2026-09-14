@@ -104,6 +104,98 @@ function atomicWrite(file, data) {
   } catch {}
 }
 
+/** How long a lock may be held before another writer treats it as abandoned. */
+const LOCK_STALE_MS = 2000;
+/** Total time a writer will wait for the lock before proceeding unlocked. */
+const LOCK_WAIT_MS = 500;
+
+function lockFile(dir) {
+  return `${storeFile(dir)}.lock`;
+}
+
+/**
+ * Best-effort advisory lock around the read-modify-write in `mutate()`.
+ *
+ * A private store owned by one process did not need this. A *shared* one does:
+ * the desktop app and a terminal session are two long-lived processes that both
+ * rewrite this file wholesale, and interleaved read-modify-write would drop
+ * whichever turn lost the race. The lock is deliberately soft — a crash must
+ * not wedge every future write, so a lock older than LOCK_STALE_MS is stolen,
+ * and a writer that cannot get it in LOCK_WAIT_MS proceeds anyway (losing at
+ * worst the same race that exists today, rather than refusing to save).
+ *
+ * @returns {boolean} whether the lock was acquired
+ */
+function acquireLock(dir) {
+  const file = lockFile(dir);
+  // The lock is taken *before* the write that used to create the directory, so
+  // this is now the first thing to touch it — a first run (or a fresh
+  // AEGISCODE_HOME) would otherwise spin here forever waiting on a lock it can
+  // never create.
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+  } catch {
+    return false;
+  }
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  // Bounded, so no combination of "lock vanished" / "lock unreadable" can spin
+  // this loop: a writer that cannot decide always proceeds unlocked instead.
+  const MAX_ATTEMPTS = 200;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    try {
+      const fd = fs.openSync(file, 'wx');
+      fs.writeSync(fd, String(process.pid));
+      fs.closeSync(fd);
+      return true;
+    } catch {
+      let age = null;
+      try {
+        age = Date.now() - fs.statSync(file).mtimeMs;
+      } catch {
+        // Released between the open and the stat — try immediately.
+        continue;
+      }
+      if (age > LOCK_STALE_MS) {
+        try {
+          fs.unlinkSync(file);
+        } catch {}
+        continue;
+      }
+      if (Date.now() >= deadline) return false;
+      // Busy-wait: the critical section is a few hundred microseconds of
+      // stringify + rename, so sleeping the event loop would cost more than it
+      // saves, and this path is not on the streaming critical path.
+      const until = Date.now() + 5;
+      while (Date.now() < until) {
+        /* spin a few ms */
+      }
+    }
+  }
+  return false;
+}
+
+function releaseLock(dir) {
+  try {
+    fs.unlinkSync(lockFile(dir));
+  } catch {}
+}
+
+/**
+ * Read-modify-write the whole store under the lock. Every mutation goes through
+ * here so the locking is one behaviour, not a thing each caller must remember.
+ */
+function mutate(dir, mutator) {
+  const locked = acquireLock(dir);
+  try {
+    const sessions = load(dir);
+    const result = mutator(sessions);
+    save(dir, sessions);
+    return result;
+  } finally {
+    if (locked) releaseLock(dir);
+  }
+}
+
 function save(dir, sessions) {
   atomicWrite(storeFile(dir), sessions);
 }
@@ -124,29 +216,29 @@ function trimMessages(messages) {
 function upsertSession(dir, session) {
   const id = session && session.id;
   if (!id) throw new Error('session.id is required');
-  const sessions = load(dir);
-  const prev = sessions[id] || { messages: [] };
-  sessions[id] = { ...prev, ...session, id, version: STORE_VERSION };
-  if (session.pending !== false) sessions[id].pending = true;
-  if (!sessions[id].updatedAt) sessions[id].updatedAt = Date.now();
-  sessions[id].seq = nextSeq(sessions);
-  save(dir, sessions);
-  return sessions[id];
+  return mutate(dir, (sessions) => {
+    const prev = sessions[id] || { messages: [] };
+    sessions[id] = { ...prev, ...session, id, version: STORE_VERSION };
+    if (session.pending !== false) sessions[id].pending = true;
+    if (!sessions[id].updatedAt) sessions[id].updatedAt = Date.now();
+    sessions[id].seq = nextSeq(sessions);
+    return sessions[id];
+  });
 }
 
 /** Append one message to a session (crash-safe). */
 function appendMessage(dir, sessionId, message) {
   if (!sessionId) throw new Error('sessionId is required');
-  const sessions = load(dir);
-  const session = sessions[sessionId] || { id: sessionId, messages: [] };
-  const messages = Array.isArray(session.messages) ? session.messages : [];
-  session.messages = trimMessages(messages.concat(message));
-  session.updatedAt = Date.now();
-  session.pending = true;
-  session.seq = nextSeq(sessions);
-  sessions[sessionId] = session;
-  save(dir, sessions);
-  return session;
+  return mutate(dir, (sessions) => {
+    const session = sessions[sessionId] || { id: sessionId, messages: [] };
+    const messages = Array.isArray(session.messages) ? session.messages : [];
+    session.messages = trimMessages(messages.concat(message));
+    session.updatedAt = Date.now();
+    session.pending = true;
+    session.seq = nextSeq(sessions);
+    sessions[sessionId] = session;
+    return session;
+  });
 }
 
 /**
@@ -166,34 +258,34 @@ function appendMessage(dir, sessionId, message) {
 function recordExchange(dir, exchange) {
   const e = exchange || {};
   if (!e.sessionId) return null;
-  const sessions = load(dir);
   const id = e.sessionId;
-  const session = sessions[id] || { id, messages: [] };
-  const messages = Array.isArray(session.messages) ? session.messages : [];
-  const ts = e.ts || new Date().toISOString();
-  const userMessage = { role: 'user', content: e.prompt == null ? '' : String(e.prompt), ts };
-  const assistantMessage = { role: 'assistant', content: e.reply == null ? '' : String(e.reply), ts };
-  if (e.tokens) assistantMessage.tokens = e.tokens;
-  if (typeof e.costUsd === 'number') assistantMessage.costUsd = e.costUsd;
-  if (e.status) assistantMessage.status = e.status;
-  if (e.origin) {
-    userMessage.origin = e.origin;
-    assistantMessage.origin = e.origin;
-  }
-  session.messages = trimMessages(messages.concat([userMessage, assistantMessage]));
-  session.title = session.title || String(e.prompt || '').slice(0, 60);
-  if (e.cwd) session.cwd = e.cwd;
-  session.origin = e.origin || session.origin || 'unknown';
-  session.updatedAt = Date.now();
-  // Explicit, not merely "leave it unset": `listPending` treats an absent flag
-  // as pending (sessions predating the field default to queued), so an
-  // undefined here would quietly enrol every terminal session in the desktop's
-  // push queue — the exact thing the `pending: false` default is for.
-  session.pending = e.pending === true ? true : false;
-  session.seq = nextSeq(sessions);
-  sessions[id] = session;
-  save(dir, sessions);
-  return session;
+  return mutate(dir, (sessions) => {
+    const session = sessions[id] || { id, messages: [] };
+    const messages = Array.isArray(session.messages) ? session.messages : [];
+    const ts = e.ts || new Date().toISOString();
+    const userMessage = { role: 'user', content: e.prompt == null ? '' : String(e.prompt), ts };
+    const assistantMessage = { role: 'assistant', content: e.reply == null ? '' : String(e.reply), ts };
+    if (e.tokens) assistantMessage.tokens = e.tokens;
+    if (typeof e.costUsd === 'number') assistantMessage.costUsd = e.costUsd;
+    if (e.status) assistantMessage.status = e.status;
+    if (e.origin) {
+      userMessage.origin = e.origin;
+      assistantMessage.origin = e.origin;
+    }
+    session.messages = trimMessages(messages.concat([userMessage, assistantMessage]));
+    session.title = session.title || String(e.prompt || '').slice(0, 60);
+    if (e.cwd) session.cwd = e.cwd;
+    session.origin = e.origin || session.origin || 'unknown';
+    session.updatedAt = Date.now();
+    // Explicit, not merely "leave it unset": `listPending` treats an absent flag
+    // as pending (sessions predating the field default to queued), so an
+    // undefined here would quietly enrol every terminal session in the desktop's
+    // push queue — the exact thing the `pending: false` default is for.
+    session.pending = e.pending === true ? true : false;
+    session.seq = nextSeq(sessions);
+    sessions[id] = session;
+    return session;
+  });
 }
 
 function listSessions(dir) {
@@ -212,37 +304,35 @@ function getSession(dir, id) {
 }
 
 function deleteSession(dir, id) {
-  const sessions = load(dir);
-  delete sessions[id];
-  save(dir, sessions);
-  return { ok: true };
+  return mutate(dir, (sessions) => {
+    delete sessions[id];
+    return { ok: true };
+  });
 }
 
 /** Clear the pending flag after a successful cloud push. `remote.remoteId`,
  *  when the server assigns its own conversation id, is stashed alongside. */
 function markSynced(dir, id, remote) {
-  const sessions = load(dir);
-  const session = sessions[id];
-  if (!session) return null;
-  session.pending = false;
-  session.lastSyncedAt = Date.now();
-  if (remote && remote.remoteId) session.remoteId = remote.remoteId;
-  session.seq = nextSeq(sessions);
-  sessions[id] = session;
-  save(dir, sessions);
-  return session;
+  return mutate(dir, (sessions) => {
+    const session = sessions[id];
+    if (!session) return null;
+    session.pending = false;
+    session.lastSyncedAt = Date.now();
+    if (remote && remote.remoteId) session.remoteId = remote.remoteId;
+    session.seq = nextSeq(sessions);
+    return session;
+  });
 }
 
 /** Force a session back into the retry queue (e.g. a push that partially failed). */
 function markPending(dir, id) {
-  const sessions = load(dir);
-  const session = sessions[id];
-  if (!session) return null;
-  session.pending = true;
-  session.seq = nextSeq(sessions);
-  sessions[id] = session;
-  save(dir, sessions);
-  return session;
+  return mutate(dir, (sessions) => {
+    const session = sessions[id];
+    if (!session) return null;
+    session.pending = true;
+    session.seq = nextSeq(sessions);
+    return session;
+  });
 }
 
 /** Sessions with local content the cloud hasn't confirmed yet (including
@@ -259,32 +349,33 @@ function listPending(dir) {
  */
 function mergeRemoteSessions(dir, remoteSessions) {
   const list = Array.isArray(remoteSessions) ? remoteSessions : [];
-  const sessions = load(dir);
-  let merged = 0;
-  for (const remote of list) {
-    const id = remote && (remote.session_id || remote.id);
-    if (!id) continue;
-    const local = sessions[id];
-    const remoteUpdatedAt = toEpochMs(remote.updated_at ?? remote.updatedAt);
-    if (local && (local.pending || (local.updatedAt || 0) >= remoteUpdatedAt)) {
-      continue;
+  if (!list.length) return 0;
+  return mutate(dir, (sessions) => {
+    let merged = 0;
+    for (const remote of list) {
+      const id = remote && (remote.session_id || remote.id);
+      if (!id) continue;
+      const local = sessions[id];
+      const remoteUpdatedAt = toEpochMs(remote.updated_at ?? remote.updatedAt);
+      if (local && (local.pending || (local.updatedAt || 0) >= remoteUpdatedAt)) {
+        continue;
+      }
+      sessions[id] = {
+        id,
+        title: remote.title || (local && local.title) || '',
+        messages: Array.isArray(remote.messages) ? remote.messages : [],
+        updatedAt: remoteUpdatedAt || Date.now(),
+        pending: false,
+        lastSyncedAt: Date.now(),
+        remoteId: remote.session_id || remote.id,
+        origin: remote.source || (local && local.origin) || 'cloud',
+        version: STORE_VERSION,
+      };
+      sessions[id].seq = nextSeq(sessions);
+      merged += 1;
     }
-    sessions[id] = {
-      id,
-      title: remote.title || (local && local.title) || '',
-      messages: Array.isArray(remote.messages) ? remote.messages : [],
-      updatedAt: remoteUpdatedAt || Date.now(),
-      pending: false,
-      lastSyncedAt: Date.now(),
-      remoteId: remote.session_id || remote.id,
-      origin: remote.source || (local && local.origin) || 'cloud',
-      version: STORE_VERSION,
-    };
-    sessions[id].seq = nextSeq(sessions);
-    merged += 1;
-  }
-  if (merged) save(dir, sessions);
-  return merged;
+    return merged;
+  });
 }
 
 /**
@@ -355,14 +446,16 @@ function adopt(dir, fromDir) {
   if (listSessions(dir).length) {
     return { adopted: false, sessions: 0, from, reason: 'store already has sessions' };
   }
-  const next = { ...legacy, __seq: legacy.__seq || 0 };
-  for (const s of incoming) {
-    // Adopted sessions keep their own history; they are already local content.
-    s.seq = nextSeq(next);
-    s.adoptedFrom = from;
-  }
-  next.version = STORE_VERSION;
-  save(dir, next);
+  mutate(dir, (sessions) => {
+    for (const s of incoming) {
+      // Adopted sessions keep their own history; they are already local content.
+      sessions[s.id] = { ...s, adoptedFrom: from, version: STORE_VERSION };
+      sessions[s.id].seq = nextSeq(sessions);
+    }
+    sessions.__seq = Math.max(sessions.__seq || 0, legacy.__seq || 0);
+    sessions.version = STORE_VERSION;
+    return null;
+  });
   return { adopted: true, sessions: incoming.length, from };
 }
 
@@ -397,6 +490,9 @@ module.exports = {
   MAX_MESSAGES_PER_SESSION,
   storeDir,
   storeFile,
+  lockFile,
+  LOCK_STALE_MS,
+  LOCK_WAIT_MS,
   toEpochMs,
   load,
   save,

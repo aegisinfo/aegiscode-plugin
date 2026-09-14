@@ -149,7 +149,61 @@ assert(capped.messages[capped.messages.length - 1].content === 'r1399', 'the new
 writeFileSync(join(smallDir, 'sessions.json'), '{ not json');
 assert(Object.keys(store.load(smallDir)).length === 0, 'a corrupt store loads as empty');
 
+// ── G. two writers do not lose each other's turns ──────────────────────────
+// The store is shared now, so the app and a terminal session can rewrite it at
+// the same instant. Each mutation is a read-modify-write; without serialisation
+// the loser's turn disappears.
+const raceDir = mkdtempSync(join(tmpdir(), 'aegis-shared-race-'));
+const { spawn } = require('node:child_process');
+const writer = `
+const store = require(${JSON.stringify(join(process.cwd(), 'client', 'session-store.js'))});
+const n = Number(process.argv[1]);
+for (let i = 0; i < 25; i++) {
+  store.recordExchange(process.env.RACE_DIR, { sessionId: 'shared', prompt: 'p' + n + '-' + i, reply: 'r' + n + '-' + i, origin: 'w' + n });
+}
+`;
+// Started together, not one after another: `spawnSync` in a loop would serialise
+// them and the read-modify-write race this section exists for would never occur.
+function runWriter(n) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, ['-e', writer, String(n)], {
+      env: { ...process.env, RACE_DIR: raceDir },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let err = '';
+    child.stderr.on('data', (d) => {
+      err += d;
+    });
+    child.on('exit', (code) => resolve({ code, err }));
+  });
+}
+const results = await Promise.all([0, 1, 2, 3].map(runWriter));
+assert(
+  results.every((r) => r.code === 0),
+  `writers exited cleanly: ${results.map((r) => `${r.code} ${r.err.slice(0, 120)}`)}`
+);
+const raced = store.getSession(raceDir, 'shared');
+assert(raced, 'the contended session exists');
+assert(
+  raced.messages.length === 200,
+  `all four writers' 25 turns survive (expected 200 messages, got ${raced.messages.length})`
+);
+const prompts = new Set(raced.messages.filter((m) => m.role === 'user').map((m) => m.content));
+assert(prompts.size === 100, `no turn was lost or duplicated (expected 100 prompts, got ${prompts.size})`);
+
+// A lock left behind by a crash must not wedge the store forever.
+const stuckDir = mkdtempSync(join(tmpdir(), 'aegis-shared-stuck-'));
+writeFileSync(store.lockFile(stuckDir), String(process.pid));
+const past = new Date(Date.now() - (store.LOCK_STALE_MS + 1000));
+const { utimesSync } = require('node:fs');
+utimesSync(store.lockFile(stuckDir), past, past);
+const recovered = store.recordExchange(stuckDir, { sessionId: 'after-crash', prompt: 'q', reply: 'a', origin: 'test' });
+assert(recovered && recovered.messages.length === 2, 'a stale lock is stolen and the write proceeds');
+assert(!existsSync(store.lockFile(stuckDir)), 'the lock is released after the write');
+
 rmSync(home, { recursive: true, force: true });
 rmSync(legacy, { recursive: true, force: true });
+rmSync(raceDir, { recursive: true, force: true });
+rmSync(stuckDir, { recursive: true, force: true });
 
 console.log('shared session store tests passed');
