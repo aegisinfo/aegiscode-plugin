@@ -1212,6 +1212,25 @@ const COMMANDS = [
     build: () => ({}),
   },
   {
+    name: 'memory-deep', aliases: ['recall-deep'], args: ['mode'], hint: '[on|off]', category: 'model',
+    desc: 'Toggle DEEP recall for this session — brain corrections + cached answers (metered: one embedding per turn)',
+    handler: async (c, args) => {
+      const mode = (args.mode || '').toLowerCase();
+      if (mode && !['on', 'off'].includes(mode)) { note(c, 'Usage: /memory-deep [on|off]'); c.render(); return true; }
+      const want = mode === 'on' ? true : mode === 'off' ? false : !(c.ctx.recallDeep === true);
+      c.ctx.recallDeep = want;
+      // Deliberately session-scoped: nothing is written to config.json, because
+      // this flag meters every turn (aegis1 services/brain_memory.py embeds the
+      // query once per turn) and a silent restore on a later launch would bill
+      // for a decision made in a session that has ended. Contrast /thinking,
+      // which persists — it costs nothing. The cheap read half (`aegis_recall`)
+      // is always on and has no toggle.
+      note(c, `Deep recall: ${want ? 'on — brain corrections + cached answers, one embedding per turn' : 'off (only the cheap recall read)'}${want ? ' · this session only' : ''}`);
+      c.render();
+      return true;
+    },
+  },
+  {
     name: 'confirm', aliases: ['confirmations'], args: ['mode'], hint: '[on|off]', category: 'model',
     desc: 'Toggle tool-call confirmation prompts',
     handler: async (c, args) => {

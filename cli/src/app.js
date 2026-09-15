@@ -125,6 +125,15 @@ function createApp(options = {}) {
     // pinning one would make every turn cost what that rung grants.
     effort: null,
     thinking: false,
+    // Deep recall (`aegis_recall_deep`) — the metered tier of the read: brain
+    // corrections plus the semantic answer cache, and the answer cache costs
+    // one provider embedding per turn (aegis1 app.py:8367 →
+    // services/brain_memory.py find_cached_answer). This host recalls on every
+    // turn already and pays per turn, so the deep tier is NEVER inferred: it is
+    // false here, `/memory-deep on` is the only thing that flips it, and that
+    // choice is deliberately NOT persisted — a flag that meters every turn must
+    // not survive into a session where nobody asked for it.
+    recallDeep: false,
     themeIndex: opts.light ? 2 : 1,
     vim: false,
     stream: opts.stream,
@@ -497,6 +506,11 @@ function createApp(options = {}) {
           // about what the turn cost. `null` (auto) is omitted so the server
           // infers the rung from the ask.
           effort: commandCtx.effort || undefined,
+          // The deep-recall opt-in travels only when this session turned it on
+          // (`/memory-deep on`). Sent as a literal `true` or not at all: the
+          // engine treats anything but `true` as off, and an omitted field is
+          // what keeps a stray value from ever buying a per-turn embedding.
+          recallDeep: commandCtx.recallDeep === true ? true : undefined,
           // false asks the engine for the buffered (non-stream) wire form, so
           // `--no-stream` and piped runs get a single body rather than SSE.
           stream: commandCtx.stream !== false,

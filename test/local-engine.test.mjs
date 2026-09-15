@@ -237,6 +237,137 @@ await engine.chat({ class: 'aegis', prompt: 'hi', model: 'm1', autonomous: true 
     && !('effort' in args.extra) && !('workers' in args.extra), `autonomous with no effort/workers omits both: ${JSON.stringify(args.extra)}`);
 }
 
+// Recall is the READ half of aegis_memory, and this engine sends only that
+// half. aegis_memory is both: aegis1 app.py injects the account's synced
+// memory AND persists the turn back into it, charging sync quota for the
+// write. Both flags were the same flag until the split, so every GUI and CLI
+// turn on this engine paid for a write it never asked for — "hey" was a
+// memory-write. aegis_memory implies aegis_recall server-side, so the browser
+// client is unaffected by dropping it here.
+//
+// Both directions are pinned, because getting either one wrong is silent: a
+// missing aegis_recall starts every pooled session blind (services/
+// tiered_recall.py never runs), and a stray aegis_memory bills every turn.
+await engine.chat({ class: 'aegis', prompt: 'hi', model: 'm1', sessionId: 's-1' }, () => {});
+{
+  const [, args] = calls[calls.length - 1];
+  assert(args.extra.aegis_recall === true, `read half sent: ${JSON.stringify(args.extra)}`);
+  assert(!('aegis_memory' in args.extra),
+    `the write half must not follow the recall: ${JSON.stringify(args.extra)}`);
+  assert(args.extra.session === 's-1',
+    `recall is scoped to the caller's session, so session survives the swap: ${args.extra.session}`);
+}
+{
+  // Every aegis request recorded above — autonomous, single-pass, or plain —
+  // is checked, not just the last one: a write re-introduced on one path
+  // (the fan-out's synthesis pass, say) would be missed by a single sample.
+  const aegisCalls = calls.filter(([kind, args]) => kind === 'chatCompletion' && args.extra).map(([, args]) => args);
+  assert(aegisCalls.length >= 4, `the block above recorded aegis turns: ${aegisCalls.length}`);
+  for (const args of aegisCalls) {
+    assert(args.extra.aegis_recall === true, `every aegis turn recalls: ${JSON.stringify(args.extra)}`);
+    assert(!('aegis_memory' in args.extra), `no aegis turn writes back: ${JSON.stringify(args.extra)}`);
+  }
+}
+
+// ── deep recall: opt-in only, and only on the user's own turn ────────────────
+//
+// aegis1 grew a THIRD flag (app.py:8367): `aegis_recall_deep` gates the brain's
+// two reads — find_corrections (a bounded row lookup) and find_cached_answer,
+// which EMBEDS THE QUERY (services/brain_memory.py:82), one provider embedding
+// per turn. That price is why the server will not imply it from `aegis_recall`
+// (`aegis_memory` implies it; the cheap read does not), and it is why a client
+// that pays per turn must not send it of its own accord. Absent by default and
+// present only on an explicit opt-in are therefore BOTH pinned below, and so is
+// the narrower scope: a re-dispatch must not buy a second embedding.
+//
+// `everyAegisRequest` collects the `extra` body of every aegis request this
+// file makes, from every transport it scripts, so the whole-file sweep at the
+// bottom can check all of them rather than one sample.
+const everyAegisRequest = [];
+{
+  // One scripted turn that walks EVERY dispatch path there is:
+  //   dispatch 1  the user's own ask (round 1)
+  //   dispatch 2  a tool round, forced by a real tool call in dispatch 1
+  //   dispatch 3  the doubled-budget retry, forced by an empty 'length' round
+  //   dispatch 4  the write-up re-dispatch, forced by an empty retry
+  // A write or a per-round embedding re-introduced on any one of them would be
+  // invisible to a single-sample assertion.
+  const scripted = (log) => ({
+    apiKey: 'k',
+    async chatCompletion(args) {
+      log.push(args);
+      everyAegisRequest.push(args.extra);
+      const n = log.length;
+      if (n === 1) {
+        return {
+          model: args.model,
+          choices: [{
+            message: {
+              content: '',
+              tool_calls: [{
+                id: 'call-1',
+                type: 'function',
+                function: { name: 'listDir', arguments: JSON.stringify({ path: '.' }) },
+              }],
+            },
+            finish_reason: 'tool_calls',
+          }],
+        };
+      }
+      if (n <= 3) {
+        return { model: args.model, choices: [{ message: { content: '' }, finish_reason: 'length' }] };
+      }
+      return { model: args.model, choices: [{ message: { content: 'done' }, finish_reason: 'stop' }] };
+    },
+  });
+
+  // (a) DEFAULT: no opt-in, and the field is absent on every path — not merely
+  // falsy. The engine's own condition is `=== true`, so an absent field is the
+  // one shape that cannot be mistaken for consent; sending `false` would also
+  // work server-side but would mean the client is stating an opinion about a
+  // flag it has no reason to mention.
+  const dflt = [];
+  await createLocalEngine({ aegis: scripted(dflt), settings, ollama, providers })
+    .chat({ class: 'aegis', prompt: 'hi', model: 'm1', sessionId: 's-deep-off' }, () => {});
+  assert(dflt.length >= 4, `the scripted turn walked every path: ${dflt.length}`);
+  for (const args of dflt) {
+    assert(!('aegis_recall_deep' in args.extra),
+      `deep recall is absent unless the session opted in: ${JSON.stringify(args.extra)}`);
+    assert(args.extra.aegis_recall === true, `the cheap read is still sent: ${JSON.stringify(args.extra)}`);
+    assert(!('aegis_memory' in args.extra), `no path writes back: ${JSON.stringify(args.extra)}`);
+  }
+
+  // (b) OPT-IN: present on the user's ask, absent on every re-dispatch.
+  const opted = [];
+  await createLocalEngine({ aegis: scripted(opted), settings, ollama, providers })
+    .chat({ class: 'aegis', prompt: 'hi', model: 'm1', sessionId: 's-deep-on', recallDeep: true }, () => {});
+  assert(opted.length >= 4, `the opted-in turn walked every path: ${opted.length}`);
+  assert(opted[0].extra.aegis_recall_deep === true,
+    `the opted-in user turn asks for the deep tier: ${JSON.stringify(opted[0].extra)}`);
+  assert(opted[1].extra.brain === undefined || opted[1].extra.brain !== true,
+    'the tool round is a continuation, not a new ask');
+  for (const args of opted.slice(1)) {
+    assert(!('aegis_recall_deep' in args.extra),
+      `a re-dispatch (tool round / retry / write-up) must not buy a second embedding: ${JSON.stringify(args.extra)}`);
+    assert(args.extra.aegis_recall === true, `every continuation still recalls: ${JSON.stringify(args.extra)}`);
+    assert(!('aegis_memory' in args.extra), `no continuation writes back: ${JSON.stringify(args.extra)}`);
+  }
+  // The session outlives the swap on all four dispatches: recall is scoped per
+  // session, so a dropped sessionId would recall into the wrong (or no) scope.
+  assert(dflt.every((a) => a.extra.session === 's-deep-off'), 'off-path dispatches keep their session');
+  assert(opted.every((a) => a.extra.session === 's-deep-on'), 'on-path dispatches keep their session');
+
+  // A caller that says `false` explicitly is off, exactly like one that says
+  // nothing — the flag is consent, not a default flipped by a truthy payload.
+  const explicitOff = [];
+  await createLocalEngine({ aegis: scripted(explicitOff), settings, ollama, providers })
+    .chat({ class: 'aegis', prompt: 'hi', model: 'm1', sessionId: 's-deep-false', recallDeep: false }, () => {});
+  for (const args of explicitOff) {
+    assert(!('aegis_recall_deep' in args.extra),
+      `recallDeep:false is not consent: ${JSON.stringify(args.extra)}`);
+  }
+}
+
 // cancel: unknown id is a no-op; aborting an in-flight stream works
 assert(engine.cancel('nope').ok === false, 'unknown session cancel -> false');
 
@@ -841,6 +972,42 @@ const fakeTools = {
   const e = createLocalEngine({ aegis, settings, ollama, providers: mute });
   const res = await e.chat({ class: 'anthropic', prompt: 'hi', model: 'claude-x', tools: false }, () => {});
   assert(res.usage === undefined, `no reported usage stays absent, got ${JSON.stringify(res.usage)}`);
+}
+
+// ── the whole-file sweep: no aegis path may write, or self-opt into deep ────
+//
+// Every aegis request this file recorded — the shared stub's calls AND every
+// scripted transport's, across plain turns, autonomous turns, tool rounds, the
+// doubled-budget retry, the write-up re-dispatch and subagent turns — is swept
+// here. A single-sample pin is what lets a write or a metered read re-appear on
+// a path nobody sampled, which is exactly how `aegis_memory` survived as a
+// default for so long: it was sent once, in the one place, and the one place is
+// where the assertion looked.
+{
+  const recorded = calls
+    .filter(([kind, args]) => kind === 'chatCompletion' && args.extra)
+    .map(([, args]) => args.extra);
+  const all = [...recorded, ...everyAegisRequest];
+  // Sanity floor, not a target: if a refactor stops recording, the sweep must
+  // fail loudly rather than pass over an empty list.
+  assert(all.length >= 10, `the sweep has aegis requests to check: ${all.length}`);
+  for (const extra of all) {
+    assert(extra.aegis_recall === true,
+      `every aegis request sends the READ half: ${JSON.stringify(extra)}`);
+    assert(!('aegis_memory' in extra),
+      `NO aegis request may send the WRITE half (it charges sync quota and persists the turn): ${JSON.stringify(extra)}`);
+    if ('aegis_recall_deep' in extra) {
+      assert(extra.aegis_recall_deep === true,
+        `the deep flag is only ever sent as an explicit true: ${JSON.stringify(extra)}`);
+    }
+  }
+  // The metered tier must be a small minority of the fleet: exactly one of
+  // every request recorded above — the opted-in user turn — can carry it.
+  // Counted rather than assumed, because "opt-in only" that quietly became "on
+  // for the tool rounds too" would still pass the per-request check above.
+  const deepSent = all.filter((e) => e.aegis_recall_deep === true);
+  assert(deepSent.length === 1,
+    `the deep tier is sent on exactly the opt-in turn, got ${deepSent.length}: ${JSON.stringify(deepSent)}`);
 }
 
 console.log('engine tests passed');

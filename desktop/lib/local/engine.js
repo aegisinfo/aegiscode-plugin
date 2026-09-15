@@ -598,12 +598,53 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
         // AUTONOMOUS_IDLE_TIMEOUT_MS). Undefined elsewhere -> 60s default.
         idleTimeoutMs: opts.idleTimeoutMs,
         signal: opts.signal,
-        // aegis_memory: automatic, no button — the server both reads prior
-        // synced memory into context AND writes this turn back to it, the
-        // same flag aegis-online sets. Matches aegiscodex-dev's own
-        // cross-session memory (auto-indexed, no manual tagging).
+        // aegis_recall — the read half of aegis_memory, and the only half a
+        // client on this engine should send.
+        //
+        // aegis_memory is both halves: it injects the account's synced memory
+        // into context AND persists this turn back into it, charging sync
+        // quota for the write. That pairing is right for aegis-online, whose
+        // chat has nowhere else to live. It is wrong here, because this engine
+        // is shared by the GUI and the CLI (cli/src/deps.js loads this file):
+        // either would be billed for every "hey" and would fill the user's
+        // memory with greetings. Verified against aegis1 app.py: every
+        // write-back site (the note/upsert calls) is gated on aegis_memory,
+        // and aegis_memory implies aegis_recall there — so dropping the write
+        // half leaves /online unchanged and costs nothing on the read side.
+        //
+        // Writing is still available, explicitly: the aegis_memory_save tool
+        // (mcp/tools.js; the CLI exposes it as /memory). Recall on every turn,
+        // store only what the user asks for — which is what aegiscodex-dev's
+        // own cross-session memory does, and what this comment claimed to
+        // match while sending both halves.
+        //
+        // Recall was previously unreachable for a client that would not pay
+        // for it: services/tiered_recall.py only ran behind a flag that also
+        // bought a write, so the tiered path existed with no caller able to
+        // afford it. The split is what makes it reachable. The DEEP tier of the
+        // same read is a third flag with its own price — see `opts.recallDeep`
+        // below, which is off unless the session opted in.
         extra: {
-          aegis_memory: true,
+          aegis_recall: true,
+          // The DEEP tier of that read — brain corrections plus the semantic
+          // answer cache — is not the same price, so it does not ride along.
+          // aegis1 app.py:8367 reads `aegis_recall_deep` (or the
+          // X-AEGIS-Recall-Deep header) and services/brain_memory.py
+          // find_cached_answer embeds the query: one provider embedding per
+          // turn, metered. The server deliberately implies it from
+          // `aegis_memory` and NOT from `aegis_recall`, so that a terminal
+          // client can buy the cheap read without the embedding.
+          //
+          // This client is that terminal client (the CLI loads this file via
+          // cli/src/deps.js), so it must not opt itself in: the flag is sent
+          // only when the SESSION asked for it — CLI `/memory-deep on`, a
+          // desktop payload with `recallDeep: true` — and it defaults false
+          // everywhere. It also travels only on the user's own turn
+          // (`opts.recallDeep` is cleared for every other dispatch below): a
+          // tool round, the doubled-budget retry and the write-up re-dispatch
+          // all re-send a context whose embedding the first round already
+          // bought, which would turn one embedding per turn into one per round.
+          ...(opts.recallDeep ? { aegis_recall_deep: true } : {}),
           session: opts.sessionId,
           // The fan-out is opt-in per dispatch. `brain` is sent EXPLICITLY
           // whenever this dispatch is not the autonomous one, because the
@@ -759,6 +800,14 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
         cls, model, mode: payload && payload.mode, maxTokens, statedMaxTokens, autonomous, sessionId, signal, onDelta, cfg, apiKey, toolChoice,
         effort: payload && payload.effort,
         workers: payload && payload.workers,
+        // Deep recall (`aegis_recall_deep`) is an explicit per-session opt-in
+        // and never a default: it costs one provider embedding per turn
+        // server-side (aegis1 services/brain_memory.py find_cached_answer), so
+        // a client that pays per turn must not turn it on for itself. Only a
+        // literal `true` from the caller counts — an absent or `undefined`
+        // field is off, which is what keeps every existing caller (the
+        // renderer's IPC payloads included) on the cheap read.
+        recallDeep: payload && payload.recallDeep === true,
         onReasoning,
         idleTimeoutMs: autonomous ? AUTONOMOUS_IDLE_TIMEOUT_MS : undefined,
         // A caller with no live streaming surface (a `--no-stream` CLI flag, a
@@ -873,7 +922,12 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
           });
         }
         round += 1;
-        const opts = { ...base, system, messages: history, prompt, tools: toolSchemas };
+        // `round === 1` is the user's own ask, and the ONLY dispatch allowed to
+        // carry the deep-recall opt-in: the deep tier embeds the query once per
+        // dispatch, so leaving it on for an agentic turn would charge one
+        // embedding per tool round instead of one per turn (the retries below
+        // clear it explicitly, being re-dispatches inside round 1).
+        const opts = { ...base, system, messages: history, prompt, tools: toolSchemas, recallDeep: base.recallDeep && round === 1 };
         let res;
         try {
           res = await dispatch(cls, opts);
@@ -917,6 +971,10 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
           res = await dispatch(cls, {
             ...opts,
             singlePass: true,
+            // A re-dispatch, not a new ask: the deep tier's embedding was
+            // bought by round 1, and buying it again here would charge a
+            // second one for the same context.
+            recallDeep: false,
             maxTokens: doubledBudget(opts.maxTokens),
             // Doubling applies to the pooled path only when the caller stated a
             // number. With none stated, the server's effort ladder IS the
@@ -948,6 +1006,9 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
           res = await dispatch(cls, {
             ...opts,
             singlePass: true,
+            // Same as the truncation retry above: this pass writes up findings
+            // already in `history`, and a fresh embedding buys it nothing.
+            recallDeep: false,
             messages: history,
             prompt: '',
             tools: [],
