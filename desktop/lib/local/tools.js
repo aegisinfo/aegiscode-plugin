@@ -81,14 +81,12 @@ const fail = (error) => ({ ok: false, error: cap(error) });
 const SCHEMAS = {
   readFile: {
     name: 'readFile',
-    description:
-      'Reads a file from the local filesystem. The file_path parameter must be an absolute path. ' +
-      'Returns line-numbered content.',
+    description: 'Read a file. Absolute path. Returns line-numbered content.',
     parameters: {
       type: 'object',
       properties: {
-        file_path: { type: 'string', description: 'The absolute path to the file to read' },
-        offset: { type: 'number', description: 'The line number to start reading from (0-based)' },
+        file_path: { type: 'string', description: 'Absolute path' },
+        offset: { type: 'number', description: 'Start line (0-based)' },
         limit: { type: 'number', description: `The number of lines to read (max 10000, default ${READ_LINE_CAP})` },
       },
       required: ['file_path'],
@@ -98,13 +96,12 @@ const SCHEMAS = {
   writeFile: {
     name: 'writeFile',
     description:
-      'Writes a file to the local filesystem. Parent directories are created automatically. ' +
-      'Use it to create or replace a whole file; it overwrites whatever was there.',
+      'Write a whole file, overwriting it. Parent dirs are created. Use editFile to change part of one.',
     parameters: {
       type: 'object',
       properties: {
-        file_path: { type: 'string', description: 'The absolute path to the file to write' },
-        content: { type: 'string', description: 'The full contents of the file' },
+        file_path: { type: 'string', description: 'Absolute path' },
+        content: { type: 'string', description: 'Full file contents' },
       },
       required: ['file_path', 'content'],
       additionalProperties: false,
@@ -113,16 +110,15 @@ const SCHEMAS = {
   editFile: {
     name: 'editFile',
     description:
-      'Performs an exact string replacement in a file. old_string must be unique in the file ' +
-      'unless replace_all is true. Use this instead of writeFile when changing part of an ' +
-      'existing file — it fails loudly on a non-unique or missing match instead of guessing.',
+      'Exact string replacement. old_string must be unique unless replace_all. Fails loudly on a ' +
+      'missing or ambiguous match rather than guessing.',
     parameters: {
       type: 'object',
       properties: {
-        file_path: { type: 'string', description: 'The absolute path to the file to modify' },
-        old_string: { type: 'string', description: 'The text to replace (must be unique unless replace_all is true)' },
-        new_string: { type: 'string', description: 'The text to replace it with' },
-        replace_all: { type: 'boolean', description: 'If true, replace all occurrences of old_string' },
+        file_path: { type: 'string', description: 'Absolute path' },
+        old_string: { type: 'string', description: 'Text to replace; must be unique unless replace_all' },
+        new_string: { type: 'string', description: 'Replacement text' },
+        replace_all: { type: 'boolean', description: 'Replace every occurrence' },
       },
       required: ['file_path', 'old_string', 'new_string'],
       additionalProperties: false,
@@ -130,9 +126,7 @@ const SCHEMAS = {
   },
   listDir: {
     name: 'listDir',
-    description:
-      'Lists one directory (non-recursive). Directories are marked with a trailing slash. ' +
-      'Skips node_modules, .git and dist.',
+    description: 'List one directory (non-recursive). Skips node_modules, .git, dist.',
     parameters: {
       type: 'object',
       properties: {
@@ -145,12 +139,12 @@ const SCHEMAS = {
   glob: {
     name: 'glob',
     description:
-      'Find files matching a glob pattern. Supports **, * and ?. Skips node_modules, .git and dist by default.',
+      'Find files by glob (**, *, ?). Skips node_modules, .git, dist.',
     parameters: {
       type: 'object',
       properties: {
-        pattern: { type: 'string', description: 'The glob pattern to match, e.g. "**/*.test.js"' },
-        path: { type: 'string', description: 'The directory to search from (default: the working directory)' },
+        pattern: { type: 'string', description: 'Glob, e.g. "**/*.test.js"' },
+        path: { type: 'string', description: 'Search root (default: cwd)' },
       },
       required: ['pattern'],
       additionalProperties: false,
@@ -158,9 +152,7 @@ const SCHEMAS = {
   },
   grep: {
     name: 'grep',
-    description:
-      'Search file contents using a regular expression. Returns file:line matches. ' +
-      'Skips node_modules, .git and dist by default.',
+    description: 'Search file contents by regex. Returns file:line matches. Skips node_modules, .git, dist.',
     parameters: {
       type: 'object',
       properties: {
@@ -174,15 +166,13 @@ const SCHEMAS = {
   exec: {
     name: 'exec',
     description:
-      'Executes a shell command in a persistent shell session and returns its combined ' +
-      'stdout+stderr plus the exit code. State (cd, exported env vars) carries across calls ' +
-      'within the same turn — it is a real session, not a fresh process each time. ' +
-      'Use for system operations, git commands and package management.',
+      'Run a shell command in a PERSISTENT session: cd and exported env carry across calls in ' +
+      'this turn. Returns stdout+stderr and the exit code. Use for git, packages, system ops.',
     parameters: {
       type: 'object',
       properties: {
-        command: { type: 'string', description: 'The shell command to execute' },
-        cwd: { type: 'string', description: 'Run this one command in a different directory without moving the session (the session cwd is unchanged for later calls)' },
+        command: { type: 'string', description: 'Command to run' },
+        cwd: { type: 'string', description: 'Run this one command elsewhere; session cwd unchanged' },
         timeout: { type: 'number', description: `Timeout in milliseconds (max ${EXEC_TIMEOUT_CAP}, default ${EXEC_TIMEOUT_DEFAULT})` },
         description: { type: 'string', description: 'A brief description of what the command does (for display)' },
       },
@@ -193,17 +183,12 @@ const SCHEMAS = {
   task: {
     name: 'task',
     description:
-      'Spawn a specialized subagent to autonomously handle a focused, multi-step sub-task. ' +
-      'The subagent runs its own tool loop (readFile/writeFile/editFile/listDir/glob/grep/exec) ' +
-      'on the same model and returns a final report as the tool result. Use it to delegate work ' +
-      'like scanning for vulnerabilities, reviewing code, planning a refactor, or scaffolding a ' +
-      'component — give it a complete, self-contained prompt since it cannot ask follow-up ' +
-      'questions. Subagents can delegate further with task, so a large job can be split ' +
-      'hierarchically as deep as useful.',
+      'Delegate a focused multi-step sub-task to a subagent with its own tool loop; it returns a ' +
+      'final report. Give it a complete, self-contained prompt — it cannot ask follow-ups.',
     parameters: {
       type: 'object',
       properties: {
-        description: { type: 'string', description: 'A short (3-5 word) description of the sub-task' },
+        description: { type: 'string', description: 'Short label (3-5 words)' },
         subagent_type: {
           type: 'string',
           enum: [...agentRoles(), 'general'],
