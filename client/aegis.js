@@ -465,6 +465,9 @@ function createClient(opts = {}) {
     const decoder = new TextDecoder();
     let buffer = '';
     let fullText = '';
+    // Mirrors fullText for the reasoning channel so a reasoning SNAPSHOT is
+    // deduplicated the same way a content snapshot is.
+    let reasoningText = '';
     let resultModel = body.model;
     let usage = null;
     let sseError = '';
@@ -565,24 +568,48 @@ function createClient(opts = {}) {
         // synthesis pass writes the visible answer. Deliberately kept out of
         // `fullText` — deliberation is not an answer, and counting it would
         // make a no-answer turn look answered to every caller's empty-check.
-        const reasoning =
-          (choice &&
-            ((choice.delta && choice.delta.reasoning_content) ||
-              (choice.message && choice.message.reasoning_content))) ||
-          '';
-        if (reasoning) {
-          if (typeof onReasoning === 'function') onReasoning(reasoning);
-          else onStream({ reasoning });
-        }
-        const delta =
-          (choice &&
-            ((choice.delta && choice.delta.content) ||
-              (choice.message && choice.message.content))) ||
-          '';
-        if (delta) {
-          fullText += delta;
-          onStream({ delta });
-        }
+        // `delta.*` is an INCREMENT; `message.*` is a SNAPSHOT of the whole
+        // message so far. Collapsing them with `||` made a stream that ends
+        // with a message snapshot append the entire answer a second time —
+        // the duplicated text in the CLI. They are merged here through one
+        // helper that emits only what the caller has not already seen.
+        const advance = (increment, snapshot, seen, emit) => {
+          if (typeof increment === 'string' && increment) {
+            emit(increment);
+            return seen + increment;
+          }
+          if (typeof snapshot === 'string' && snapshot) {
+            if (!seen) { emit(snapshot); return snapshot; }
+            // The usual shape: the snapshot restates everything streamed so
+            // far, so only the tail is new.
+            if (snapshot.startsWith(seen)) {
+              const tail = snapshot.slice(seen.length);
+              if (tail) emit(tail);
+              return snapshot;
+            }
+            // Disjoint from what was already shown — cannot be reconciled, and
+            // appending it would duplicate. Keep what the caller has seen.
+            return seen;
+          }
+          return seen;
+        };
+
+        reasoningText = advance(
+          choice && choice.delta && choice.delta.reasoning_content,
+          choice && choice.message && choice.message.reasoning_content,
+          reasoningText,
+          (chunk) => {
+            if (typeof onReasoning === 'function') onReasoning(chunk);
+            else onStream({ reasoning: chunk });
+          }
+        );
+
+        fullText = advance(
+          choice && choice.delta && choice.delta.content,
+          choice && choice.message && choice.message.content,
+          fullText,
+          (chunk) => onStream({ delta: chunk })
+        );
         const fragments =
           (choice && choice.delta && choice.delta.tool_calls) ||
           (choice && choice.message && choice.message.tool_calls);

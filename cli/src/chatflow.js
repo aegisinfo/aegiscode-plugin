@@ -137,14 +137,22 @@ function resolveToolDone(transcript, t) {
  * fall back to "(no response)" for empty text. An abort wins over an error so
  * Esc-cancel never produces the doubled marker.
  */
-function finalizeTurnText(text, { aborted, error } = {}) {
+function finalizeTurnText(text, { aborted, error, reasoned } = {}) {
   let t = String(text == null ? '' : text);
   if (error && !aborted && error !== 'stopped') {
     const err = `(backend error: ${error})`;
     t = t.trim() ? `${t.trimEnd()}\n\n${err}` : err;
   }
   if (aborted) t = t.trim() ? `${t.trimEnd()} (stopped)` : '(stopped)';
-  if (!t.trim()) t = '(no response)';
+  if (!t.trim()) {
+    // A reasoning model that spends its whole token budget on hidden
+    // chain-of-thought finishes with empty content and no error. "(no
+    // response)" reads as a broken client for what is really an exhausted
+    // budget, and sends you looking for a bug that is not there.
+    t = reasoned
+      ? '(no answer — the model used its whole budget on hidden reasoning before writing one; retry, or raise the budget with /effort)'
+      : '(no response)';
+  }
   return t;
 }
 
@@ -782,6 +790,7 @@ async function runSession(host) {
 
     push({ role: 'user', text: prompt });
     const msg = push({ role: 'assistant', text: '', streaming: true });
+    let sawReasoning = false;
 
     const presenter = {
       text: (delta) => {
@@ -789,7 +798,10 @@ async function runSession(host) {
         streamedChars += w(delta);
         scheduleRender();
       },
-      reasoning: () => {},
+      // Not rendered (deliberation is not an answer), but recorded: a turn
+      // that reasoned and then produced nothing needs a different explanation
+      // from one that produced nothing at all.
+      reasoning: () => { sawReasoning = true; },
       tool: (tool) => {
         if (tool.phase === 'run') {
           const n = ++toolSeq;
@@ -826,13 +838,26 @@ async function runSession(host) {
       result = { error: (err && err.message) || String(err) };
     } finally {
       msg.streaming = false;
+      // The row is built from streamed deltas, but the transport is the
+      // authority on what the turn actually produced. A provider that emits
+      // no incremental content — a non-streaming fallback, a gateway that
+      // only sends the finished message, a reasoning model whose visible
+      // answer arrives in one final frame — left this row empty and the user
+      // read "(no response)" for a turn that was answered and billed.
+      if (!String(msg.text || '').trim() && result && typeof result.text === 'string' && result.text.trim()) {
+        msg.text = result.text;
+      }
       working = false;
       clearInterval(spinnerTimer);
       spinnerTimer = null;
       setTitle('AEGIS Code', false);
       const secs = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
       const abortedFlag = !!(abort && abort.signal.aborted);
-      msg.text = finalizeTurnText(msg.text, { aborted: abortedFlag, error: result && result.error });
+      msg.text = finalizeTurnText(msg.text, {
+        aborted: abortedFlag,
+        error: result && result.error,
+        reasoned: sawReasoning,
+      });
       const footer = push(
         { role: 'done', text: `${toolSeq > 0 ? DONE_VERBS[1] : DONE_VERBS[0]} for ${secs}s` },
         { follow: false }

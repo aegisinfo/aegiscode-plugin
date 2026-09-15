@@ -384,15 +384,28 @@ async function openaiCompatible({
       if (json.usage) usage = json.usage;
       const choice = json.choices && json.choices[0];
       if (choice && choice.finish_reason) finishReason = choice.finish_reason;
-      const delta =
-        (choice &&
-          ((choice.delta && choice.delta.content) ||
-            (choice.message && choice.message.content))) ||
-        '';
-      if (delta) {
-        fullText += delta;
-        if (onDelta) onDelta({ delta });
+      // `delta.content` is an INCREMENT; `message.content` is a SNAPSHOT of
+      // the whole message. Collapsing them with `||` made any stream that
+      // ends with a message snapshot append the entire answer a second time —
+      // the same duplication the shared client had. Emit only the unseen tail.
+      const inc = choice && choice.delta && choice.delta.content;
+      const snap = choice && choice.message && choice.message.content;
+      let add = '';
+      if (typeof inc === 'string' && inc) {
+        add = inc;
+        fullText += inc;
+      } else if (typeof snap === 'string' && snap) {
+        if (!fullText) {
+          add = snap;
+          fullText = snap;
+        } else if (snap.startsWith(fullText)) {
+          add = snap.slice(fullText.length);
+          fullText = snap;
+        }
+        // Disjoint from what was already shown: appending would duplicate, so
+        // keep what the caller has seen.
       }
+      if (add && onDelta) onDelta({ delta: add });
       // Streamed fragments (delta.tool_calls) and the whole-answer shape a
       // non-streaming fallback returns (message.tool_calls) both land here.
       const fragments =
