@@ -787,6 +787,26 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
       let truncationRetried = false;
       let synthesisDone = false;
 
+      // Round cap — the bound aegiscodex-dev has had all along and this engine
+      // did not. Removing the old fixed cap (12) was right in spirit and wrong
+      // in effect: it left the turn with NO horizon, and on 2026-09-15 the
+      // question "can you check the plan" ran ~70 rounds, grew the context
+      // from 2,260 to 116,011 tokens, cost about EUR 2, and spent those rounds
+      // writing 400 lines of unrequested code into the source tree. Each round
+      // re-sends the whole conversation, so an unbounded loop gets more
+      // expensive the longer it runs.
+      //
+      // The numbers match aegiscodex-dev's (src/autonomous.js) so both clients
+      // behave the same: 24 rounds for a chat turn, 40 for an autonomous one.
+      // Env-overridable for a deliberately long job.
+      const maxRounds = (() => {
+        const name = autonomous ? 'AEGIS_AUTONOMOUS_MAX_ROUNDS' : 'AEGIS_CHAT_MAX_ROUNDS';
+        const raw = Number.parseInt(process.env[name] || '', 10);
+        if (Number.isFinite(raw) && raw > 0) return raw;
+        return autonomous ? 40 : 24;
+      })();
+      let round = 0;
+
       // Token accounting for the whole TURN, not just its last round. An
       // agentic turn makes one provider call per tool round, and returning only
       // the final round's `usage` (what this did) reported a fraction of what
@@ -835,6 +855,24 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
       };
 
       for (;;) {
+        // Stop and SAY so. A turn that reaches its horizon has usually done
+        // real work; ending silently would paint an empty answer over it,
+        // which is the same "(empty response)" failure the guards below exist
+        // to prevent.
+        if (round >= maxRounds) {
+          const note =
+            `[stopped at ${maxRounds} tool rounds` +
+            `${turnUsage.total_tokens ? `, ${turnUsage.total_tokens.toLocaleString()} tokens` : ''}` +
+            `. Ask again to continue, or raise ` +
+            `${autonomous ? 'AEGIS_AUTONOMOUS_MAX_ROUNDS' : 'AEGIS_CHAT_MAX_ROUNDS'}.]`;
+          if (rootOnDelta) rootOnDelta({ delta: `\n\n${note}` });
+          return withTurnUsage({
+            model: base.model,
+            choices: [{ message: { content: note }, finish_reason: 'length' }],
+            stoppedOnRounds: true,
+          });
+        }
+        round += 1;
         const opts = { ...base, system, messages: history, prompt, tools: toolSchemas };
         let res;
         try {
