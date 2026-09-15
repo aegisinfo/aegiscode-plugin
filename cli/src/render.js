@@ -31,7 +31,7 @@ const {
   DONE_VERBS,
   themeOf,
 } = require('./theme.js');
-const { WELCOME_TITLE, WELCOME_BACK, TAGLINE, welcomeArtParts } = require('./art.js');
+const { WELCOME_TITLE, WELCOME_BACK, TAGLINE, STAR, stencilGlyph, welcomeArtParts } = require('./art.js');
 const { w, pad, padStart, wrapBlock, clip, span } = require('./screen.js');
 const { fmtTokens, fmtEur, fmtElapsed } = require('./format.js');
 
@@ -63,9 +63,17 @@ function centerStyled(text, width, style) {
 }
 
 /** The right (moon + whale) half of the mark: ▓ blue, ▒ lavender, ░ dim,
- *  eye white, stars gold. */
+ *  eye white, stars gold.
+ *
+ *  The keys are the runes as `art.js` drew them, then run through the stencil:
+ *  `artRow` is handed rows that have *already* been stencilled for this
+ *  platform, so a raw-rune table silently matched nothing on win32/darwin and
+ *  the whole moon/whale half rendered uncoloured there — the mark looked
+ *  different on two of the three platforms it ships to. */
 function tintWhale(str, t) {
-  const map = { '▓': t.blue, '▒': t.lavender, '░': t.dim, '█': t.white, '✦': t.gold, '·': t.dim };
+  const byRune = { '▓': t.blue, '▒': t.lavender, '░': t.dim, '█': t.white, [STAR]: t.gold, '·': t.dim };
+  const map = {};
+  for (const rune of Object.keys(byRune)) map[stencilGlyph(rune)] = byRune[rune];
   const spans = [];
   let cur = null;
   let style = '';

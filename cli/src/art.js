@@ -89,6 +89,15 @@ const TAGLINE = 'Cloud brain in your shell.';
 // mangle █▓▒░ entirely; on macOS ✦ renders as a double-width emoji. Each pass
 // swaps offending code points 1:1 (same character count per row) so the width
 // maths stays exact and the mark keeps its shape.
+//
+// This table is the ONE stencil source of truth for the product. `theme.js`
+// resolves `GLYPH.star` through `stencilGlyph(STAR, platform)` rather than
+// carrying its own `'✦' → '*'` rule, and `render.js` builds the mark's tint map
+// by stencilling its runes — both had a private copy of the same decision, which
+// is how a stencil edit here could leave the star wide on macOS or the whale
+// untinted on Windows. `test/cli-art-platform.test.mjs` pins all of it.
+const STAR = '✦';
+
 const ASCII_STENCIL = new Map([
   ['█', '#'],
   ['▓', '@'],
@@ -100,7 +109,7 @@ const ASCII_STENCIL = new Map([
   ['▌', '#'],
   ['▝', '#'],
   ['▘', '#'],
-  ['✦', '*'],
+  [STAR, '*'],
   ['·', '.'],
 ]);
 
@@ -111,18 +120,45 @@ const DARWIN_STENCIL = new Map([
   ['▌', '#'],
   ['▝', '#'],
   ['▘', '#'],
-  ['✦', '*'],
+  [STAR, '*'],
 ]);
 
-/** One platform pass over an art block. */
+/** The platforms this mark has a pass for. Linux needs none (see `stencilFor`). */
+const PLATFORMS = ['linux', 'darwin', 'win32'];
+
+/** Every pass, keyed by `process.platform`; a platform with no entry is native. */
+const STENCILS = { darwin: DARWIN_STENCIL, win32: ASCII_STENCIL };
+
+/**
+ * The stencil for a platform, or `null` when its runes need no pass.
+ * @param {string} platform a `process.platform` string
+ */
+function stencilFor(platform) {
+  return STENCILS[platform] || null;
+}
+
+/**
+ * One rune as `platform` renders it — the identity when that platform is native.
+ * Exported so `theme.js`'s glyph table and `render.js`'s tint map are derived
+ * from the stencil instead of restating it.
+ * @param {string} ch
+ * @param {string} [platform]
+ */
+function stencilGlyph(ch, platform = process.platform) {
+  const s = stencilFor(platform);
+  return (s && s.get(ch)) || ch;
+}
+
+/** One platform pass over an art block, for an explicit platform. */
+function portabilityFor(rows, platform) {
+  const s = stencilFor(platform);
+  if (!s) return rows;
+  return rows.map((r) => [...r].map((ch) => s.get(ch) ?? ch).join(''));
+}
+
+/** The mark as the terminal running this process will render it. */
 function portability(rows) {
-  if (process.platform === 'win32') {
-    return rows.map((r) => [...r].map((ch) => ASCII_STENCIL.get(ch) ?? ch).join(''));
-  }
-  if (process.platform === 'darwin') {
-    return rows.map((r) => [...r].map((ch) => DARWIN_STENCIL.get(ch) ?? ch).join(''));
-  }
-  return rows;
+  return portabilityFor(rows, process.platform);
 }
 
 /** The mark that fits the current terminal: side-by-side when there's room. */
@@ -232,7 +268,13 @@ module.exports = {
   WELCOME_TITLE,
   WELCOME_BACK,
   TAGLINE,
+  STAR,
+  PLATFORMS,
+  STENCILS,
+  stencilFor,
+  stencilGlyph,
   portability,
+  portabilityFor,
   welcomeArtFor,
   welcomeArtParts,
   stackVertical,

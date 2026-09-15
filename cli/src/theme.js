@@ -16,6 +16,11 @@
  * Zero dependencies: SGR escapes are hand-built, like the rest of this repo.
  */
 
+// The stencil is the mark's single source of truth for its own runes — this
+// file resolves `star` through it rather than restating the platform rule.
+// `art.js` requires nothing, so this import cannot cycle.
+const { STAR, stencilGlyph } = require('./art.js');
+
 const RESET = '\x1b[0m';
 const BOLD = '\x1b[1m';
 const DIM = '\x1b[2m';
@@ -66,8 +71,16 @@ const LIGHT = {
  * or render as double-width emoji (✦ U+2726, ✻/✢/✽/✶), which breaks row
  * alignment exactly like the welcome art — those platforms get single-width
  * stand-ins instead.
+ *
+ * `star` is NOT restated here: it is resolved through `art.js`'s stencil, the
+ * single source of truth for the mark's runes. This file used to carry its own
+ * `'✦' → '*'` rule on win32/darwin, which is precisely how the star could stay
+ * wide on one platform while the art got stencilled on another — the mark and
+ * the glyph table would then disagree about the same character. Every other
+ * entry below is a *text* glyph (cursor, hook, spinner frames) that no art row
+ * contains, so it keeps its own definition.
  */
-const GLYPH = (() => {
+function glyphsFor(platform = process.platform) {
   const base = {
     cursor: '❯', // menu selection marker, prompt prefix
     check: '✔', // selected / completed
@@ -75,7 +88,7 @@ const GLYPH = (() => {
     bullet: '·', // inline separators
     hint: '❯', // "Try ..." suggestion marker
     pause: '⏸', // bottom status line (manual mode)
-    star: '✦', // own-session marker, decorations
+    star: stencilGlyph(STAR, platform), // own-session marker, decorations
     leftarrow: '←', // hints on the status line
     pointer: '▸', // tips list bullets
     hook: '⎿', // inline command / tip rows (tool commands, usage hints)
@@ -84,26 +97,26 @@ const GLYPH = (() => {
     spin: ['✢', '·', '✻', '*', '✽', '✶'], // working spinner
     ellipse: '…',
   };
-  if (process.platform === 'win32') {
+  if (platform === 'win32') {
     return {
       ...base,
       pause: '❚❚', // ⏸ U+23F8 missing from many Windows fonts
       hook: '_|', // ⎿ U+23BF almost never present in Windows fonts
-      star: '*', // ✦ U+2726 renders wide/emoji
       bloom: '*', // ✻ U+273B
       spin: ['|', '/', '-', '\\', '*', '-'],
     };
   }
-  if (process.platform === 'darwin') {
+  if (platform === 'darwin') {
     return {
       ...base,
       pause: '❚❚', // ⏸ has an emoji presentation on Apple fonts
-      star: '*', // ✦ renders as a double-width emoji in Terminal.app
       hook: '_|', // ⎿ U+23BF not in Apple monospace fonts
     };
   }
   return base;
-})();
+}
+
+const GLYPH = glyphsFor(process.platform);
 
 /** Working-line verbs, verbatim from the capture-backed table. */
 const VERBS = [
@@ -216,6 +229,7 @@ module.exports = {
   THEME_TABLE,
   themeForIndex,
   GLYPH,
+  glyphsFor,
   VERBS,
   DONE_VERBS,
   themeOf,

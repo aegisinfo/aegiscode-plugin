@@ -196,6 +196,44 @@ function errorText(err) {
 }
 
 /**
+ * Result shape for the two billing actions (`aegis:billingCheckout` and
+ * `aegis:tokenBankTopup`). Both end in a Stripe-hosted checkout URL created
+ * server-side, and both have failure modes the user has to be able to tell
+ * apart: the free-plan cap (402), no/invalid API key (401), an amount the
+ * server rejects (400), Stripe not configured on the server (503
+ * `setup_required`), and a plain transport/500 error.
+ *
+ * The classification happens HERE for the same reason the memory paths
+ * normalise: `ipcRenderer.invoke` carries only the message STRING across the
+ * boundary, so `err.status` / `err.data` are gone by the time the renderer
+ * sees a rejection. The renderer gets a resolved payload instead — never a
+ * throw it would have to string-match.
+ */
+async function billingResult(run) {
+  try {
+    const data = await run();
+    return {
+      ok: true,
+      url: (data && data.url) || null,
+      status: 0,
+      reason: null,
+      setupRequired: false,
+      upgrade: null,
+    };
+  } catch (err) {
+    const data = (err && err.data) || {};
+    return {
+      ok: false,
+      url: null,
+      status: (err && err.status) || 0,
+      reason: errorText(err),
+      setupRequired: Boolean(data.setup_required),
+      upgrade: upgradeInfo(err),
+    };
+  }
+}
+
+/**
  * `aegis:memorySave` with the offline-first fallback (plan P3 §7): try the
  * cloud save first; if it fails (no key, offline, transient error) queue the
  * entry in <dir>/memory-queue.json instead of throwing, so the renderer's
@@ -380,6 +418,15 @@ function createIpcDispatch(aegis, dir, persistApiKey, openExternal) {
 
     verifyApiKey: () => aegis.verifyApiKey(),
     tokenBankBalance: () => aegis.tokenBankBalance(),
+
+    // Billing (plan upgrade + token-bank top-up). aegis1 creates a Stripe
+    // checkout session and answers `{ url }`; the renderer opens that URL
+    // through the same aegis:openExternal path the upgrade notices use, so a
+    // payment page is never rendered inside the app's own window. Both
+    // resolve a shaped result instead of rejecting — see billingResult().
+    billingCheckout: () => billingResult(() => aegis.billingCheckout()),
+    tokenBankTopup: (payload) =>
+      billingResult(() => aegis.tokenBankTopup(payload && payload.amountEur)),
 
     listModels: () => aegis.listModels(),
 

@@ -86,6 +86,12 @@ const api = {
   setApiKey: (key) => invoke('setApiKey', { key }),
   verifyApiKey: () => invoke('verifyApiKey'),
   tokenBankBalance: () => invoke('tokenBankBalance'),
+  // Billing: both start a Stripe-hosted checkout and resolve a shaped
+  // `{ ok, url | status, reason, upgrade }` (main.js billingResult). The
+  // renderer opens the returned URL with openExternal below — the checkout
+  // page itself never loads in this window.
+  billingCheckout: () => invoke('billingCheckout'),
+  tokenBankTopup: (amountEur) => invoke('tokenBankTopup', { amountEur }),
   listModels: () => invoke('listModels'),
   // Streaming chat (D2.1): pass an onDelta callback to receive SSE chunks as
   // they arrive (pushed from main over aegis:chatDelta). The invoke promise

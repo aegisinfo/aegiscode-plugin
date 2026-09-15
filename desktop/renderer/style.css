@@ -282,6 +282,42 @@ select:disabled {
   border-color: var(--teal);
 }
 
+/* ------------------------------------------------------- billing actions */
+/* The upgrade / top-up row in the Status card. Same flex row as the key
+   entry above it (and the same .ghost-btn controls), with the amount picker
+   sized to its content instead of stretching like the key input. */
+.billing-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.billing-topup {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.billing-row select {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.billing-row select:focus {
+  outline: none;
+  border-color: var(--teal);
+}
+
+.billing-row .ghost-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* --------------------------------------------------------------- memory */
 .memory-search {
   display: flex;

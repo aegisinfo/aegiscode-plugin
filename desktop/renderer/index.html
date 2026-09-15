@@ -58,6 +58,25 @@
           <button type="button" id="api-key-verify" class="ghost-btn">Verify</button>
         </div>
         <p class="hint" id="api-key-hint"></p>
+        <!-- Billing actions (upgrade / top-up). Both hit aegis1 — POST
+             /api/billing/checkout (subscription, STRIPE_MEMORY_PRICE_ID) and
+             POST /api/token-bank/topup (amount_eur, server range 2–1000) —
+             and both answer a Stripe URL that is opened in the OS browser via
+             the same openExternal IPC the cap notices use. One row, no modal:
+             the status line below carries every outcome. -->
+        <div class="billing-row">
+          <button type="button" id="upgrade-plan" class="ghost-btn">Upgrade plan</button>
+          <span class="billing-topup">
+            <button type="button" id="topup-btn" class="ghost-btn">Top up</button>
+            <select id="topup-amount" title="Top-up amount (EUR)">
+              <option value="5">€5</option>
+              <option value="10" selected>€10</option>
+              <option value="25">€25</option>
+              <option value="50">€50</option>
+            </select>
+          </span>
+        </div>
+        <p class="hint" id="billing-hint"></p>
       </section>
 
       <section class="card">

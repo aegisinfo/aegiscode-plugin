@@ -60,6 +60,10 @@ const ELEMENT_IDS = {
   key: 'st-key',
   plan: 'st-plan',
   balance: 'st-balance',
+  upgradePlan: 'upgrade-plan',
+  topupBtn: 'topup-btn',
+  topupAmount: 'topup-amount',
+  billingHint: 'billing-hint',
   apiKeyInput: 'api-key-input',
   apiKeySave: 'api-key-save',
   apiKeyVerify: 'api-key-verify',
@@ -390,11 +394,18 @@ function setConn(ok, text) {
   els.connText.textContent = text;
 }
 
+/** Last known key state from aegis.status() — null until status is read, so
+ *  the top-up action can say "add a key first" instead of spending a round
+ *  trip on a guaranteed 401 (aegis1 login_required). */
+let keyConfigured = null;
+
 function renderStatus(s) {
   if (!s) {
+    keyConfigured = null;
     setConn(false, 'IPC unavailable');
     return;
   }
+  keyConfigured = Boolean(s.keyConfigured);
   els.app.textContent = s.appVersion ? `v${s.appVersion}` : '–';
   els.client.textContent = s.clientVersion || '–';
   els.base.textContent = s.apiBase || '–';
@@ -468,6 +479,96 @@ async function loadAccountInfo() {
       : '–';
   } catch {
     els.balance.textContent = 'unavailable';
+  }
+}
+
+// ---------------------------------------------------------------- billing
+//
+// The two write actions the Status card needs: "Upgrade plan" (aegis1 POST
+// /api/billing/checkout — the subscription whose Stripe price is
+// STRIPE_MEMORY_PRICE_ID) and "Top up" (POST /api/token-bank/topup with
+// `amount_eur`). Both are created SERVER-side and answer `{ url }` to a
+// Stripe-hosted page; that URL is handed to the OS browser through the same
+// aegis.openExternal IPC the free-plan cap notices use, so a payment page
+// never loads in this window and no card data comes near the renderer.
+//
+// The main process has already classified the failure (main.js billingResult:
+// status + reason + upgrade) because `ipcRenderer.invoke` would strip those
+// fields off a thrown error. Everything the user can act on is therefore said
+// in the hint line: no API key, the free-plan 402, Stripe unconfigured on the
+// server, and any other transport/HTTP failure with the server's own message.
+
+/** Render a `{ ok:false, status, reason, setupRequired, upgrade }` result
+ *  (main.js billingResult) into the Status card's hint line. */
+function renderBillingError(res, kind) {
+  const what = kind === 'topup' ? 'top-up' : 'upgrade';
+  if (res.status === 401 || res.status === 403) {
+    els.billingHint.textContent =
+      `add your AEGIS API key above — a ${what} needs an account`;
+    return;
+  }
+  if (res.upgrade) {
+    // The 402 free-plan path, same shape as capNotice()/renderMemoryResults():
+    // the subscribe link has to be a real child node — a text assignment would
+    // wipe it, and an href left in text is not clickable.
+    els.billingHint.textContent = `free plan cap reached — ${what} lifts it. `;
+    const a = document.createElement('a');
+    a.href = res.upgrade.url || 'https://aegiscloud.org/subscribe';
+    a.target = '_blank';
+    a.rel = 'noreferrer noopener';
+    a.textContent = 'See plans →';
+    els.billingHint.appendChild(a);
+    return;
+  }
+  if (res.setupRequired) {
+    els.billingHint.textContent =
+      'checkout is not configured on the server yet (no Stripe price id)';
+    return;
+  }
+  els.billingHint.textContent =
+    `${what} failed: ${res.reason || 'the server returned no checkout URL'}`;
+}
+
+async function startBilling(kind) {
+  const amount = Math.round(Number(els.topupAmount && els.topupAmount.value) || 10);
+  const btn = kind === 'topup' ? els.topupBtn : els.upgradePlan;
+  if (btn) btn.disabled = true;
+  // The bank belongs to the account, so a keyless client cannot top up: say so
+  // rather than spending a round trip on a guaranteed 401. (The subscription
+  // checkout is public in aegis1 and works without a key.) `keyConfigured` is
+  // null until status has been read — then we ask and let the server answer.
+  if (kind === 'topup' && keyConfigured === false) {
+    if (btn) btn.disabled = false;
+    els.billingHint.textContent =
+      'add your AEGIS API key above — a top-up is credited to your account';
+    return;
+  }
+  els.billingHint.textContent =
+    kind === 'topup' ? `creating a €${amount} top-up…` : 'creating checkout…';
+  try {
+    const res = kind === 'topup'
+      ? await aegis.tokenBankTopup(amount)
+      : await aegis.billingCheckout();
+    if (!res || res.ok !== true || !res.url) {
+      renderBillingError(res || {}, kind);
+      return;
+    }
+    // The URL is live: say what is happening before the browser takes focus.
+    els.billingHint.textContent = 'opening checkout…';
+    const opened = await aegis.openExternal(res.url);
+    if (opened && opened.ok === false) {
+      els.billingHint.textContent =
+        `could not open the checkout page: ${opened.reason || 'unknown reason'}`;
+      return;
+    }
+    els.billingHint.textContent = kind === 'topup'
+      ? `checkout opened in your browser — the bank is credited when Stripe confirms`
+      : 'checkout opened in your browser — your plan updates when Stripe confirms';
+  } catch (err) {
+    els.billingHint.textContent =
+      `billing failed: ${err && err.message ? err.message : err}`;
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -2588,6 +2689,10 @@ async function init() {
       saveApiKey();
     }
   });
+
+  // Billing actions in the Status card — see startBilling()/renderBillingError().
+  els.upgradePlan.addEventListener('click', () => startBilling('upgrade'));
+  els.topupBtn.addEventListener('click', () => startBilling('topup'));
 
   els.quickLauncherSave.addEventListener('click', saveQuickLauncherSettings);
   els.quickLauncherShortcut.addEventListener('keydown', (e) => {
