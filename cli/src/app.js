@@ -1007,9 +1007,15 @@ function createApp(options = {}) {
    * Best-effort by construction: the two writers swallow their own failures, and
    * accounting must never be able to break a turn.
    */
-  function persistTurn(prompt, res, status = 'done') {
+  function persistTurn(prompt, res, status = 'done', costEur = null) {
     try {
       const usage = res && res.usage;
+      // What the POOL charged, straight from the ledger — margin and
+      // prompt-cache discount already applied. Stored so /cost can report the
+      // real bill instead of recomputing from provider rates it cannot see.
+      // (The history field is historically named `costUsd`; the value here is
+      // EUR, which is what every surface in this client displays.)
+      const settled = typeof costEur === 'number' && Number.isFinite(costEur) ? costEur : null;
       appendHistory({
         sessionId: commandCtx.sessionId,
         prompt,
@@ -1021,8 +1027,11 @@ function createApp(options = {}) {
               output: Number(usage.output_tokens ?? usage.completion_tokens ?? 0) || 0,
               cacheRead: Number(usage.cache_read_input_tokens ?? 0) || 0,
               cacheWrite: Number(usage.cache_creation_input_tokens ?? 0) || 0,
+              ...(settled != null ? { costUsd: settled } : {}),
             }
-          : null,
+          : settled != null
+            ? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, costUsd: settled }
+            : null,
       });
       snapshotCheckpoint(commandCtx.sessionId, transcript);
     } catch {

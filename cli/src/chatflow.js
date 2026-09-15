@@ -869,17 +869,28 @@ async function runSession(host) {
       // Accounting: fold the turn's usage into the session tallies, ask the
       // ledger what it settled at, and show both — tokens beside €.
       host.recordTurn(result);
-      // Persist the finished exchange for /resume. Guarded: the test host stub
-      // deliberately omits persistTurn, and the accounting below must still run.
-      if (host.persistTurn) {
-        host.persistTurn(prompt, result, abortedFlag ? 'stopped' : (result && result.error) ? 'error' : 'done');
-      }
+      // Ask the ledger what this turn settled at BEFORE persisting it. Order
+      // matters: the charge is the server's number (margin and prompt-cache
+      // discount included) and only it can answer "what did that cost". The
+      // turn used to be written first, with no charge attached, which left
+      // /cost recomputing from a local rate table that knows about neither —
+      // so the figure a user read never matched the bill they paid.
       let lastCost = null;
       try {
         const spend = await host.refreshSpend();
         lastCost = spend ? spend.lastCost : null;
       } catch {
         /* accounting must never break a turn */
+      }
+      // Persist the finished exchange for /resume. Guarded: the test host stub
+      // deliberately omits persistTurn, and the accounting below must still run.
+      if (host.persistTurn) {
+        host.persistTurn(
+          prompt,
+          result,
+          abortedFlag ? 'stopped' : (result && result.error) ? 'error' : 'done',
+          lastCost
+        );
       }
       const usage = result && result.usage;
       const tokens = host.tokensFor ? host.tokensFor(usage) : null;
