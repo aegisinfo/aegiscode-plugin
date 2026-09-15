@@ -21,6 +21,8 @@ const destDir = join(desktop, 'vendor');
 // present inside the app dir, because electron-builder cannot reach outside it.
 const staged = [
   ['client', 'aegis.js'],
+  // The npm update checker — the desktop's own update path (see main.js).
+  ['client', 'update.js'],
   ['client', 'foreign-memory.js'],
   // The shared account-credential store and the unified session store. Both are
   // pure Node, and both are read by the terminal host and the MCP plugin too —

@@ -37,6 +37,7 @@ const VENDOR = path.join(CLI_DIR, 'vendor');
 /** repo-relative -> staged location (same relative shape, under vendor/) */
 const FILES = [
   'client/aegis.js',
+  'client/update.js',
   'client/foreign-memory.js',
   // The account credential store and the unified session store. Shared with the
   // desktop app and the MCP plugin so all three see one key and one session

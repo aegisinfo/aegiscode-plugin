@@ -969,6 +969,79 @@ const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
  * matches the "never auto-restart without consent" rule: quitAndInstall()
  * is likewise only ever invoked by an explicit "Restart to install" click.
  */
+
+/**
+ * Update state backed by the npm registry, for installs that are not packaged
+ * electron builds (i.e. `npm i -g aegis-desktop`).
+ *
+ * Mirrors the electron-updater manager's shape exactly so the IPC dispatch and
+ * the renderer banner need no branch: status/check/download/quitAndInstall/
+ * start. `download` and `quitAndInstall` are no-ops that report the install
+ * command instead of acting — npm owns installation here, and silently
+ * swapping the package under a running process is not something to do on the
+ * user's behalf.
+ */
+function createNpmUpdateManager({ onStatus }) {
+  const PKG = 'aegis-desktop';
+  let current = 'unknown';
+  try {
+    current = require('./package.json').version;
+  } catch {
+    /* version is cosmetic here */
+  }
+  let state = { status: 'idle', version: null, error: null, channel: 'npm' };
+  const set = (patch) => {
+    state = { ...state, ...patch };
+    if (onStatus) onStatus(state);
+    return state;
+  };
+
+  // Same repo-then-vendor idiom every other shared module here uses.
+  let updater = null;
+  try {
+    updater = require('../client/update.js');
+  } catch {
+    try {
+      updater = require('./vendor/update.js');
+    } catch {
+      updater = null;
+    }
+  }
+
+  async function check() {
+    if (!updater) return set({ status: 'disabled', error: 'update checker unavailable' });
+    set({ status: 'checking', error: null });
+    try {
+      const latest = await updater.fetchLatest({ pkg: PKG });
+      if (!latest) return set({ status: 'error', error: 'registry unreachable' });
+      if (!updater.isNewer(latest, current)) return set({ status: 'up-to-date', version: latest });
+      return set({
+        status: 'available',
+        version: latest,
+        command: `npm i -g ${PKG}@latest`,
+      });
+    } catch (err) {
+      return set({ status: 'error', error: errorText(err) });
+    }
+  }
+
+  return {
+    status: () => state,
+    check,
+    // npm installs are the user's to run; saying so beats pretending to act.
+    download: async () => set({
+      status: state.status === 'available' ? 'available' : state.status,
+      command: `npm i -g ${PKG}@latest`,
+    }),
+    quitAndInstall: () => {},
+    start: () => {
+      check().catch(() => {});
+      const t = setInterval(() => check().catch(() => {}), UPDATE_CHECK_INTERVAL_MS);
+      if (t.unref) t.unref();
+    },
+  };
+}
+
 function createUpdateManager({ autoUpdater, isPackaged, onStatus }) {
   let state = { status: 'idle', version: null, error: null };
 
@@ -978,14 +1051,23 @@ function createUpdateManager({ autoUpdater, isPackaged, onStatus }) {
   }
 
   if (!isPackaged || !autoUpdater) {
-    const disabledState = { status: 'disabled', version: null, error: null };
-    return {
-      status: () => disabledState,
-      check: () => Promise.resolve(disabledState),
-      download: () => Promise.resolve(disabledState),
-      quitAndInstall: () => {},
-      start: () => {},
-    };
+    // Not a packaged build — which is how this app is INSTALLED FROM NPM, not
+    // just how it runs in dev. That case used to resolve a flat 'disabled' and
+    // never check anything, so an npm-installed desktop could never learn a
+    // new version existed.
+    //
+    // electron-updater's configured feed is GitHub Releases
+    // (electron-builder.yml `publish:`), and there has never been a published
+    // release to read — the only one is a draft, invisible to the updater, and
+    // the release workflow cannot run while Actions is billing-locked. So the
+    // feed the packaged path depends on does not exist, while the registry we
+    // actually publish to does.
+    //
+    // npm is therefore the real update channel. Checking it costs one request
+    // a day, reports the version and the exact command, and deliberately does
+    // NOT self-install: replacing your own running process mid-session is a
+    // different promise from telling you an update exists.
+    return createNpmUpdateManager({ onStatus: setState });
   }
 
   autoUpdater.autoDownload = false;

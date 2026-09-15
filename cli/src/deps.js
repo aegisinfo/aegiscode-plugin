@@ -65,6 +65,9 @@ const agentsPath = resolveShared(path.join('desktop', 'lib', 'local', 'agents.js
 // running shell commands. Same file as the GUI, for the same reason engine.js
 // is: two personas would drift, and only one of them would get fixed.
 const promptPath = resolveShared(path.join('desktop', 'lib', 'local', 'prompt.js'));
+// The npm update checker, shared with the desktop host: two package names, one
+// implementation, so a fix to the check reaches both.
+const updatePath = resolveShared(path.join('client', 'update.js'));
 
 const { createClient } = require(clientPath);
 const { createTools } = require(toolsPath);
@@ -72,8 +75,10 @@ const { usageTokens } = require(usagePath);
 const { createLocalEngine } = require(enginePath);
 const { agentRoles, agentRoleLabel } = require(agentsPath);
 const { buildSystemPrompt } = require(promptPath);
+const updater = require(updatePath);
 
 module.exports = {
+  resolveShared,
   createClient,
   createTools,
   usageTokens,
@@ -81,6 +86,7 @@ module.exports = {
   agentRoles,
   agentRoleLabel,
   buildSystemPrompt,
-  paths: { client: clientPath, tools: toolsPath, usage: usagePath, engine: enginePath, agents: agentsPath, prompt: promptPath },
+  updater,
+  paths: { client: clientPath, tools: toolsPath, usage: usagePath, engine: enginePath, agents: agentsPath, prompt: promptPath, update: updatePath },
   roots,
 };
