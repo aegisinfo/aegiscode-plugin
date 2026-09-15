@@ -151,8 +151,9 @@ function welcomeArtParts(cols) {
     const n = Math.max(mascot.length, moonWhale.length);
     const rows = [];
     for (let i = 0; i < n; i++) {
-      const li = i + (n - mascot.length);
-      const ri = i + (n - moonWhale.length);
+      // Same bottom-align rule as joinSideBySide — subtract the offset.
+      const li = i - (n - mascot.length);
+      const ri = i - (n - moonWhale.length);
       rows.push([(mascot[li] ?? '').padEnd(L), (moonWhale[ri] ?? '').padEnd(R)]);
     }
     return { rows, width: L + gutter + R, gutter };
@@ -188,8 +189,14 @@ function joinSideBySide(left, right, gutter = 2, align = 'bottom') {
   const R = Math.max(...right.map((r) => [...r].length));
   const n = Math.max(left.length, right.length);
   return Array.from({ length: n }, (_, i) => {
-    const li = align === 'bottom' ? i + (n - left.length) : i;
-    const ri = align === 'bottom' ? i + (n - right.length) : i;
+    // Bottom-align puts each block's LAST row on the output's last row, so a
+    // shorter block starts lower and its index runs *behind* the output index.
+    // Adding the offset instead of subtracting it pushed the shorter block off
+    // the bottom edge and silently dropped its top rows: the moon+whale half,
+    // two rows shorter than the mascot, lost its spout and its top star and
+    // hung two rows below the baseline.
+    const li = align === 'bottom' ? i - (n - left.length) : i;
+    const ri = align === 'bottom' ? i - (n - right.length) : i;
     const l = (left[li] ?? '').padEnd(L);
     const r = (right[ri] ?? '').padEnd(R);
     return l + ' '.repeat(gutter) + r;
