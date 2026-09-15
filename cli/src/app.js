@@ -21,7 +21,7 @@
 const readline = require('node:readline');
 const os = require('node:os');
 const { randomUUID } = require('node:crypto');
-const { createTools, createClient, usageTokens } = require('./deps.js');
+const { createTools, createClient, usageTokens, buildSystemPrompt } = require('./deps.js');
 const { createEngine } = require('./engine.js');
 const { GLYPH, VERBS, themeOf, RESET, THEME_TABLE } = require('./theme.js');
 const { LiveRegion, termWidth, w } = require('./screen.js');
@@ -40,6 +40,30 @@ const render = require('./render.js');
 const { fmtTokens, fmtEur, maskKey } = require('./format.js');
 
 const VERSION = require('../package.json').version;
+
+/**
+ * The persona for a turn this host did not get an explicit system prompt for.
+ *
+ * Built once and cached: it is the stable head of every request, and a prompt
+ * that changed between turns would defeat the provider's prompt cache for the
+ * whole conversation behind it.
+ */
+let _defaultSystem = null;
+function defaultSystemPrompt() {
+  if (_defaultSystem === null) {
+    try {
+      _defaultSystem = buildSystemPrompt({
+        platform: process.platform,
+        arch: process.arch,
+        homedir: os.homedir(),
+        cwd: process.cwd(),
+      });
+    } catch {
+      _defaultSystem = ''; // never let persona construction break a turn
+    }
+  }
+  return _defaultSystem || undefined;
+}
 
 function createApp(options = {}) {
   const opts = {
@@ -458,7 +482,12 @@ function createApp(options = {}) {
           prompt,
           messages: history,
           model: commandCtx.model || undefined,
-          system: opts.system,
+          // A caller-supplied system wins; otherwise the shared persona. Sent
+          // explicitly rather than left to the server, because the pooled
+          // route takes the system prompt from the request and the CLI was
+          // sending none — the model got tool schemas and no rule about when
+          // to use them.
+          system: opts.system || defaultSystemPrompt(),
           maxTokens: opts.maxTokens,
           // `effort` is the pooled budget control, and it travels on every turn
           // — this host only ever runs the 'aegis' class, whose calls are sized

@@ -55,3 +55,23 @@ for (const [re, why] of [
 }
 
 console.log('prompt-discipline tests passed');
+
+// ── the CLI must actually SEND a persona ───────────────────────────────────
+//
+// The rules above are worthless to the client users run if it never sends
+// them. The CLI sent `system: undefined` on every turn, so a pooled request
+// reached the model as a bare user message plus tool schemas with nothing
+// saying when a tool is appropriate — which is how "hey" started running
+// shell commands. The server takes the system prompt from the request, so
+// sending none means there is none.
+{
+  const deps = require(join(root, 'cli', 'src', 'deps.js'));
+  assert(typeof deps.buildSystemPrompt === 'function',
+    'the CLI must be able to reach the shared persona');
+  const built = deps.buildSystemPrompt({ platform: 'linux', homedir: '/home/neo' });
+  assert(/is not a task/.test(built),
+    'and what it reaches must be the SAME file the GUI uses, with the fix in it');
+  assert(built === deps.buildSystemPrompt({ platform: 'linux', homedir: '/home/neo' }),
+    'identical inputs give identical bytes — a persona that varied between ' +
+    'turns would defeat the prompt cache for the whole conversation behind it');
+}

@@ -59,12 +59,19 @@ const enginePath = resolveShared(path.join('desktop', 'lib', 'local', 'engine.js
 // Subagent role presets (/agents lists these; the model's task tool delegates
 // to them by name) — lives beside engine.js, staged into the same vendor dir.
 const agentsPath = resolveShared(path.join('desktop', 'lib', 'local', 'agents.js'));
+// The persona the tool loop runs under. The CLI sent NO system prompt at all,
+// so a pooled turn reached the model as a bare user message plus tool schemas
+// with nothing saying when a tool is appropriate — which is how "hey" started
+// running shell commands. Same file as the GUI, for the same reason engine.js
+// is: two personas would drift, and only one of them would get fixed.
+const promptPath = resolveShared(path.join('desktop', 'lib', 'local', 'prompt.js'));
 
 const { createClient } = require(clientPath);
 const { createTools } = require(toolsPath);
 const { usageTokens } = require(usagePath);
 const { createLocalEngine } = require(enginePath);
 const { agentRoles, agentRoleLabel } = require(agentsPath);
+const { buildSystemPrompt } = require(promptPath);
 
 module.exports = {
   createClient,
@@ -73,6 +80,7 @@ module.exports = {
   createLocalEngine,
   agentRoles,
   agentRoleLabel,
-  paths: { client: clientPath, tools: toolsPath, usage: usagePath, engine: enginePath, agents: agentsPath },
+  buildSystemPrompt,
+  paths: { client: clientPath, tools: toolsPath, usage: usagePath, engine: enginePath, agents: agentsPath, prompt: promptPath },
   roots,
 };
