@@ -35,7 +35,8 @@ const { C, BOLD, BOLD_OFF, GLYPH, THEME_TABLE, themeOf } = require('./theme.js')
 const { welcomeArtParts } = require('./art.js');
 const { renderDiffPreview } = require('./markdown.js');
 const render = require('./render.js');
-const { updateConfig, configExists } = require('./config.js');
+const { updateConfig, configExists, loadConfig } = require('./config.js');
+const { updateNotice, updateLine } = require('./update.js');
 const credentials = require('./credentials.js');
 
 const VERSION = require('../package.json').version;
@@ -251,6 +252,22 @@ function welcomeLines(ctx, cols, rows, firstRun = true) {
   lines.push([span(t.gold, '━' + '─'.repeat(Math.max(0, cols - 2)) + '━')]);
   lines.push([span('', '')]);
 
+  // A newer release, if the last run found one. Reads cache only — the
+  // refresh it may kick off lands for the NEXT launch, so drawing this box
+  // never waits on the registry.
+  let updateMsg = null;
+  try {
+    const cfg = loadConfig();
+    const notice = updateNotice({
+      current: VERSION,
+      cache: cfg.updateCheck,
+      save: (v) => { try { updateConfig({ updateCheck: v }); } catch { /* not fatal */ } },
+    });
+    updateMsg = updateLine({ current: VERSION, ...notice });
+  } catch {
+    // An update notice is never worth failing a launch over.
+  }
+
   const parts = welcomeArtParts(cols);
   if (cols >= parts.width + 2) {
     const leftPad = Math.max(0, Math.floor((cols - parts.width) / 2));
@@ -259,6 +276,10 @@ function welcomeLines(ctx, cols, rows, firstRun = true) {
     }
   } else {
     lines.push(centered(`${PRODUCT}`, cols, t.gold + BOLD));
+  }
+  if (updateMsg) {
+    lines.push([span('', '')]);
+    lines.push(centered(updateMsg, cols, t.gold));
   }
   lines.push([span('', '')]);
 

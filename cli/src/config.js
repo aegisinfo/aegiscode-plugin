@@ -45,6 +45,10 @@ function permissionsPath() {
 
 const DEFAULT_CONFIG = {
   themeIndex: 1,   // Dark mode
+  // Cached `{ checkedAt, latest }` from the once-a-day registry check (see
+  // src/update.js). Persisted so a launch reports what the LAST run learned
+  // and never waits on the network to draw its own welcome box.
+  updateCheck: null,
   // No pinned model. This host runs on AEGIS Cloud, whose pinnable ids are the
   // server's (`/models`) — a client-side default here would have to name one,
   // and the one it named (`sonnet`) is not advertised by the platform at all:
