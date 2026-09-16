@@ -346,6 +346,15 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
   // In-memory only, on purpose — never persisted, so a restart (or
   // newChat()'s clearSessionApprovals) always starts from a clean gate.
   const sessionAllowlists = new Map(); // rootSessionId -> Set<toolName>
+  // Denials are remembered for the same reason allows are, mirroring it for
+  // the other answer. Without this, a "Deny" was forgotten the instant it was
+  // given: the model read `… the user denied the request`, re-planned, called
+  // the SAME tool again, and the gate raised a SECOND card — so one "no" cost
+  // the user a prompt per round for up to maxRounds (24 chat / 40 autonomous)
+  // rounds, each round re-sending the whole conversation to the provider. A
+  // gate that only remembers "yes" turns a single click into a retry storm;
+  // remembering "no" makes the first answer stick.
+  const sessionDenials = new Map(); // rootSessionId -> Set<toolName>
   const pendingApprovals = new Map(); // approvalId -> { resolve }
 
   function sessionAllows(rootId, name) {
@@ -358,10 +367,44 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
     sessionAllowlists.get(rootId).add(name);
   }
 
+  /** Has this conversation already refused this tool? Checked before the card
+   *  is raised, so a repeat call is refused outright instead of re-prompting. */
+  function sessionDenies(rootId, name) {
+    const set = sessionDenials.get(rootId);
+    return Boolean(set && set.has(name));
+  }
+
+  function denyForSession(rootId, name) {
+    if (!sessionDenials.has(rootId)) sessionDenials.set(rootId, new Set());
+    sessionDenials.get(rootId).add(name);
+  }
+
+  /**
+   * The text a refused tool hands back to the model. The old one-line
+   * `"<tool> was not executed — the user denied the request."` read to a
+   * capable agent as a transient failure to route around: it would apologise,
+   * pick a different command that does the same thing, and call the gate
+   * again. This says the durable part out loud (the refusal covers the rest of
+   * the conversation, not just that call) and asks for the one response that
+   * actually helps — say what you need and stop, so the user can re-enable it.
+   */
+  function denialText(name) {
+    return (
+      `${name} was not executed — the user denied this tool for this conversation. ` +
+      `Do NOT retry it and do NOT attempt the same effect by another route ` +
+      `(another command, a writeFile instead of an edit, a subagent). ` +
+      `Stop calling tools and reply in plain text: say what you were trying to do, ` +
+      `what you need, and that the user can re-enable ${name} to let it proceed.`
+    );
+  }
+
   /** newChat() in the renderer calls this so a fresh conversation never
-   *  inherits a prior thread's blanket allows. */
+   *  inherits a prior thread's blanket allows — or its refusals. A new chat is
+   *  a new gate in both directions: leaving denials behind would silently
+   *  refuse a tool in a thread where the user never said no. */
   function clearSessionApprovals(rootSessionId) {
     sessionAllowlists.delete(rootSessionId);
+    sessionDenials.delete(rootSessionId);
     return { ok: true };
   }
 
@@ -379,22 +422,28 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
 
   /**
    * Ask the renderer to approve one mutating tool call. Resolves 'once',
-   * 'session' or 'deny'. Sent over `rootOnDelta` (see chat()) as an
-   * `{ approval }` chunk so it rides the exact same streaming channel as
-   * tool-activity chunks — no new IPC surface needed on the push side, only
-   * on the reply side (respondApproval). Fails safe: no listener able to
-   * ever answer (no onDelta, or the turn was aborted) resolves 'deny'
-   * instead of hanging the tool round forever.
+   * 'session' or 'deny' (an explicit choice by the user) — or 'cancel' when
+   * nobody ever answered: no listener able to reply, or the turn was aborted.
+   * 'cancel' is kept apart from 'deny' on purpose. Both refuse the call, but
+   * only 'deny' is a decision the user made, so only 'deny' may be remembered
+   * as "this conversation said no" (see sessionDenials). Folding the two
+   * together — which is what the old fail-safe did, resolving 'deny' for an
+   * abort — would let a cancelled turn permanently refuse a tool the user
+   * never ruled on. Sent over `rootOnDelta` (see chat()) as an `{ approval }`
+   * chunk so it rides the exact same streaming channel as tool-activity
+   * chunks — no new IPC surface needed on the push side, only on the reply
+   * side (respondApproval). Fails safe: an unanswered request refuses the
+   * call instead of hanging the tool round forever.
    */
   function requestApproval(rootSessionId, rootOnDelta, signal, info) {
     return new Promise((resolve) => {
       if (signal && signal.aborted) {
-        resolve('deny');
+        resolve('cancel');
         return;
       }
       const id = randomUUID();
       let settled = false;
-      const onAbort = () => finish('deny');
+      const onAbort = () => finish('cancel');
       const finish = (decision) => {
         if (settled) return;
         settled = true;
@@ -405,7 +454,7 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
       if (signal) signal.addEventListener('abort', onAbort, { once: true });
       pendingApprovals.set(id, { resolve: finish });
       if (typeof rootOnDelta !== 'function') {
-        finish('deny');
+        finish('cancel');
         return;
       }
       rootOnDelta({
@@ -440,6 +489,13 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
     if (!T.MUTATING_TOOLS.has(name)) return T.executeTool(name, args, toolCtx);
     if (!confirmModeEnabled()) return T.executeTool(name, args, toolCtx);
     if (sessionAllows(rootSessionId, name)) return T.executeTool(name, args, toolCtx);
+    // Already refused in this conversation: refuse again WITHOUT raising a
+    // second card. Before this, the model's retry after a denial re-prompted
+    // the user for the same tool — one "no" produced a card per round for up
+    // to maxRounds rounds, each one a billed provider call re-sending the
+    // whole conversation. Checked after the confirm-mode short-circuit so
+    // turning the gate off still overrides an earlier refusal.
+    if (sessionDenies(rootSessionId, name)) return { ok: false, error: denialText(name) };
 
     let preview = null;
     if (name === 'writeFile' || name === 'editFile') {
@@ -453,8 +509,15 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
       diff: preview && preview.diff,
     });
 
+    // Only a click is remembered. 'cancel' (aborted turn / nobody able to
+    // answer) refuses this call but must not write a durable "no" the user
+    // never gave.
     if (decision === 'deny') {
-      return { ok: false, error: `${name} was not executed — the user denied the request.` };
+      denyForSession(rootSessionId, name);
+      return { ok: false, error: denialText(name) };
+    }
+    if (decision !== 'session' && decision !== 'once') {
+      return { ok: false, error: `${name} was not executed — the request was cancelled.` };
     }
     if (decision === 'session') allowForSession(rootSessionId, name);
 

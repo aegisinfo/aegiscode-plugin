@@ -1010,4 +1010,167 @@ const fakeTools = {
     `the deep tier is sent on exactly the opt-in turn, got ${deepSent.length}: ${JSON.stringify(deepSent)}`);
 }
 
+// ---- a denial is remembered for the conversation ------------------------
+//
+// The waste this pins: the gate used to remember "allow for this session" and
+// forget "Deny" the moment it was given. The model reads the refusal, re-plans,
+// calls the same tool, and the gate raised a SECOND card — so one "no" cost a
+// prompt per round for up to maxRounds rounds (24 chat / 40 autonomous), and
+// every round is a billed provider call that re-sends the whole conversation.
+// Measured on the pre-fix code: two model rounds, two approval cards, for one
+// user decision.
+{
+  const execCalls = [];
+  const mutatingTools = {
+    SUBAGENT_TOOL: 'task',
+    MUTATING_TOOLS: new Set(['poke']),
+    toolsFor: () => [{ type: 'function', function: { name: 'poke', parameters: {} } }],
+    async executeTool(name) {
+      execCalls.push(name);
+      return { ok: true, output: 'poked' };
+    },
+    toolResultText: (r) => (r.ok ? String(r.output) : `error: ${r.error}`),
+  };
+  // The model calls the SAME tool on rounds 1 and 2 — exactly what a capable
+  // agent does with a tool result that just says the call failed.
+  const retrying = () => {
+    let n = 0;
+    const seen = [];
+    return {
+      seen,
+      reset() {
+        n = 0;
+        seen.length = 0;
+      },
+      async openaiCompatible(args) {
+        seen.push(args);
+        n += 1;
+        if (n <= 2) {
+          return {
+            model: 'x',
+            choices: [{
+              message: { content: '', tool_calls: [{ id: `c${n}`, function: { name: 'poke', arguments: '{}' } }] },
+              finish_reason: 'tool_calls',
+            }],
+          };
+        }
+        return { model: 'x', choices: [{ message: { content: 'stopped' }, finish_reason: 'stop' }] };
+      },
+    };
+  };
+
+  {
+    const prov = retrying();
+    const e = createLocalEngine({ aegis, settings, ollama, providers: prov, tools: mutatingTools });
+    const cards = [];
+    const res = await e.chat({ class: 'openai-compat', prompt: 'do it', model: 'x', sessionId: 's-deny' },
+      (chunk) => {
+        if (chunk && chunk.approval) {
+          cards.push(chunk.approval);
+          e.respondApproval(chunk.approval.id, 'deny');
+        }
+      });
+    assert(cards.length === 1,
+      `one denial asks once, not once per model retry (got ${cards.length} cards)`);
+    assert(execCalls.length === 0, `a denied tool never runs (got ${JSON.stringify(execCalls)})`);
+    assert(prov.seen.length === 3, `the retry still reaches the model, then it stops (got ${prov.seen.length} dispatches)`);
+    // The refusal the second round received must tell the model to stop, not
+    // read as a transient failure worth another route.
+    const wire = JSON.stringify(prov.seen[1] || {});
+    assert(/Do NOT retry/.test(wire), `the denial forbids a retry: ${wire.slice(0, 400)}`);
+    assert(!/user denied the request/.test(wire),
+      'the old retry-inviting wording is gone');
+
+    // A fresh conversation starts from a clean gate in BOTH directions: the
+    // refusal must not survive into a thread where the user never said no.
+    e.clearSessionApprovals('s-deny');
+    prov.reset();
+    execCalls.length = 0;
+    const after = [];
+    await e.chat({ class: 'openai-compat', prompt: 'do it', model: 'x', sessionId: 's-deny' },
+      (chunk) => {
+        if (chunk && chunk.approval) {
+          after.push(chunk.approval);
+          e.respondApproval(chunk.approval.id, 'deny');
+        }
+      });
+    assert(after.length === 1, `clearing the conversation re-opens the gate (got ${after.length} cards)`);
+  }
+
+  // The denial is per conversation, not global: a DIFFERENT session is
+  // unaffected by another thread's refusal.
+  {
+    const prov = retrying();
+    const e = createLocalEngine({ aegis, settings, ollama, providers: prov, tools: mutatingTools });
+    const cards = [];
+    await e.chat({ class: 'openai-compat', prompt: 'do it', model: 'x', sessionId: 's-a' },
+      (chunk) => { if (chunk && chunk.approval) { cards.push(chunk.approval.id); e.respondApproval(chunk.approval.id, 'deny'); } });
+    const other = [];
+    prov.reset();
+    await e.chat({ class: 'openai-compat', prompt: 'do it', model: 'x', sessionId: 's-b' },
+      (chunk) => {
+        if (chunk && chunk.approval) {
+          other.push(chunk.approval.id);
+          e.respondApproval(chunk.approval.id, 'once');
+        }
+      });
+    assert(cards.length === 1 && other.length >= 1,
+      `a refusal is scoped to its own conversation — the refused thread asks once (a=${cards.length}), the other still asks (b=${other.length})`);
+  }
+
+  // Turning the gate OFF overrides an earlier refusal — that switch is an
+  // explicit "run everything", so it must not be blocked by a stale denial.
+  {
+    let confirm = true;
+    const prov = retrying();
+    const e = createLocalEngine({
+      aegis, settings, ollama, providers: prov, tools: mutatingTools,
+      getConfirmMode: () => confirm,
+    });
+    // execCalls is shared across every block in this file; the previous
+    // conversation answered 'once' and left a call behind. Clear it so this
+    // assertion measures THIS block, not the last one.
+    execCalls.length = 0;
+    await e.chat({ class: 'openai-compat', prompt: 'do it', model: 'x', sessionId: 's-off' },
+      (chunk) => { if (chunk && chunk.approval) e.respondApproval(chunk.approval.id, 'deny'); });
+    assert(execCalls.length === 0, 'refused while the gate is up');
+    confirm = false;
+    execCalls.length = 0;
+    // The stub is round-counted, and the denials above already burned its
+    // tool-call rounds; without this the second turn opens on 'stop' and never
+    // emits a call, so a green assertion here would prove nothing.
+    prov.reset();
+    let gateCards = 0;
+    await e.chat({ class: 'openai-compat', prompt: 'do it', model: 'x', sessionId: 's-off' },
+      (chunk) => { if (chunk && chunk.approval) gateCards += 1; });
+    assert(gateCards === 0, 'with confirm mode off no card is raised');
+    assert(execCalls.length >= 1, `confirm mode off runs the tool despite the earlier denial (${execCalls.length})`);
+  }
+
+  // An UNANSWERED request (the turn was cancelled with the card still open) is
+  // not a decision. It must refuse that call but leave no durable "no" behind,
+  // or a cancelled turn would silently forbid a tool forever.
+  {
+    const prov = retrying();
+    const e = createLocalEngine({ aegis, settings, ollama, providers: prov, tools: mutatingTools });
+    const first = [];
+    await e.chat({ class: 'openai-compat', prompt: 'do it', model: 'x', sessionId: 's-cancel' },
+      (chunk) => {
+        if (chunk && chunk.approval) {
+          first.push(chunk.approval.id);
+          e.cancel('s-cancel'); // walk away without answering
+        }
+      });
+    assert(first.length === 1, `the card was raised before the cancel (got ${first.length})`);
+    const again = [];
+    // Same stalled-stub trap: reset so the retry turn actually reaches a tool
+    // call. Zero cards here would otherwise pass for the wrong reason.
+    prov.reset();
+    await e.chat({ class: 'openai-compat', prompt: 'do it', model: 'x', sessionId: 's-cancel' },
+      (chunk) => { if (chunk && chunk.approval) { again.push(chunk.approval.id); e.respondApproval(chunk.approval.id, 'deny'); } });
+    assert(again.length === 1,
+      `an unanswered request is not remembered as a denial (got ${again.length} cards on the retry)`);
+  }
+}
+
 console.log('engine tests passed');
