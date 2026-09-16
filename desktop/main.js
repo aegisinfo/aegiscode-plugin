@@ -85,11 +85,19 @@ try {
 // sandbox note on registerToolsIpc().
 const localTools = require('./lib/local/tools.js');
 
+// The local autonomous work queue (commit 96fb64f): a durable task list plus
+// the unattended worker that drives the local engine's tool loop. MAIN-process
+// only, like the tool executor above — the renderer reaches it solely through
+// the `queue:` IPC surface registered by registerQueueIpc() below.
+const queueModule = require('./lib/local/queue.js');
+const autonomousModule = require('./lib/local/autonomous.js');
+
 const IPC_PREFIX = 'aegis:';
 const MODEL_PREFIX = 'model:';
 const SYNC_PREFIX = 'sync:';
 const TOOLS_PREFIX = 'tools:';
 const QUICK_PREFIX = 'quick:';
+const QUEUE_PREFIX = 'queue:';
 
 /**
  * Main -> renderer push channel for chat SSE deltas (D2.1 streaming render).
@@ -125,6 +133,36 @@ const DEEP_LINK_CHANNEL = `${IPC_PREFIX}deepLink`;
  * MENU_NEW_CHAT_CHANNEL etc. — this just delivers the payload.
  */
 const QUICK_LAUNCHER_PUSH_CHANNEL = `${IPC_PREFIX}quickLauncherPush`;
+
+/**
+ * Main -> renderer push for a queue drain's progress (one event per turn frame:
+ * start/tool/delta/finish, plus recovered/queued/locked). Deliberately its OWN
+ * channel rather than CHAT_DELTA_CHANNEL.
+ *
+ * A drain runs an unattended turn in a repository, and every one of its frames
+ * is about that task — its tool calls, its output, its cost. Pushed onto the
+ * chat delta channel they would be typed into whatever conversation the user
+ * happens to have open (the preload's sessionId filter would have to be widened
+ * to let them through at all), so the transcript would grow a second, unattached
+ * answer nobody asked for. The queue is not a chat surface: the renderer shows
+ * state and outcomes from this event, and the transcript stays clean.
+ */
+const QUEUE_PROGRESS_CHANNEL = `${QUEUE_PREFIX}progress`;
+
+/**
+ * How much task text the queue surface accepts, and how many rounds a queued
+ * task may take. Both are ceilings on what ONE renderer call can ask the app to
+ * spend: without them a pasted file would be queued as a task (every round
+ * re-sends the prompt) and a task could pin the loop open indefinitely.
+ * `workers` is capped at 8 to match the Model card's own input.
+ */
+const QUEUE_MAX_TASK_CHARS = 8000;
+const QUEUE_MAX_ROUNDS = 200;
+const QUEUE_MAX_WORKERS = 8;
+
+/** The efforts the queue accepts; anything else means "let the worker decide"
+ *  (autonomous.js resolveEffort, whose default is high for unattended work). */
+const QUEUE_EFFORTS = new Set(['low', 'medium', 'high']);
 
 /**
  * Address one SSE delta to the stream that produced it (D2.2 multi-stream).
@@ -1169,6 +1207,363 @@ function registerModelIpc(ipcMain, engine, sessionsDir, aegis, onReplyFinished, 
   return { modelDispatch, syncDispatch, heartbeat };
 }
 
+// ─────────────────────────── the local autonomous work queue ───────────────
+//
+// `desktop/lib/local/queue.js` (the durable queue) and
+// `desktop/lib/local/autonomous.js` (the worker that drives the engine's tool
+// loop) shipped with no host using them. This is the desktop host's half: a
+// `queue:` IPC surface, a settings-independent engine for the worker, and the
+// one rule that makes the whole thing safe to leave in a GUI — NOTHING DRAINS
+// UNLESS THE USER ASKED. There is no interval, no drain at startup, and no
+// drain-on-idle anywhere in this file. Draining is spend (a full tool loop on a
+// real model, in the user's checkout); a queue that starts itself when the
+// window is left alone is a feature nobody consented to, so the only callers of
+// `drain`/`proceed` are the two buttons on the renderer's queue card.
+
+/**
+ * A local engine for the queue worker: the same tool loop the interactive chat
+ * runs, with the tool-approval gate hard OFF.
+ *
+ * The gate exists to ask a human before exec/writeFile/editFile. A queued task
+ * is unattended BY DEFINITION — there is nobody to click — and engine.js's
+ * requestApproval() resolves only on a click or on an abort, so a gated engine
+ * here would mean a worker parked on an approval card forever (a `running`
+ * queue item, a held lock, and no record of why). Gate off is the honest
+ * configuration: the worker runs the tools it was asked to run, and the
+ * renderer's card says so in as many words.
+ */
+function createQueueEngine(aegis, settings) {
+  return createLocalEngine({
+    aegis,
+    settings,
+    ollama,
+    providers,
+    getConfirmMode: () => false,
+  });
+}
+
+/**
+ * The second net under createQueueEngine's gate-off engine.
+ *
+ * If an approval request still reaches a drain — a caller that wired the
+ * interactive engine by mistake, or a future engine change — answer it here
+ * rather than leave a card nobody can click. The answer is always 'deny': a
+ * queued task may decide to run the tools it was configured to run, but it may
+ * never silently grant a permission the user reserves for a click. Denying lets
+ * the turn continue to its own conclusion, where autonomous.js — which watches
+ * the same `{ approval }` frame — settles the task as failed with the reason
+ * written down. A hang would have recorded nothing at all.
+ */
+function queueEngineWithDeniedApprovals(engine) {
+  if (!engine || typeof engine.chat !== 'function') return engine;
+  const deny = (chunk) => {
+    const approval = chunk && chunk.approval;
+    if (!approval || !approval.id) return;
+    if (typeof engine.respondApproval !== 'function') return;
+    try {
+      engine.respondApproval(approval.id, 'deny');
+    } catch {
+      /* the turn's own error path reports a gate that cannot be answered */
+    }
+  };
+  return {
+    ...engine,
+    chat(payload, onDelta) {
+      return engine.chat(payload, (chunk) => {
+        deny(chunk);
+        if (typeof onDelta === 'function') onDelta(chunk);
+      });
+    },
+  };
+}
+
+/** True when `p` is an existing directory (the only path check this surface
+ *  makes: a task's cwd is where its tool loop runs, so a typo there has to be
+ *  refused now rather than fail minutes later inside a turn's output). */
+function isExistingDir(p) {
+  try {
+    return fs.statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** An integer within [min,max], or null for "not stated". */
+function clampInt(value, min, max) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < min || n > max) return null;
+  return n;
+}
+
+/**
+ * Pure mapping: `queue:<name>` -> queue.js + autonomous.js. Unit-testable in
+ * plain Node with a stub engine and a temp AEGIS_QUEUE_FILE, exactly like
+ * createIpcDispatch/createExportDispatch above — `engine` is injected (the
+ * real one comes from createQueueEngine in bootstrap()), and every path the
+ * queue touches comes from `env`.
+ *
+ * The methods are thin: `enqueue`/`retry`/`remove`/`clear` are the queue file's
+ * own vocabulary, and `drain`/`proceed` are one and many `worker.proceed({max:
+ * 1})` ticks. The worker itself owns the lock, the digest, the round horizon
+ * and the settle-back-into-the-file write; none of that is re-implemented here.
+ *
+ * `stop` is the renderer's Stop button. It has to be its own method rather than
+ * "cancel the current turn": cancelling a turn leaves the next pending task to
+ * start immediately, which is not what a user who just pressed Stop asked for.
+ */
+function createQueueDispatch({
+  engine,
+  env = process.env,
+  queue = queueModule,
+  autonomous = autonomousModule,
+  log = () => {},
+} = {}) {
+  if (!engine || typeof engine.chat !== 'function') {
+    throw new Error('createQueueDispatch: a local engine with chat() is required');
+  }
+
+  // The task the current drain is working, learned from the worker's own
+  // start/finish frames, so `stop` can cancel the turn actually in flight.
+  let running = null;
+  // Set by `stop`, read between ticks by drainAll. Reset when a drain starts.
+  let stopRequested = false;
+  // This window's drain. queue.js's file lock is what stops a SECOND process;
+  // this flag stops a second click in the same window from queueing up a second
+  // loop (which would only be refused by the lock after a round trip).
+  let draining = false;
+
+  const emit = (event) => {
+    if (event && event.type === 'start') running = event.taskId;
+    if (event && event.type === 'finish') running = null;
+    log(event);
+  };
+
+  const worker = autonomous.createQueueWorker({
+    engine: queueEngineWithDeniedApprovals(engine),
+    env,
+    log: emit,
+  });
+
+  /** What the renderer paints from: the queue file, the run log, and whether
+   *  this window is currently draining. Read fresh on every call — the queue is
+   *  a file several hosts write to, so a cached copy would show a stale list. */
+  function snapshot() {
+    const items = queue.loadQueue(env);
+    return {
+      ok: true,
+      items,
+      pending: queue.pendingCount(items),
+      running: items.find((i) => i && i.status === 'running') || null,
+      draining,
+      stopping: stopRequested,
+      defaultCwd: process.cwd(),
+      queueFile: queue.queuePath(env),
+      runs: queue.readRuns(env, { limit: 20 }),
+    };
+  }
+
+  /**
+   * Coerce one renderer payload into queue.addTask's opts.
+   *
+   * There is no shell field on this surface and no path the main process reads
+   * or writes on the renderer's behalf: `cwd` is the directory the task's own
+   * tool loop runs in, it must be absolute and already exist, and it is passed
+   * through unmodified. model/effort/workers/maxRounds are ids, rungs and small
+   * integers — never commands — and every one of them is range-checked here so
+   * a malformed payload is refused with a reason instead of queued as work that
+   * silently runs with defaults.
+   */
+  function taskOpts(payload) {
+    const p = payload || {};
+    const task = String(p.task == null ? '' : p.task).trim();
+    if (!task) return { error: 'a queued task needs text' };
+    if (task.length > QUEUE_MAX_TASK_CHARS) {
+      return { error: `task text is too long (${task.length} > ${QUEUE_MAX_TASK_CHARS} chars)` };
+    }
+    const cwd = String(p.cwd == null ? '' : p.cwd).trim() || process.cwd();
+    if (!path.isAbsolute(cwd)) return { error: 'the working directory must be an absolute path' };
+    if (!isExistingDir(cwd)) return { error: `not a directory: ${cwd}` };
+
+    const model = String(p.model == null ? '' : p.model).trim().slice(0, 120) || null;
+    const effortRaw = String(p.effort == null ? '' : p.effort).trim().toLowerCase();
+    return {
+      opts: {
+        task,
+        cwd,
+        model,
+        effort: QUEUE_EFFORTS.has(effortRaw) ? effortRaw : null,
+        workers: clampInt(p.workers, 1, QUEUE_MAX_WORKERS),
+        maxRounds: clampInt(p.maxRounds, 1, QUEUE_MAX_ROUNDS),
+        commit: Boolean(p.commit),
+        source: 'desktop',
+      },
+    };
+  }
+
+  /** `settle`-shaped one-liner per finished task, so the drain's answer carries
+   *  the outcome of every task it ran rather than only the last one. */
+  const summarize = (ran) =>
+    (ran || []).map((r) => ({ id: r.id, ok: Boolean(r.ok), error: r.error || null }));
+
+  // Note on `commit`: neither drain accepts a commit override from the
+  // renderer. Whether a task commits is a property of the TASK (the checkbox it
+  // was queued with, carried in the queue file), so `worker.proceed` is called
+  // with the flag undefined and autonomous.js falls back to each item's own
+  // `commit`. A drain-level flag would let one click rewrite another task's
+  // decision.
+
+  async function drainOnce() {
+    if (draining) return { ok: false, reason: 'a drain is already running in this window', ...snapshot() };
+    draining = true;
+    stopRequested = false;
+    let result;
+    try {
+      const tick = await worker.proceed({ max: 1 });
+      result = tick.locked
+        ? { ok: false, locked: true, holder: tick.holder, ran: [] }
+        : { ok: true, ran: summarize(tick.ran) };
+    } catch (err) {
+      // A drain that throws must still leave a readable answer (and a queue
+      // that can be inspected), not a rejected IPC promise the renderer would
+      // paint as "Invoke failed".
+      result = { ok: false, reason: errorText(err), ran: [] };
+    }
+    draining = false;
+    running = null;
+    return { ...result, ...snapshot() };
+  }
+
+  async function drainAll() {
+    if (draining) return { ok: false, reason: 'a drain is already running in this window', ...snapshot() };
+    draining = true;
+    stopRequested = false;
+    const ran = [];
+    let result;
+    try {
+      for (;;) {
+        // One task per tick through the worker's own proceed: it re-reads the
+        // FILE each time (so a task added mid-drain is picked up) and takes and
+        // releases the lock around each task, which is what lets Stop land
+        // between two tasks instead of after the whole queue.
+        const tick = await worker.proceed({ max: 1 });
+        if (tick.locked) {
+          result = { ok: false, locked: true, holder: tick.holder, ran: summarize(ran) };
+          break;
+        }
+        if (!tick.ran.length) {
+          result = { ok: true, stopped: stopRequested, ran: summarize(ran) };
+          break;
+        }
+        ran.push(...tick.ran);
+        if (stopRequested) {
+          result = { ok: true, stopped: true, ran: summarize(ran) };
+          break;
+        }
+      }
+    } catch (err) {
+      result = { ok: false, reason: errorText(err), ran: summarize(ran) };
+    }
+    draining = false;
+    running = null;
+    return { ...result, ...snapshot() };
+  }
+
+  return {
+    /** Queue one task. */
+    enqueue: (payload) => {
+      const { opts, error } = taskOpts(payload);
+      if (error) return { ok: false, reason: error, ...snapshot() };
+      const item = queue.addTask(env, opts);
+      return { ok: true, item, ...snapshot() };
+    },
+
+    /** Current state: the list, what is running, what is pending, recent runs. */
+    list: () => snapshot(),
+
+    /** Drop finished tasks (or everything with `all`). Pending and running tasks
+     *  are kept — queue.clearQueue's rule, not this surface's. */
+    clear: (payload) => ({
+      ...queue.clearQueue(env, { all: Boolean(payload && payload.all) }),
+      ok: true,
+      ...snapshot(),
+    }),
+
+    /** Put a finished/failed task back in line, keeping its attempt count. */
+    retry: (payload) => {
+      const id = payload && payload.id;
+      const item = queue.retryTask(env, id);
+      if (!item) return { ok: false, reason: `no task #${id}`, ...snapshot() };
+      return { ok: true, item, ...snapshot() };
+    },
+
+    /** Remove one task by id. A running task is refused: the worker holds it in
+     *  memory and writes its outcome back, so deleting it mid-turn would just be
+     *  re-created by that settle — stop it first. */
+    remove: (payload) => {
+      const id = payload && payload.id;
+      const items = queue.loadQueue(env);
+      const item = queue.findTask(items, id);
+      if (!item) return { ok: false, reason: `no task #${id}`, ...snapshot() };
+      if (item.status === 'running') {
+        return { ok: false, reason: `task #${item.id} is running — stop the drain first`, ...snapshot() };
+      }
+      queue.saveQueue(env, items.filter((i) => Number(i && i.id) !== Number(item.id)));
+      return { ok: true, removed: item.id, ...snapshot() };
+    },
+
+    /** Work exactly one pending task (the card's "Run one"). */
+    drain: () => drainOnce(),
+
+    /** Work pending tasks until the queue is empty, or Stop is pressed. */
+    proceed: () => drainAll(),
+
+    /** Stop: cancel the turn in flight AND the loop, so the next pending task
+     *  does not simply start. */
+    stop: (payload) => {
+      stopRequested = true;
+      const id = payload && payload.id != null ? payload.id : running;
+      const cancel = id == null ? null : worker.cancel(id);
+      return { ok: true, wasDraining: draining, cancelled: cancel, ...snapshot() };
+    },
+  };
+}
+
+/**
+ * Register the queue surface as `queue:<name>` on ipcMain — the same
+ * per-namespace pattern as MODEL_PREFIX/SYNC_PREFIX/QUICK_PREFIX above, with
+ * one addition: drain/proceed need the raw IPC event, because their progress
+ * frames are pushed to the window that ASKED for the drain, over
+ * QUEUE_PROGRESS_CHANNEL (never CHAT_DELTA_CHANNEL — see that constant).
+ */
+function registerQueueIpc(ipcMain, { engine, env, queue, autonomous } = {}) {
+  // The window a drain's frames go to. One drain runs at a time process-wide
+  // (queue.js's lock), so a single target is enough, and a second window's
+  // drain is refused by the lock rather than interleaving two progress streams.
+  let target = null;
+  const dispatch = createQueueDispatch({
+    engine,
+    env,
+    queue,
+    autonomous,
+    log: (event) => {
+      if (!target || typeof target.send !== 'function') return;
+      if (typeof target.isDestroyed === 'function' && target.isDestroyed()) return;
+      target.send(QUEUE_PROGRESS_CHANNEL, event);
+    },
+  });
+  for (const [name, handler] of Object.entries(dispatch)) {
+    if (name === 'drain' || name === 'proceed') {
+      ipcMain.handle(`${QUEUE_PREFIX}${name}`, (event, payload) => {
+        target = (event && event.sender) || null;
+        return handler(payload);
+      });
+      continue;
+    }
+    ipcMain.handle(`${QUEUE_PREFIX}${name}`, (_event, payload) => handler(payload));
+  }
+  return dispatch;
+}
+
 /**
  * Main -> renderer push channel for auto-update status (mirrors
  * CHAT_DELTA_CHANNEL): the renderer's update banner listens here instead of
@@ -1212,7 +1607,50 @@ const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
  * swapping the package under a running process is not something to do on the
  * user's behalf.
  */
-function createNpmUpdateManager({ onStatus }) {
+/**
+ * How long to wait before re-checking after a FAILED background check: 1m, 5m,
+ * 15m, then hourly.
+ *
+ * The 4h interval is right for a successful check — the answer changes slowly —
+ * and wrong for a failure, whose usual cause (no network yet at login, a VPN
+ * still coming up, a one-off registry blip) is gone inside a minute. Before
+ * this, a machine that launched before its Wi-Fi associated showed a hard error
+ * for the next four hours.
+ */
+const UPDATE_RETRY_BACKOFF_MS = [60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000];
+
+/**
+ * The sentence the banner shows. Every one of these used to be the single fixed
+ * string "registry unreachable" — including a 404 and a 2.5s timeout, neither of
+ * which is evidence the registry was unreachable. Only the last two are claims
+ * about the network, and only when the socket actually failed.
+ */
+function describeRegistryFailure(reason, status, pkg) {
+  switch (reason) {
+    case 'not-found':
+      return `${pkg} is not published on the npm registry (404)`;
+    case 'forbidden':
+      return `the npm registry refused the request (${status || 'auth'})`;
+    case 'malformed':
+      return 'the npm registry sent a response this app could not read';
+    case 'too-large':
+      return 'the npm registry response was too large to read';
+    case 'timeout':
+      return 'the npm registry did not respond in time';
+    case 'network':
+      return 'the npm registry could not be reached';
+    default:
+      return 'the update check did not complete';
+  }
+}
+
+function createNpmUpdateManager({
+  onStatus,
+  now = () => Date.now(),
+  fetchImpl,
+  setTimeoutImpl = setTimeout,
+  clearTimeoutImpl = clearTimeout,
+} = {}) {
   const PKG = 'aegis-desktop';
   let current = 'unknown';
   try {
@@ -1220,7 +1658,21 @@ function createNpmUpdateManager({ onStatus }) {
   } catch {
     /* version is cosmetic here */
   }
-  let state = { status: 'idle', version: null, error: null, channel: 'npm' };
+  // `reason`/`transient`/`attempts`/`retryInMs`/`canDownload` are additive: the
+  // banner needs them to decide whether a failure deserves the user's
+  // attention at all, and whether there is a button worth offering.
+  let state = {
+    status: 'idle',
+    version: null,
+    error: null,
+    channel: 'npm',
+    reason: null,
+    transient: false,
+    attempts: 0,
+    retryInMs: 0,
+    command: null,
+    canDownload: false,
+  };
   const set = (patch) => {
     state = { ...state, ...patch };
     if (onStatus) onStatus(state);
@@ -1239,20 +1691,144 @@ function createNpmUpdateManager({ onStatus }) {
     }
   }
 
-  async function check() {
+  let attempts = 0;
+  let retryAt = 0;
+  let retryTimer = null;
+  let inFlight = null;
+  let interval = null;
+
+  /** 1m, 5m, 15m, 60m, 60m… — capped, never unbounded. */
+  const delayFor = () =>
+    UPDATE_RETRY_BACKOFF_MS[Math.min(Math.max(attempts - 1, 0), UPDATE_RETRY_BACKOFF_MS.length - 1)];
+
+  function clearRetry() {
+    if (retryTimer) clearTimeoutImpl(retryTimer);
+    retryTimer = null;
+  }
+
+  /** One silent re-check after a transient failure, instead of a 4h wait. */
+  function scheduleRetry() {
+    clearRetry();
+    const delay = delayFor();
+    retryAt = now() + delay;
+    retryTimer = setTimeoutImpl(() => {
+      retryTimer = null;
+      check().catch(() => {});
+    }, delay);
+    if (retryTimer && retryTimer.unref) retryTimer.unref();
+    set({ retryInMs: delay });
+  }
+
+  /**
+   * Always a detailed result, even against a vendor copy staged before
+   * `fetchLatestDetailed` existed (an already-installed older release, whose
+   * `./vendor/update.js` predates it) — falling back to the old null-or-version
+   * contract rather than throwing on `undefined is not a function`.
+   */
+  async function fetchDetailed() {
+    if (fetchImpl) return fetchImpl({ pkg: PKG });
+    if (typeof updater.fetchLatestDetailed === 'function') {
+      return updater.fetchLatestDetailed({ pkg: PKG });
+    }
+    const latest = await updater.fetchLatest({ pkg: PKG });
+    return latest
+      ? { ok: true, latest, reason: null, status: 200 }
+      : { ok: false, latest: null, reason: 'unknown', status: null };
+  }
+
+  const isTransient = (reason, status) => {
+    if (typeof updater.isTransientReason === 'function') return updater.isTransientReason(reason, status);
+    return reason === 'unknown'; // unclassified: assume retryable, stay quiet
+  };
+
+  /**
+   * `announce: false` (the default) is the background check: a network failure
+   * is swallowed and re-tried on the backoff ladder. `announce: true` is a
+   * check the user explicitly asked for (the app menu, the banner's Retry
+   * button) — they are looking at the answer, so they get it.
+   *
+   * Coalesced: the interval, the menu, the Retry button and the renderer's
+   * initial status poll can all land together, and three registry hits for one
+   * question is pointless.
+   */
+  async function check({ announce = false } = {}) {
     if (!updater) return set({ status: 'disabled', error: 'update checker unavailable' });
-    set({ status: 'checking', error: null });
-    try {
-      const latest = await updater.fetchLatest({ pkg: PKG });
-      if (!latest) return set({ status: 'error', error: 'registry unreachable' });
-      if (!updater.isNewer(latest, current)) return set({ status: 'up-to-date', version: latest });
+    if (inFlight) return inFlight;
+
+    inFlight = (async () => {
+      // What we already knew, so a transient failure cannot erase it.
+      const priorStatus = state.status;
+      const priorVersion = state.version;
+      set({ status: 'checking', error: null, reason: null, transient: false });
+
+      let res;
+      try {
+        res = await fetchDetailed();
+      } catch (err) {
+        res = { ok: false, latest: null, reason: 'unknown', status: null, error: errorText(err) };
+      }
+
+      if (res.ok) {
+        attempts = 0;
+        retryAt = 0;
+        clearRetry();
+        if (!updater.isNewer(res.latest, current)) {
+          return set({
+            status: 'up-to-date', version: res.latest, error: null, reason: null,
+            transient: false, attempts: 0, retryInMs: 0,
+          });
+        }
+        return set({
+          status: 'available',
+          version: res.latest,
+          error: null,
+          reason: null,
+          transient: false,
+          attempts: 0,
+          retryInMs: 0,
+          command: `npm i -g ${PKG}@latest`,
+          // npm owns installation here, so there is nothing for this process
+          // to download — the banner must offer the command, not a Download
+          // button that would silently do nothing.
+          canDownload: false,
+        });
+      }
+
+      attempts += 1;
+      const message = res.error || describeRegistryFailure(res.reason, res.status, PKG);
+
+      if (isTransient(res.reason, res.status)) {
+        scheduleRetry();
+        if (!announce) {
+          // Nobody asked. The network was not there yet; that is not news, and
+          // an 'available' verdict we already earned must survive it.
+          return set({
+            status: priorStatus === 'available' ? 'available' : 'unavailable',
+            version: priorVersion,
+            error: message,
+            reason: res.reason,
+            transient: true,
+            attempts,
+          });
+        }
+        return set({ status: 'error', error: message, reason: res.reason, transient: true, attempts });
+      }
+
+      // The registry answered and the answer was no (404, 403, unreadable). That
+      // is a real condition, it will not fix itself in a minute, and only the
+      // user can act on it — so it is shown either way, named accurately.
+      clearRetry();
+      retryAt = 0;
       return set({
-        status: 'available',
-        version: latest,
-        command: `npm i -g ${PKG}@latest`,
+        status: 'error', error: message, reason: res.reason,
+        transient: false, attempts, retryInMs: 0,
       });
-    } catch (err) {
-      return set({ status: 'error', error: errorText(err) });
+    })();
+
+    try {
+      return await inFlight;
+    } finally {
+      inFlight = null;
     }
   }
 
@@ -1263,18 +1839,27 @@ function createNpmUpdateManager({ onStatus }) {
     download: async () => set({
       status: state.status === 'available' ? 'available' : state.status,
       command: `npm i -g ${PKG}@latest`,
+      canDownload: false,
     }),
     quitAndInstall: () => {},
     start: () => {
       check().catch(() => {});
-      const t = setInterval(() => check().catch(() => {}), UPDATE_CHECK_INTERVAL_MS);
-      if (t.unref) t.unref();
+      interval = setInterval(() => check().catch(() => {}), UPDATE_CHECK_INTERVAL_MS);
+      if (interval.unref) interval.unref();
     },
+    // Timers are the reason this exists: a retry timer outliving the window
+    // would keep a dead check alive past app quit.
+    stop: () => {
+      clearRetry();
+      if (interval) clearInterval(interval);
+      interval = null;
+    },
+    retryState: () => ({ attempts, retryAt, inFlight: !!inFlight, hasTimer: !!retryTimer }),
   };
 }
 
 function createUpdateManager({ autoUpdater, isPackaged, onStatus }) {
-  let state = { status: 'idle', version: null, error: null };
+  let state = { status: 'idle', version: null, error: null, canDownload: false };
 
   function setState(patch) {
     state = { ...state, ...patch };
@@ -1306,7 +1891,7 @@ function createUpdateManager({ autoUpdater, isPackaged, onStatus }) {
 
   autoUpdater.on('checking-for-update', () => setState({ status: 'checking', error: null }));
   autoUpdater.on('update-available', (info) =>
-    setState({ status: 'available', version: info && info.version, error: null })
+    setState({ status: 'available', version: info && info.version, error: null, canDownload: true })
   );
   autoUpdater.on('update-not-available', () => setState({ status: 'up-to-date', error: null }));
   autoUpdater.on('download-progress', (progress) =>
@@ -1357,7 +1942,10 @@ function createUpdateManager({ autoUpdater, isPackaged, onStatus }) {
  *  createIpcDispatch — unit-testable with a stub updateManager. */
 function createUpdateDispatch(updateManager) {
   return {
-    checkForUpdates: () => updateManager.check(),
+    // The renderer only ever calls this from an explicit click (the banner's
+    // Retry), so it is announced: a user who asks gets a truthful answer about
+    // a failure instead of the silence the background check prefers.
+    checkForUpdates: () => updateManager.check({ announce: true }),
     downloadUpdate: () => updateManager.download(),
     quitAndInstallUpdate: () => {
       updateManager.quitAndInstall();
@@ -1428,7 +2016,9 @@ function buildAppMenu({ app, Menu, BrowserWindow, updateManager }) {
 
   const checkForUpdatesItem = {
     label: 'Check for Updates…',
-    click: () => updateManager.check(),
+    // Announced: a menu click is a user asking, so a failure is reported to
+    // them instead of being swallowed the way the background check prefers.
+    click: () => updateManager.check({ announce: true }),
   };
   const newChatItem = {
     label: 'New Chat',
@@ -1634,6 +2224,18 @@ function bootstrap() {
   // reads settings.getConfirmMode() on every mutating tool call).
   registerConfirmModeIpc(ipcMain, createConfirmModeDispatch(settings));
 
+  // Local autonomous work queue: queue:<name> on ipcMain, backed by the durable
+  // queue file (desktop/lib/local/queue.js — the SAME file the `aegiscode` CLI
+  // and the other hosts read) and the unattended worker
+  // (desktop/lib/local/autonomous.js).
+  //
+  // It gets its OWN engine, built with the approval gate off: a queued task has
+  // nobody to answer a card, so the interactive engine is the wrong one to hand
+  // a worker (see createQueueEngine). Registration alone drains nothing — the
+  // queue runs only when the renderer's card asks it to, which is the whole
+  // gate: no timer, no boot drain, no idle drain.
+  registerQueueIpc(ipcMain, { engine: createQueueEngine(aegis, settings) });
+
   // ---------------------------------------------------------------------
   // Global quick-launcher (D? quick launcher): a frameless, always-on-top,
   // taskbar-hidden popup toggled by a systemwide shortcut, for a one-shot
@@ -1782,6 +2384,10 @@ function bootstrap() {
   // free it.
   app.on('will-quit', () => {
     globalShortcut.unregisterAll();
+    // The update manager's retry/interval timers are unref'd so they never
+    // hold the process open, but an explicit quit should still cancel them
+    // rather than let one land during teardown.
+    if (updateManager && typeof updateManager.stop === 'function') updateManager.stop();
   });
 
   // electron-updater touches the network and expects a build-time
@@ -1998,7 +2604,10 @@ module.exports = {
   importForeignMemory,
   isSafeExternalUrl,
   createUpdateManager,
+  createNpmUpdateManager,
   createUpdateDispatch,
+  describeRegistryFailure,
+  UPDATE_RETRY_BACKOFF_MS,
   registerUpdateIpc,
   buildAppMenu,
   createExportDispatch,
@@ -2011,4 +2620,12 @@ module.exports = {
   registerQuickLauncherIpc,
   createConfirmModeDispatch,
   registerConfirmModeIpc,
+  QUEUE_PREFIX,
+  QUEUE_PROGRESS_CHANNEL,
+  QUEUE_MAX_TASK_CHARS,
+  QUEUE_MAX_ROUNDS,
+  createQueueEngine,
+  queueEngineWithDeniedApprovals,
+  createQueueDispatch,
+  registerQueueIpc,
 };

@@ -36,6 +36,11 @@ const aegis = window.aegis;
 const models = window.models;
 const sync = window.sync;
 const quickLauncher = window.quickLauncher;
+// The local autonomous work queue (main.js registerQueueIpc -> queue.js +
+// autonomous.js). Optional: a preload that predates the queue surface simply
+// has no `queue` key, and every function below no-ops on it rather than
+// crashing boot the way a chat flow without window.aegis would.
+const queueApi = window.queue;
 
 if (!aegis || !models) {
   document.body.textContent =
@@ -54,6 +59,7 @@ const ELEMENT_IDS = {
   updateBannerText: 'update-banner-text',
   updateDownloadBtn: 'update-download-btn',
   updateRestartBtn: 'update-restart-btn',
+  updateRetryBtn: 'update-retry-btn',
   updateLaterBtn: 'update-later-btn',
   connDot: 'conn-dot',
   connText: 'conn-text',
@@ -124,6 +130,15 @@ const ELEMENT_IDS = {
   prompt: 'prompt',
   send: 'send',
   exploreToggle: 'explore-toggle',
+  queueTask: 'queue-task',
+  queueCwd: 'queue-cwd',
+  queueCommit: 'queue-commit',
+  queueEnqueue: 'queue-enqueue',
+  queueDrain: 'queue-drain',
+  queueProceed: 'queue-proceed',
+  queueStop: 'queue-stop',
+  queueList: 'queue-list',
+  queueHint: 'queue-hint',
 };
 
 const els = {};
@@ -489,8 +504,13 @@ function renderUpdateBanner(state) {
   if (!els.updateBanner) return;
   lastUpdateState = state;
   const status = state && state.status;
+  // 'unavailable' is the npm channel's silent verdict after a background check
+  // that failed for a transient reason (no network yet at login, a VPN coming
+  // up). It is deliberately not shown: nobody asked, and the app re-checks on
+  // its own backoff. An explicit check never resolves this status — the main
+  // process reports 'error' when a user asked.
   const silent = !status || status === 'idle' || status === 'disabled' ||
-    status === 'checking' || status === 'up-to-date';
+    status === 'checking' || status === 'up-to-date' || status === 'unavailable';
   if (silent || status === updateDismissedFor) {
     els.updateBanner.hidden = true;
     return;
@@ -499,10 +519,15 @@ function renderUpdateBanner(state) {
   let text = '';
   let showDownload = false;
   let showRestart = false;
+  let showRetry = false;
   const version = state.version ? `v${state.version} ` : '';
   if (status === 'available') {
-    text = `Update ${version}available.`;
-    showDownload = true;
+    // The npm channel cannot install itself, so its banner names the command
+    // instead of offering a Download button that would do nothing.
+    text = state.command
+      ? `Update ${version}available — run: ${state.command}`
+      : `Update ${version}available.`;
+    showDownload = !!state.canDownload;
   } else if (status === 'downloading') {
     const pct = typeof state.progress === 'number' ? ` (${Math.round(state.progress)}%)` : '';
     text = `Downloading update${pct}…`;
@@ -510,7 +535,12 @@ function renderUpdateBanner(state) {
     text = `Update ${version}downloaded — restart to install.`;
     showRestart = true;
   } else if (status === 'error') {
+    // The reason comes from the main process and names what actually happened
+    // (a timeout, a 404, an unreadable response) rather than blaming the
+    // registry for every failure.
     text = `Update check failed: ${state.error || 'unknown error'}`;
+    if (state.transient) text += ' — will retry automatically.';
+    showRetry = true;
   } else {
     els.updateBanner.hidden = true;
     return;
@@ -519,6 +549,9 @@ function renderUpdateBanner(state) {
   els.updateBannerText.textContent = text;
   els.updateDownloadBtn.hidden = !showDownload;
   els.updateRestartBtn.hidden = !showRestart;
+  // `?`-guarded: the markup is optional and an older index.html must not crash
+  // the banner on a status it has no button for.
+  if (els.updateRetryBtn) els.updateRetryBtn.hidden = !showRetry;
   els.updateBanner.hidden = false;
 }
 
@@ -814,6 +847,286 @@ async function saveConfirmMode(enabled) {
   } finally {
     els.confirmMode.disabled = false;
     if (els.autoMode) els.autoMode.disabled = false;
+  }
+}
+
+// ------------------------------------------------------ autonomous queue
+//
+// The desktop half of the local work queue (window.queue -> main.js
+// registerQueueIpc -> desktop/lib/local/queue.js + autonomous.js). The card is
+// the ONLY trigger: `Run one` and `Drain all` are what call queue.drain() and
+// queue.proceed(), and nothing in this file starts a drain by itself — no
+// interval, no drain at boot, no drain when the window goes idle. A drain runs a
+// whole tool loop on a real model inside the folder in the cwd field, so it
+// happens when the user asks and not otherwise.
+//
+// What the card shows is STATE, not conversation. The worker's frames arrive on
+// `queue:progress` (its own channel — see main.js QUEUE_PROGRESS_CHANNEL, and
+// why a drain must never ride the chat delta channel) and are collapsed into one
+// status line; each task's outcome (done/failed + error) is read back from the
+// queue file through queue.list(). A worker's output is never appended to the
+// open thread.
+
+/** The last thing the card said; composed with the queue's own counts on every
+ *  repaint, so a one-off message ("not a directory: …") is not lost the moment a
+ *  state refresh overwrites the line. */
+let queueNote = '';
+/** Whether THIS window's drain is running, from main's own snapshot — never a
+ *  local guess, so a drain that ended (or was locked out) unlatches the buttons. */
+let queueDraining = false;
+
+function setQueueNote(text) {
+  queueNote = text || '';
+  if (els.queueHint) els.queueHint.textContent = queueNote;
+}
+
+/** `#3 ✓ task …` — the outcome mark leads, so a failed task is findable. */
+function queueStatusMark(status) {
+  if (status === 'done') return '✓';
+  if (status === 'error') return '✗';
+  if (status === 'running') return '…';
+  return '·';
+}
+
+/** The outcome line under a task: what happened, or why it did not. */
+function queueMetaText(item) {
+  const bits = [item.status];
+  if (item.status === 'error') {
+    bits.push(item.error ? String(item.error) : 'failed — no reason recorded');
+  } else if (item.status === 'done') {
+    const out = item.result && item.result.output ? String(item.result.output) : '';
+    const flat = out.replace(/\s+/g, ' ').trim();
+    if (flat) bits.push(flat.length > 140 ? `${flat.slice(0, 139)}…` : flat);
+    const files = item.result && Array.isArray(item.result.files) ? item.result.files : [];
+    if (files.length) bits.push(`touched ${files.length} file${files.length === 1 ? '' : 's'}`);
+  } else if (item.status === 'running') {
+    bits.push(item.startedAt ? `started ${relTime(item.startedAt)}` : 'working');
+  } else {
+    if (item.attempts) bits.push(`${item.attempts} attempt${item.attempts === 1 ? '' : 's'}`);
+    if (item.created) bits.push(relTime(item.created));
+  }
+  return bits.join(' · ');
+}
+
+/** One row per task: id, outcome mark, task text, outcome line, and only the
+ *  actions that mean something for that status (a running task belongs to the
+ *  worker — main.js refuses to remove it). */
+function queueRow(item) {
+  const li = document.createElement('li');
+  li.className = 'session-row';
+  li.dataset.status = item.status;
+
+  const title = document.createElement('span');
+  title.className = 'session-title';
+  const text = String(item.task || '').replace(/\s+/g, ' ').trim();
+  title.textContent = `#${item.id} ${queueStatusMark(item.status)} ${text.length > 90 ? `${text.slice(0, 89)}…` : text}`;
+  li.appendChild(title);
+
+  const meta = document.createElement('span');
+  meta.className = 'session-meta';
+  meta.textContent = queueMetaText(item);
+  li.appendChild(meta);
+
+  if (item.status === 'done' || item.status === 'error') {
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.className = 'ghost-btn';
+    retry.textContent = 'Retry';
+    retry.title = 'Put this task back in line and run it again';
+    retry.addEventListener('click', () => queueTaskAction('retry', item.id));
+    li.appendChild(retry);
+  }
+  if (item.status !== 'running') {
+    const drop = document.createElement('button');
+    drop.type = 'button';
+    drop.className = 'ghost-btn';
+    drop.textContent = 'Remove';
+    drop.addEventListener('click', () => queueTaskAction('remove', item.id));
+    li.appendChild(drop);
+  }
+  return li;
+}
+
+/** Paint a queue.list()/drain()/proceed() answer: the list, what is running and
+ *  how many are pending, and the running/stopping state of this window. */
+function renderQueueState(state) {
+  if (!els.queueList || !state || typeof state !== 'object') return;
+  queueDraining = Boolean(state.draining);
+
+  // The cwd field is a convenience, never an override: it is prefilled from the
+  // main process's working directory only while the user has not typed one.
+  if (els.queueCwd && !els.queueCwd.value) els.queueCwd.value = state.defaultCwd || '';
+
+  if (els.queueEnqueue) els.queueEnqueue.disabled = queueDraining;
+  if (els.queueDrain) els.queueDrain.disabled = queueDraining;
+  if (els.queueProceed) els.queueProceed.disabled = queueDraining;
+  if (els.queueStop) els.queueStop.hidden = !queueDraining;
+
+  const items = Array.isArray(state.items) ? state.items : [];
+  els.queueList.innerHTML = '';
+  if (!items.length) {
+    const li = document.createElement('li');
+    li.className = 'empty';
+    li.textContent = 'queue is empty';
+    els.queueList.appendChild(li);
+  } else {
+    for (const item of items) els.queueList.appendChild(queueRow(item));
+  }
+
+  const bits = [];
+  if (state.running) bits.push(`running #${state.running.id}`);
+  else if (queueDraining) bits.push('draining…');
+  bits.push(`${state.pending || 0} pending`);
+  if (queueDraining && state.stopping) bits.push('stopping after this task');
+  if (els.queueHint) {
+    els.queueHint.textContent = [queueNote, bits.join(' · ')].filter(Boolean).join(' · ');
+  }
+}
+
+/** Read the queue (a list, never a drain) — the card's paint on boot and after
+ *  every action. */
+async function loadQueueState() {
+  if (!queueApi || !els.queueList) return null;
+  try {
+    const state = await queueApi.list();
+    renderQueueState(state);
+    return state;
+  } catch (err) {
+    setQueueNote(`queue list failed: ${err && err.message ? err.message : err}`);
+    return null;
+  }
+}
+
+/** Queue the textarea's contents against the cwd field's directory. `commit` is
+ *  stored on the TASK, so it applies to that task alone however it is later run. */
+async function enqueueQueueTask() {
+  if (!queueApi || !els.queueTask) return;
+  const task = els.queueTask.value.trim();
+  if (!task) {
+    setQueueNote('type a task first');
+    return;
+  }
+  if (els.queueEnqueue) els.queueEnqueue.disabled = true;
+  setQueueNote('queueing…');
+  try {
+    const res = await queueApi.enqueue({
+      task,
+      cwd: els.queueCwd ? els.queueCwd.value.trim() : '',
+      commit: els.queueCommit ? els.queueCommit.checked : false,
+    });
+    if (res && res.ok) {
+      els.queueTask.value = '';
+      setQueueNote(`queued #${res.item.id}`);
+    } else {
+      setQueueNote((res && res.reason) || 'enqueue failed');
+    }
+    renderQueueState(res);
+  } catch (err) {
+    setQueueNote(`enqueue failed: ${err && err.message ? err.message : err}`);
+  } finally {
+    if (els.queueEnqueue) els.queueEnqueue.disabled = queueDraining;
+  }
+}
+
+/** One line for what a drain did: how many ran, how many failed (by id), or the
+ *  reason it could not run at all (a lock held by another process, no work). */
+function queueDrainNote(res) {
+  if (!res || typeof res !== 'object') return 'the drain did not answer';
+  if (res.locked) {
+    const pid = res.holder && res.holder.pid;
+    return `another drain is already running${pid ? ` (pid ${pid})` : ''}`;
+  }
+  if (res.ok === false) return res.reason || 'the drain did not run';
+  const ran = Array.isArray(res.ran) ? res.ran : [];
+  if (!ran.length) return res.stopped ? 'stopped before the next task' : 'nothing pending';
+  const failed = ran.filter((r) => !r.ok);
+  const bits = [`ran ${ran.length} — ${ran.length - failed.length} done`];
+  if (failed.length) bits.push(`failed #${failed.map((r) => r.id).join(', #')}`);
+  if (res.stopped) bits.push('stopped');
+  return bits.join(' · ');
+}
+
+/** Start a drain. `one` works a single task (the card's "Run one"), `all` keeps
+ *  going until the queue is empty or Stop is pressed. Both are the user's click
+ *  and nothing else — this is the only place either IPC method is called. */
+async function startQueueDrain(mode) {
+  if (!queueApi) return;
+  queueDraining = true;
+  setQueueNote(mode === 'one' ? 'running one task…' : 'draining the queue…');
+  if (els.queueDrain) els.queueDrain.disabled = true;
+  if (els.queueProceed) els.queueProceed.disabled = true;
+  if (els.queueEnqueue) els.queueEnqueue.disabled = true;
+  if (els.queueStop) els.queueStop.hidden = false;
+  try {
+    const res = await (mode === 'one' ? queueApi.drain() : queueApi.proceed());
+    setQueueNote(queueDrainNote(res));
+    renderQueueState(res);
+  } catch (err) {
+    // A rejected invoke means main never answered: unlatch the buttons here,
+    // since there is no snapshot coming to do it.
+    queueDraining = false;
+    if (els.queueDrain) els.queueDrain.disabled = false;
+    if (els.queueProceed) els.queueProceed.disabled = false;
+    if (els.queueEnqueue) els.queueEnqueue.disabled = false;
+    if (els.queueStop) els.queueStop.hidden = true;
+    setQueueNote(`drain failed: ${err && err.message ? err.message : err}`);
+  }
+}
+
+/** Stop: cancels the turn in flight and ends the loop, so the next pending task
+ *  does not simply start. The drain promise then resolves with the tasks it did
+ *  finish, and renderQueueState paints that answer. */
+async function stopQueueDrain() {
+  if (!queueApi) return;
+  if (els.queueStop) els.queueStop.disabled = true;
+  setQueueNote('stopping…');
+  try {
+    const res = await queueApi.stop();
+    const cancelled = res && res.cancelled && res.cancelled.ok;
+    queueNote = cancelled ? 'stopped the running task' : 'stop requested';
+    renderQueueState(res);
+  } catch (err) {
+    setQueueNote(`stop failed: ${err && err.message ? err.message : err}`);
+  } finally {
+    if (els.queueStop) els.queueStop.disabled = false;
+  }
+}
+
+/** Retry or remove one task by id (the two row buttons). Both are single writes
+ *  to the queue file, and both repaint from main's answer. */
+async function queueTaskAction(name, id) {
+  if (!queueApi) return;
+  setQueueNote(`${name} #${id}…`);
+  try {
+    const res = await queueApi[name](id);
+    if (res && res.ok === false) setQueueNote(res.reason || `${name} failed`);
+    else setQueueNote(`${name === 'retry' ? 're-queued' : 'removed'} #${id}`);
+    renderQueueState(res);
+  } catch (err) {
+    setQueueNote(`${name} failed: ${err && err.message ? err.message : err}`);
+  }
+}
+
+/** Live drain progress -> one status line. `delta`/`reasoning` frames are
+ *  deliberately dropped: they are a worker's own output, and the place for a
+ *  task's result is its row (from queue.list()), not the open transcript. */
+function renderQueueProgress(event) {
+  if (!event || typeof event !== 'object') return;
+  const id = event.taskId == null ? '' : `#${event.taskId} `;
+  if (event.type === 'start') {
+    setQueueNote(`${id}running${event.model ? ` on ${event.model}` : ''}…`);
+  } else if (event.type === 'tool' && event.tool) {
+    setQueueNote(`${id}${toolActivityLabel(event.tool)}`);
+  } else if (event.type === 'finish') {
+    setQueueNote(`${id}${event.ok ? 'done' : 'failed'} — refreshing`);
+    loadQueueState();
+  } else if (event.type === 'recovered') {
+    const ids = Array.isArray(event.ids) ? event.ids : [];
+    setQueueNote(`recovered ${ids.length} stalled task${ids.length === 1 ? '' : 's'}`);
+  } else if (event.type === 'locked') {
+    setQueueNote('another drain is already running');
+  } else if (event.type === 'queued') {
+    setQueueNote(`queued phase ${event.phase}`);
   }
 }
 
@@ -2966,6 +3279,22 @@ async function init() {
     els.updateRestartBtn.addEventListener('click', () => {
       aegis.quitAndInstallUpdate();
     });
+
+    // A failed check used to have no affordance at all: the only way back was
+    // the app menu, which nobody who just read "Update check failed" would
+    // think to open. Retry re-checks explicitly, which also means the main
+    // process will report a further failure instead of swallowing it.
+    if (els.updateRetryBtn && aegis.checkForUpdates) {
+      els.updateRetryBtn.addEventListener('click', () => {
+        els.updateRetryBtn.disabled = true;
+        Promise.resolve(aegis.checkForUpdates())
+          .then(renderUpdateBanner)
+          .catch(() => {})
+          .finally(() => {
+            els.updateRetryBtn.disabled = false;
+          });
+      });
+    }
 
     els.updateLaterBtn.addEventListener('click', () => {
       updateDismissedFor = lastUpdateState && lastUpdateState.status;

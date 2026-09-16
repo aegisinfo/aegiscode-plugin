@@ -17,6 +17,8 @@ const IPC_PREFIX = 'aegis:';
 const MODEL_PREFIX = 'model:';
 const SYNC_PREFIX = 'sync:';
 const QUICK_PREFIX = 'quick:';
+const QUEUE_PREFIX = 'queue:';
+const QUEUE_PROGRESS_CHANNEL = `${QUEUE_PREFIX}progress`;
 const CHAT_DELTA_CHANNEL = `${IPC_PREFIX}chatDelta`;
 const UPDATE_STATUS_CHANNEL = `${IPC_PREFIX}updateStatus`;
 const MENU_NEW_CHAT_CHANNEL = `${IPC_PREFIX}menuNewChat`;
@@ -50,6 +52,13 @@ function invokeSync(name, payload) {
 function invokeQuick(name, payload) {
   return ipcRenderer.invoke(
     QUICK_PREFIX + name,
+    payload === undefined ? undefined : payload
+  );
+}
+
+function invokeQueue(name, payload) {
+  return ipcRenderer.invoke(
+    QUEUE_PREFIX + name,
     payload === undefined ? undefined : payload
   );
 }
@@ -289,7 +298,91 @@ const quickLauncher = {
   pushToMain: (payload) => invokeQuick('pushToMain', payload || {}),
 };
 
+// Local autonomous work queue: the desktop half of the durable queue
+// (desktop/lib/local/queue.js) plus the unattended worker
+// (desktop/lib/local/autonomous.js), wired in main.js registerQueueIpc.
+//
+// Two things this surface deliberately does NOT have:
+//
+//   1. No shell and no free-form path passthrough. Every field is named and
+//      coerced here, so the renderer can never smuggle an extra key (a `source`,
+//      an `id`, a future `command`) into a queue file the CLI and the other
+//      hosts also read. The one path-like field is `cwd` — the directory the
+//      task's own tool loop runs in — and main.js refuses it unless it is an
+//      absolute path that already exists; this file never joins, reads or writes
+//      a path itself.
+//   2. No drain that starts by itself. `drain`/`proceed` are invoked only from
+//      the queue card's two buttons. Draining spends money on a real model in a
+//      real checkout, so the trigger is a click and nothing else — main.js has
+//      no timer to call it, and this file has no default.
+const queue = {
+  // Queue one task. `payload` is { task, cwd, model, effort, workers, maxRounds,
+  // commit }; main.js range-checks every field and answers
+  // { ok, item, items, pending, running, runs, … } or { ok: false, reason }.
+  enqueue: (payload) => invokeQueue('enqueue', queueTaskFields(payload)),
+  // Full state: { items, pending, running, draining, runs, defaultCwd, … }.
+  list: () => invokeQueue('list'),
+  // Drop finished tasks; `all` is the explicit "empty the queue" escape hatch.
+  clear: (all) => invokeQueue('clear', { all: Boolean(all) }),
+  // Put a finished/failed task back in line (by id), or drop it (by id).
+  retry: (id) => queueWithId('retry', id),
+  remove: (id) => queueWithId('remove', id),
+  // Work one pending task, or all of them. `stop` cancels the turn in flight
+  // AND the loop, so the next pending task does not simply start.
+  drain: () => invokeQueue('drain', {}),
+  proceed: () => invokeQueue('proceed', {}),
+  stop: (id) => {
+    const taskId = queueTaskId(id);
+    return invokeQueue('stop', taskId == null ? {} : { id: taskId });
+  },
+  // Live drain progress pushed from main over queue:progress — one event per
+  // turn frame ({ type: 'start'|'tool'|'delta'|'reasoning'|'finish', taskId, … }).
+  // Note the channel: a worker's output is NOT a chat answer, so it never rides
+  // aegis:chatDelta and can never be typed into the open transcript. Returns an
+  // unsubscribe function, same shape as onUpdateStatus above.
+  onProgress: (onEvent) => {
+    if (typeof onEvent !== 'function') return () => {};
+    const listener = (_event, payload) => onEvent(payload);
+    ipcRenderer.on(QUEUE_PROGRESS_CHANNEL, listener);
+    return () => ipcRenderer.removeListener(QUEUE_PROGRESS_CHANNEL, listener);
+  },
+};
+
+/**
+ * Task ids are the queue file's positive integers (queue.js nextId). A retry or
+ * a remove with anything else is answered locally instead of being sent as a
+ * string that would find no task and read as "no task #NaN" in the UI.
+ */
+function queueTaskId(id) {
+  const n = Number(id);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+function queueWithId(name, id) {
+  const taskId = queueTaskId(id);
+  if (taskId == null) {
+    return Promise.resolve({ ok: false, reason: `${name} needs a task id` });
+  }
+  return invokeQueue(name, { id: taskId });
+}
+
+/** Pick the enqueue fields explicitly (never the raw payload) and coerce them to
+ *  the types main.js range-checks, exactly like byokSet/setConfirmMode above. */
+function queueTaskFields(payload) {
+  const p = payload || {};
+  return {
+    task: String(p.task == null ? '' : p.task),
+    cwd: String(p.cwd == null ? '' : p.cwd),
+    model: p.model == null ? null : String(p.model),
+    effort: p.effort == null ? null : String(p.effort),
+    workers: p.workers == null ? null : Number(p.workers),
+    maxRounds: p.maxRounds == null ? null : Number(p.maxRounds),
+    commit: Boolean(p.commit),
+  };
+}
+
 contextBridge.exposeInMainWorld('aegis', Object.freeze(api));
 contextBridge.exposeInMainWorld('models', Object.freeze(models));
 contextBridge.exposeInMainWorld('sync', Object.freeze(sync));
 contextBridge.exposeInMainWorld('quickLauncher', Object.freeze(quickLauncher));
+contextBridge.exposeInMainWorld('queue', Object.freeze(queue));

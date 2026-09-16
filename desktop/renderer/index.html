@@ -31,6 +31,7 @@
     <div class="update-banner-actions">
       <button type="button" id="update-download-btn" class="ghost-btn" hidden>Download</button>
       <button type="button" id="update-restart-btn" class="ghost-btn" hidden>Restart to install</button>
+      <button type="button" id="update-retry-btn" class="ghost-btn" hidden>Retry</button>
       <button type="button" id="update-later-btn" class="ghost-btn">Later</button>
     </div>
   </div>
@@ -239,6 +240,50 @@
           Import from other AI tools…
         </button>
         <p class="hint" id="memory-hint"></p>
+      </section>
+
+      <section class="card">
+        <!-- The local autonomous work queue (desktop/lib/local/queue.js +
+             autonomous.js, exposed as window.queue). This card is the WHOLE
+             gate on it: a task runs only when one of the two buttons below is
+             clicked. There is no drain-at-startup and no interval anywhere in
+             app.js or main.js, because a drain spends real money on a real
+             model inside the folder named here.
+
+             The list below is state, not a transcript: the worker's own output
+             arrives on queue:progress and is shown as a status line and each
+             task's outcome. Nothing from a drain enters the chat thread. -->
+        <h2>Autonomous queue</h2>
+        <textarea
+          id="queue-task"
+          rows="2"
+          placeholder="Queue a task to run unattended…"
+        ></textarea>
+        <div class="api-key-row">
+          <input
+            type="text"
+            id="queue-cwd"
+            placeholder="/path/to/repo"
+            autocomplete="off"
+            title="The directory the task's tool loop runs in. Must already exist."
+          />
+          <button type="button" id="queue-enqueue" class="ghost-btn">Queue</button>
+        </div>
+        <label
+          class="flow-toggle"
+          for="queue-commit"
+          title="Commit the paths this task's own tool calls wrote, once it finishes. Anything else dirty in that checkout is left alone."
+        >
+          <input type="checkbox" id="queue-commit" />
+          <span>commit what the task changes</span>
+        </label>
+        <div class="api-key-row">
+          <button type="button" id="queue-drain" class="ghost-btn">Run one</button>
+          <button type="button" id="queue-proceed" class="ghost-btn">Drain all</button>
+          <button type="button" id="queue-stop" class="ghost-btn" hidden>Stop</button>
+        </div>
+        <ul class="sessions-list" id="queue-list"></ul>
+        <p class="hint" id="queue-hint"></p>
       </section>
     </aside>
 
