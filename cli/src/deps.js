@@ -68,6 +68,13 @@ const promptPath = resolveShared(path.join('desktop', 'lib', 'local', 'prompt.js
 // The npm update checker, shared with the desktop host: two package names, one
 // implementation, so a fix to the check reaches both.
 const updatePath = resolveShared(path.join('client', 'update.js'));
+// The autonomous work queue: the durable task list (`queue.js`) and the
+// unattended worker that drives the same engine (`autonomous.js`). Shared with
+// the desktop host rather than reimplemented, for the reason engine.js is —
+// `aegiscode autonomous proceed` on a systemd timer and the GUI's Drain button
+// must work the SAME queue with the SAME rules (scoped commits included).
+const queuePath = resolveShared(path.join('desktop', 'lib', 'local', 'queue.js'));
+const autonomousPath = resolveShared(path.join('desktop', 'lib', 'local', 'autonomous.js'));
 
 const { createClient } = require(clientPath);
 const { createTools } = require(toolsPath);
@@ -76,6 +83,8 @@ const { createLocalEngine } = require(enginePath);
 const { agentRoles, agentRoleLabel } = require(agentsPath);
 const { buildSystemPrompt } = require(promptPath);
 const updater = require(updatePath);
+const queue = require(queuePath);
+const autonomous = require(autonomousPath);
 
 module.exports = {
   resolveShared,
@@ -87,6 +96,8 @@ module.exports = {
   agentRoleLabel,
   buildSystemPrompt,
   updater,
-  paths: { client: clientPath, tools: toolsPath, usage: usagePath, engine: enginePath, agents: agentsPath, prompt: promptPath, update: updatePath },
+  queue,
+  autonomous,
+  paths: { client: clientPath, tools: toolsPath, usage: usagePath, engine: enginePath, agents: agentsPath, prompt: promptPath, update: updatePath, queue: queuePath, autonomous: autonomousPath },
   roots,
 };

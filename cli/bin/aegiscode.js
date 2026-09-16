@@ -79,6 +79,17 @@ function parseArgs(argv) {
     opts.command = head;
     opts.commandArg = arg && !arg.startsWith('-') ? arg : null;
     argv = argv.slice(opts.commandArg ? 2 : 1);
+  } else if (head === 'autonomous') {
+    // Same position-0 rule, one difference: a queue subcommand owns the REST of
+    // the line (including flags, which are the subcommand's, not the session
+    // parser's), so the tail is handed over verbatim instead of parsed here.
+    // `aegiscode autonomous "write a file"` is not a thing — `add` is — so a
+    // bare `autonomous` is help, not a prompt.
+    const sub = argv[1] && !argv[1].startsWith('-') ? argv[1] : 'help';
+    opts.command = 'autonomous';
+    opts.commandArg = sub;
+    opts.commandArgv = argv.slice(argv[1] && !argv[1].startsWith('-') ? 2 : 1);
+    argv = [];
   }
 
   for (let i = 0; i < argv.length; i++) {

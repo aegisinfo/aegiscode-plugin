@@ -20,8 +20,15 @@ files:
   - renderer/**/*
   - lib/**/*          # local engine modules (P1 §5.5): ollama/providers/
                       # context/settings/sync — pure Node, zero runtime deps
-  - vendor/aegis.js
-  - vendor/foreign-memory.js
+  # The whole staged set, never a hand-kept per-file list. desktop/vendor/ is
+  # gitignored and populated ONLY by scripts/predist.mjs, so this glob is
+  # exactly the files that step copies and cannot drift from it. The previous
+  # explicit list named two of five staged files; main.js requires
+  # vendor/credentials.js with no inner fallback, so the packaged app threw
+  # MODULE_NOT_FOUND at module load (and the update checker, whose vendor copy
+  # was also unlisted, silently sat at `disabled`).
+  # test/packaging.test.mjs fails if predist stages something this misses.
+  - vendor/**/*
   - package.json
 
 asar: true
