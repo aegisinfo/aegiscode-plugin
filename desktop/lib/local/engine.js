@@ -47,6 +47,28 @@ const toolsModule = require('./tools.js');
 const promptModule = require('./prompt.js');
 const { ShellSession } = require('./shell.js');
 const { agentSystemPrompt, agentRoleLabel } = require('./agents.js');
+// Cooperative working-tree sharing (see each module's header). The lock
+// serialises two hosts that start a turn on one checkout close together; the
+// guard is the load-bearing half — it refuses a tree-wide git operation while
+// another session's uncommitted work is present, which is the operation that
+// destroyed a peer's file for real. Both live beside the engine because the
+// CLI vendors this directory wholesale (cli/scripts/predist.mjs), so the GUI
+// and the terminal get one implementation rather than two that drift.
+const { beginTurnGuard, recordWrite, blocksDestructive } = require('./turn-guard.js');
+const { acquireWorktreeLock, releaseWorktreeLock } = require('./worktree-lock.js');
+
+/**
+ * How long a turn waits for the working-tree lock before running anyway.
+ *
+ * Short on purpose. This engine serves interactive hosts — a desktop window
+ * and a terminal — where stalling for the lock's own 11-minute default would
+ * be a worse failure than contending: the user is watching a spinner. So the
+ * lock is best-effort mutual exclusion for turns that start near-simultaneously
+ * (the common overlap), and the turn guard covers everything after that. A
+ * non-interactive caller that can afford to queue should pass
+ * `payload.worktreeWaitMs` with the long DEFAULT_WORKTREE_WAIT_MS instead.
+ */
+const WORKTREE_LOCK_WAIT_MS = 1500;
 
 /** Classes whose transport is a user-supplied endpoint + credential. */
 const CUSTOM_CLASSES = Object.freeze(['openai-compat', 'anthropic']);
@@ -484,11 +506,44 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
    * runs straight through exactly like a session-allowed one, so "don't ask"
    * is one switch rather than a per-tool blanket allow in every conversation.
    */
+  /**
+   * The single place a tool executor is called from the chat loop, so the
+   * turn guard cannot be bypassed by reaching a different branch (there are
+   * four `return`s in gatedExecuteTool below; all of them come through here).
+   *
+   * exec is *checked* before running and writeFile/editFile are *recorded*
+   * after, and the asymmetry is the point: a refusal has to happen before the
+   * command runs, while "this path is mine" is only true once the write
+   * actually happened — recording a denied or preview-failed write would hide
+   * a genuinely foreign file behind a claim of ownership.
+   *
+   * A refusal is returned as an ordinary tool error, so the model reads it and
+   * adapts (name the paths, or don't do it) with no new IPC or renderer
+   * channel — the same reason it works identically in the GUI and the CLI.
+   */
+  async function guardedExecute(name, args, toolCtx) {
+    const guard = toolCtx && toolCtx.guard;
+    if (guard && name === 'exec') {
+      const verdict = blocksDestructive(guard, args && args.command);
+      if (!verdict.ok) return { ok: false, error: verdict.reason };
+    }
+    // Awaited, not merely returned: "this path is mine" is only true once the
+    // write actually landed, and `executeTool` is async — inspecting `.ok` on
+    // an un-awaited promise would read undefined and record every write,
+    // including the ones that failed. Ownership is load-bearing in the other
+    // direction too: a path wrongly claimed stops being reported as foreign.
+    const result = await T.executeTool(name, args, toolCtx);
+    if (guard && (name === 'writeFile' || name === 'editFile') && result && result.ok !== false) {
+      recordWrite(guard, args && args.path);
+    }
+    return result;
+  }
+
   async function gatedExecuteTool(call, { toolCtx, rootSessionId, rootOnDelta, signal }) {
     const { name, args } = call;
-    if (!T.MUTATING_TOOLS.has(name)) return T.executeTool(name, args, toolCtx);
-    if (!confirmModeEnabled()) return T.executeTool(name, args, toolCtx);
-    if (sessionAllows(rootSessionId, name)) return T.executeTool(name, args, toolCtx);
+    if (!T.MUTATING_TOOLS.has(name)) return guardedExecute(name, args, toolCtx);
+    if (!confirmModeEnabled()) return guardedExecute(name, args, toolCtx);
+    if (sessionAllows(rootSessionId, name)) return guardedExecute(name, args, toolCtx);
     // Already refused in this conversation: refuse again WITHOUT raising a
     // second card. Before this, the model's retry after a denial re-prompted
     // the user for the same tool — one "no" produced a card per round for up
@@ -521,8 +576,18 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
     }
     if (decision === 'session') allowForSession(rootSessionId, name);
 
-    if (preview) return T.applyChecked(name, args, preview);
-    return T.executeTool(name, args, toolCtx);
+    if (preview) {
+      const res = T.applyChecked(name, args, preview);
+      // Recorded on the same condition as guardedExecute's path: only a write
+      // that landed is this session's. (The previous form returned here
+      // unconditionally, making every line below it unreachable — the
+      // approved-write path recorded nothing at all.)
+      if (res && res.ok !== false && toolCtx && toolCtx.guard) {
+        recordWrite(toolCtx.guard, args && args.path);
+      }
+      return res;
+    }
+    return guardedExecute(name, args, toolCtx);
   }
 
   /**

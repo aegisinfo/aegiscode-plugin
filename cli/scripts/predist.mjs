@@ -55,6 +55,13 @@ const FILES = [
   'desktop/lib/local/shell.js',
   'desktop/lib/local/agents.js',
   'desktop/lib/local/prompt.js',
+  // engine.js requires all three at load time (turn-guard -> git-scope, and
+  // worktree-lock), so leaving them out stages a vendor tree whose engine
+  // throws MODULE_NOT_FOUND before it can answer anything — which is what
+  // test/cli-package.test.mjs caught in the published 6.5.6 tarball.
+  'desktop/lib/local/turn-guard.js',
+  'desktop/lib/local/worktree-lock.js',
+  'desktop/lib/local/git-scope.js',
 ];
 
 function main() {
