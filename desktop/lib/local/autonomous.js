@@ -26,9 +26,17 @@
  * 3. ATTRIBUTED COMMITS. A queue drain can run in a checkout somebody else is
  *    editing. `git add -A && git commit` in that situation commits THEIR
  *    half-finished work under our message — the failure `git-scope.js` was
- *    written for. So a task's `commit` flag commits only paths that this task
- *    changed, and paths that were dirty before and are byte-identical now (a
- *    concurrent agent's in-flight work) are never staged.
+ *    written for. So a task's `commit` flag commits only paths that this task's
+ *    own tool layer wrote (`writeFile`/`editFile` frames, recorded as they
+ *    land); everything else dirty is left alone, whether it was dirty before
+ *    the task (a peer's in-flight work) or a path this task never wrote.
+ *
+ *    Two conditions, not one, and the second is not academic: commit 96fb64f
+ *    swept `desktop/electron-builder.yml` — a file another live session was
+ *    editing at that moment — into an unrelated commit, because "dirty before
+ *    and byte-identical now" cannot see a concurrent writer who edits DURING
+ *    the task window. Only positive attribution can, so a path this task never
+ *    wrote is never staged, and the paths left behind are reported.
  *
  * It does NOT own the model call itself: the caller passes the local engine
  * (`desktop/lib/local/engine.js`), which is the same tool loop the GUI and the
@@ -46,6 +54,22 @@ const gitScope = require('./git-scope.js');
 
 /** Default tool-round horizon for an unattended turn (matches the engine's). */
 const DEFAULT_ROUNDS = 40;
+
+/**
+ * The engine tools that report the file they write, and the argument holding
+ * it. This set is the attribution record for a task's commit: `exec` is absent
+ * on purpose — a shell command names no paths, so a file it creates cannot be
+ * attributed to this task, and guessing "anything new is ours" is precisely how
+ * a concurrent writer's file gets committed.
+ */
+const WRITE_TOOLS = new Set(['writeFile', 'editFile']);
+
+/** The path a file-writing tool call names, in either spelling the engine uses. */
+function writtenPath(tool) {
+  const args = (tool && tool.args) || {};
+  const p = args.file_path || args.path;
+  return p ? String(p) : '';
+}
 
 /**
  * The default AEGIS Cloud model for autonomous work: the pooled brain, which
@@ -272,6 +296,11 @@ function createQueueWorker({ engine, env = process.env, log = () => {}, git = gi
     // Approval requests have no one to answer them here; see the header.
     let approvalAsked = null;
     let doneRounds = 0;
+    // What THIS task's tool layer wrote. The commit uses it as the only
+    // positive attribution available: a path in here that also differs from
+    // the pre-task snapshot is ours, and everything else dirty is left alone
+    // (see the module header, and git-scope.js's scopedCommit).
+    const written = new Set();
     const onDelta = (chunk) => {
       if (!chunk || typeof chunk !== 'object') return;
       if (chunk.approval) {
@@ -279,7 +308,16 @@ function createQueueWorker({ engine, env = process.env, log = () => {}, git = gi
         return;
       }
       if (chunk.tool) {
-        if (chunk.tool.phase === 'done') doneRounds += 1;
+        if (chunk.tool.phase === 'done') {
+          doneRounds += 1;
+          // Recorded on `done` and only when it succeeded: "this path is mine"
+          // is true once the write actually landed, and a refused or failed
+          // write must not claim a path a concurrent writer is editing.
+          if (WRITE_TOOLS.has(chunk.tool.name) && chunk.tool.ok !== false) {
+            const p = writtenPath(chunk.tool);
+            if (p) written.add(p);
+          }
+        }
         emit({ type: 'tool', taskId: item.id, tool: chunk.tool });
         return;
       }
@@ -351,10 +389,15 @@ function createQueueWorker({ engine, env = process.env, log = () => {}, git = gi
           git.scopedCommit(cwd, {
             message: commitMessage(item),
             before,
+            // Positive attribution: the paths this task's tool layer reported
+            // writing. Without it scopedCommit refuses to stage anything but
+            // the pre-task-dirty-and-still-identical set, which cannot see a
+            // concurrent writer editing mid-task (see the module header).
+            written: [...written],
           }),
         { ok: false, error: 'git-scope unavailable' }
       );
-      result.files = committedPaths(result.commit, before, cwd, git);
+      result.files = committedPaths(result.commit, written);
     }
 
     emit({ type: 'finish', taskId: item.id, ok: result.ok, result });
@@ -370,13 +413,19 @@ function createQueueWorker({ engine, env = process.env, log = () => {}, git = gi
     }
   }
 
-  /** The paths this task changed (everything dirty now that wasn't foreign). */
-  function committedPaths(commit, before, cwd, git) {
-    if (!commit || commit.skipped || commit.error) return [];
-    const foreign = new Set((commit.foreign || []).map((p) => String(p)));
-    const after = safe(() => git.gitStatusSnapshot(cwd), null);
-    if (!after) return [];
-    return [...after.keys()].filter((p) => !foreign.has(p));
+  /**
+   * The paths this task changed: exactly what scopedCommit staged, which is
+   * (written by this task) ∩ (differs from the pre-task snapshot). Reported
+   * rather than recomputed from a fresh snapshot — a snapshot taken after the
+   * commit cannot tell our work from a peer's next edit, and that difference is
+   * the whole point of the attribution rule.
+   */
+  function committedPaths(commit, written) {
+    if (!commit || commit.error) return [];
+    if (Array.isArray(commit.paths)) return commit.paths;
+    // No commit was made (skipped): report what we know we wrote, so a task's
+    // digest still names the work even when the tree had nothing to commit.
+    return [...written];
   }
 
   /**

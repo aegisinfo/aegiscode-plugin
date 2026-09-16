@@ -62,6 +62,14 @@ const FILES = [
   'desktop/lib/local/turn-guard.js',
   'desktop/lib/local/worktree-lock.js',
   'desktop/lib/local/git-scope.js',
+  // The autonomous work queue (`queue.js`) and its unattended worker
+  // (`autonomous.js`), which `src/deps.js` requires at load time along with
+  // everything above — a named interface, not a lazy one, so a vendor tree
+  // missing either throws MODULE_NOT_FOUND before the CLI can print its usage.
+  // `autonomous.js` requires `./queue.js` and `./git-scope.js` at load time and
+  // both sit above; `queue.js` requires only node builtins.
+  'desktop/lib/local/queue.js',
+  'desktop/lib/local/autonomous.js',
 ];
 
 function main() {

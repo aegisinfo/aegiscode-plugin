@@ -29,6 +29,12 @@ Account:
   aegiscode logout              remove the saved key
   aegiscode key status          show which key is in use and where it came from
 
+Autonomous work queue (no terminal needed — cron/systemd/ssh friendly):
+  aegiscode autonomous add "task"   queue a task to run unattended
+  aegiscode autonomous list         show the queue (--json for machines)
+  aegiscode autonomous proceed      drain every pending task, then exit
+  aegiscode autonomous help         all subcommands and their flags
+
 Options:
   -m, --model <id>        pin a model id (see /models; default: server choice)
       --base <url>        API base (default $AEGIS_API_BASE or aegiscloud.org)
@@ -67,6 +73,9 @@ function parseArgs(argv) {
     version: false,
     command: null,
     commandArg: null,
+    // `autonomous` owns the rest of the line verbatim (its flags are the
+    // subcommand's, not this parser's) — see the `head === 'autonomous'` branch.
+    commandArgv: null,
   };
   const rest = [];
 
@@ -326,6 +335,25 @@ async function main(argv = process.argv.slice(2)) {
   // well as at a prompt.
   if (ACCOUNT_COMMANDS.has(opts.command)) {
     return runAccountCommand(opts.command, opts.commandArg, {
+      json: opts.json,
+      stdin: process.stdin,
+      stdout: process.stdout,
+      stderr: process.stderr,
+    });
+  }
+
+  // The work queue. Parsed at position 0 like the account subcommands (see
+  // parseArgs), but dispatched here rather than there because it is the one
+  // surface that must work with NO terminal at all: a systemd timer runs
+  // `aegiscode autonomous proceed` from a unit with stdin on /dev/null, and a
+  // cron job reads the exit status to decide whether to page somebody. So the
+  // subcommand's own argv is handed over untouched, the process's real streams
+  // are passed through, and the subcommand's exit code is what the shell sees
+  // (0 done, 1 a task failed / another drain holds the lock, 2 usage or no
+  // credential) — never the interactive chat path's "no terminal and no prompt".
+  if (opts.command === 'autonomous') {
+    const { runQueueCommand } = require('../src/autonomous.js');
+    return runQueueCommand(opts.commandArg, opts.commandArgv || [], {
       json: opts.json,
       stdin: process.stdin,
       stdout: process.stdout,

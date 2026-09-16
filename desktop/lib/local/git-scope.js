@@ -10,10 +10,15 @@
  * were deliberately absent while nothing here queued work, because a copy of
  * code nothing calls is a copy that drifts unnoticed.
  *
- * The "dirty before AND byte-identical now" definition lives in
- * `gitStatusSnapshot`'s hashes, and it is what makes an unattended commit safe
- * in a checkout somebody else is editing: another agent's in-flight edits are
- * excluded instead of swept into our commit.
+ * ATTRIBUTION IS TWO CONDITIONS, NOT ONE. "Dirty before AND byte-identical
+ * now" only excludes work that nobody touched — it cannot see a concurrent
+ * writer who edits a file *during* the task window, because that file is no
+ * longer byte-identical and so looks like ours. Commit 96fb64f swept exactly
+ * such a file (desktop/electron-builder.yml, edited by another live session)
+ * into an unrelated commit that way. So `scopedCommit` also requires positive
+ * attribution: a path is staged only if the caller reports that THIS task's own
+ * tool layer wrote it (`written`). Everything else dirty — foreign, or merely
+ * unattributed — is left alone and reported.
  */
 
 const fs = require('node:fs');
@@ -89,39 +94,100 @@ function foreignChanges(cwd, before) {
 }
 
 /**
- * Commit only the changes attributable to this run.
+ * A path the caller reported writing, as repo-root-relative POSIX text.
  *
- * The rule, in one line: stage every path that is dirty now EXCEPT the ones
- * that were already dirty before and are byte-identical now. `before` is the
- * `gitStatusSnapshot(cwd)` taken immediately before the task ran; without it
- * there is no basis for attribution, and the only safe move is to refuse —
- * `git add -A` here would sweep a concurrent agent's half-finished edit into
- * this task's commit under this task's message.
+ * The tool layer reports what the MODEL asked for (`file_path` as typed), which
+ * may be absolute or relative to the task's own working directory — not
+ * necessarily this process's `cwd`. Returns '' for anything outside the repo:
+ * a write that cannot be attributed to a path git reports is not something this
+ * function may guess about.
+ */
+function toRepoRelative(root, base, p) {
+  const raw = String(p == null ? '' : p).trim();
+  if (!raw) return '';
+  const abs = path.isAbsolute(raw) ? raw : path.resolve(base || root, raw);
+  const rel = path.relative(root, abs);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return '';
+  return rel.split(path.sep).join('/');
+}
+
+/** The repo-relative set of paths the task's own tool layer reported writing. */
+function writtenSet(root, base, written) {
+  const out = new Set();
+  for (const p of written || []) {
+    const rel = toRepoRelative(root, base, p);
+    if (rel) out.add(rel);
+  }
+  return out;
+}
+
+/**
+ * Split the current dirty set by attribution. `ours` is what this task wrote
+ * and changed; `left` is everything else git reports as dirty — a peer's
+ * in-flight work, plus our own changes we cannot positively attribute (a file a
+ * shell command created names no path in the tool call, so it is reported, not
+ * assumed).
+ *
+ * @returns {null|{root:string, ours:string[], left:string[], written:Set<string>}}
+ */
+function attributedChanges(cwd, { before, written } = {}) {
+  const root = gitRoot(cwd);
+  if (!root) return null;
+  const now = gitStatusSnapshot(cwd);
+  if (!now) return null;
+  const mine = writtenSet(root, cwd, written);
+  const ours = [];
+  const left = [];
+  for (const [p, hash] of now) {
+    // "Differs from the pre-task snapshot": new since then, or the bytes moved.
+    const changed = !(before && before.has(p) && before.get(p) === hash);
+    if (changed && mine.has(p)) ours.push(p);
+    else left.push(p);
+  }
+  return { root, ours, left, written: mine };
+}
+
+/**
+ * Commit only the changes this task is known to have made.
+ *
+ * The rule, in one line: stage a dirty path only if it DIFFERS from the
+ * pre-task snapshot AND this task's tool layer reports writing it. Two
+ * conditions, because either alone is unsafe: "changed since the snapshot"
+ * sweeps a concurrent writer who edits mid-run, and "was dirty before and is
+ * byte-identical now" cannot be the only exclusion because it sees only the
+ * writer who stopped.
+ *
+ * `before` is the `gitStatusSnapshot(cwd)` taken immediately before the task
+ * ran and `written` the paths the caller's tool layer wrote during it; without
+ * either there is no basis for attribution, and the only safe move is to refuse
+ * (or stage nothing) — `git add -A` here would commit a concurrent agent's
+ * half-finished edit under this task's message.
  *
  * @returns {{ok?:boolean,skipped?:boolean,reason?:string,error?:string,
- *            message?:string,staged?:number,foreign?:string[]}}
+ *            message?:string,staged?:number,paths?:string[],foreign?:string[],
+ *            identicalForeign?:string[]}}
  */
-function scopedCommit(cwd, { message, before } = {}) {
-  const root = gitRoot(cwd);
-  if (!root) return { skipped: true, reason: 'not a git repo' };
+function scopedCommit(cwd, { message, before, written } = {}) {
+  if (!gitRoot(cwd)) return { skipped: true, reason: 'not a git repo' };
 
   // No basis for attribution — refuse rather than sweep.
   if (!before) {
     return { ok: false, error: 'no pre-task snapshot; refusing to sweep the working tree' };
   }
 
-  const foreign = foreignChanges(cwd, before);
-  const foreignSet = new Set(foreign);
-  const now = gitStatusSnapshot(cwd) || new Map();
-  const include = [...now.keys()].filter((p) => !foreignSet.has(p));
+  const attributed = attributedChanges(cwd, { before, written });
+  if (!attributed) return { skipped: true, reason: 'not a git repo' };
+  const { root, ours, left } = attributed;
 
-  if (!include.length) {
+  if (!ours.length) {
+    const untouched = foreignChanges(cwd, before);
     return {
       ok: true,
       skipped: true,
-      foreign,
-      reason: foreign.length
-        ? `no changes of our own (left ${foreign.length} concurrent change(s) alone)`
+      foreign: left,
+      identicalForeign: untouched,
+      reason: left.length
+        ? `no changes of our own (left ${left.length} change(s) this task did not write)`
         : 'no changes',
     };
   }
@@ -131,7 +197,7 @@ function scopedCommit(cwd, { message, before } = {}) {
   const add = spawnSync('git', ['add', '-A', '--pathspec-from-file=-', '--pathspec-file-nul'], {
     cwd: root,
     encoding: 'utf8',
-    input: include.join('\0'),
+    input: ours.join('\0'),
   });
   if (add.status !== 0) return { ok: false, error: add.stderr || 'git add failed' };
 
@@ -140,11 +206,20 @@ function scopedCommit(cwd, { message, before } = {}) {
     // "nothing to commit" is a success for our purposes: the changes we staged
     // were already committed by somebody else, and the task's work is done.
     if (/nothing to commit|no changes added/i.test(commit.stdout + commit.stderr)) {
-      return { ok: true, skipped: true, foreign, reason: 'no changes' };
+      return { ok: true, skipped: true, foreign: left, reason: 'no changes' };
     }
     return { ok: false, error: commit.stderr || commit.stdout };
   }
-  return { ok: true, message, foreign, staged: include.length };
+  return { ok: true, message, foreign: left, paths: ours, staged: ours.length };
 }
 
-module.exports = { gitRoot, contentHash, gitStatusSnapshot, foreignChanges, scopedCommit };
+module.exports = {
+  gitRoot,
+  contentHash,
+  gitStatusSnapshot,
+  foreignChanges,
+  toRepoRelative,
+  writtenSet,
+  attributedChanges,
+  scopedCommit,
+};
