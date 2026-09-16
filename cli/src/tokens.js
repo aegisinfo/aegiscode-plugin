@@ -9,12 +9,58 @@
  */
 
 // Per-million-token USD rates. Cache-read/write matter for long sessions.
+//
+// These are the PROVIDER's rates, for the fallback path where a turn has no
+// server-settled charge (a direct provider, ollama, a custom endpoint). A
+// pooled turn reports the ledger figure instead — see accountingFromUsage's
+// `costUsd` — because the pool's bill carries a margin and a prompt-cache
+// discount this table cannot see.
+//
+// Keys are matched by exact id first, then by prefix (ratesFor below), so a
+// family row covers every dated variant of it.
 const RATES = {
   sonnet:  { input: 3.00, output: 15.00, cacheRead: 0.30, cacheWrite: 3.75 },
   default: { input: 3.00, output: 15.00, cacheRead: 0.30, cacheWrite: 3.75 },
   fable:   { input: 5.00, output: 25.00, cacheRead: 0.50, cacheWrite: 6.25 },
   opus:    { input: 5.00, output: 25.00, cacheRead: 0.50, cacheWrite: 6.25 },
+  // DeepSeek V4 — the provider's published rate, independently corroborated by
+  // aegis1 services/nexus_provider/catalog.py (cost_per_1k_input=0.00014,
+  // cost_per_1k_output=0.00028) and referenced in services/pricing.py.
+  //
+  // This row was MISSING, and usageCost fell through to RATES.sonnet for every
+  // DeepSeek turn: $3.00/$15.00 per M against a real $0.14/$0.28 — 21x the
+  // input rate and 54x the output rate, on every direct DeepSeek call. That is
+  // the number that made a local turn look like it cost a fraction of the
+  // cloud's, when most of the reported gap was the meter itself.
+  //
+  // cacheRead is 0.1x input (aegis1 services/pricing.py
+  // CACHE_READ_FRACTION_BY_COMPANY["deepseek"] = 0.1 -> $0.014/M).
+  // cacheWrite is the input rate: DeepSeek bills a cache write as ordinary
+  // input tokens and charges no separate write premium, unlike Anthropic's
+  // 1.25x. A zero here would understate a session that writes cache.
+  deepseek: { input: 0.14, output: 0.28, cacheRead: 0.014, cacheWrite: 0.14 },
 };
+
+/**
+ * The rate row for a model id, provider, or alias. Exact id wins, then the
+ * longest matching prefix, then the Sonnet-class default — the same resolution
+ * order contextWindowFor uses, so the cost meter and the context meter cannot
+ * disagree about which family a model belongs to.
+ */
+function ratesFor(model) {
+  const id = String(model || '').toLowerCase();
+  if (!id) return RATES.default;
+  if (RATES[id]) return RATES[id];
+  let best = null;
+  let bestLen = 0;
+  for (const [prefix, rates] of Object.entries(RATES)) {
+    if (id.startsWith(prefix) && prefix.length > bestLen) {
+      best = rates;
+      bestLen = prefix.length;
+    }
+  }
+  return best || RATES.default;
+}
 
 // System prompt + tool definitions overhead, roughly, in tokens.
 const SYSTEM_TOKENS = 18000;
@@ -86,7 +132,7 @@ function transcriptUsage(transcript, model = 'sonnet') {
 
 /** Dollar cost of a usage record at the given model's rates. */
 function usageCost(usage, model = 'sonnet') {
-  const r = RATES[model] || RATES.sonnet;
+  const r = ratesFor(model);
   const toD = (n, rate) => (n / 1_000_000) * rate;
   return toD(usage.input, r.input)
     + toD(usage.output, r.output)
@@ -156,6 +202,7 @@ module.exports = {
   CONTEXT_WINDOW,
   CONTEXT_WINDOWS,
   contextWindowFor,
+  ratesFor,
   estimateTokens,
   transcriptUsage,
   usageCost,
