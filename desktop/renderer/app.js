@@ -2352,6 +2352,12 @@ function renderSyncStatus(status) {
   if (status.lastSyncAt) {
     bits.push(`last synced ${new Date(status.lastSyncAt).toLocaleTimeString()}`);
   }
+  // The heartbeat retry's last failure (main.js createHeartbeatRetry). It is
+  // fire-and-forget, so this is the only place its reason is visible instead of
+  // being swallowed by an empty catch.
+  if (status.retry && status.retry.lastError) {
+    bits.push(`last sync attempt failed: ${status.retry.lastError}`);
+  }
   els.syncStatus.textContent = bits.join(' · ');
 }
 

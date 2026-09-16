@@ -196,6 +196,53 @@ function errorText(err) {
 }
 
 /**
+ * Precise classification of a cloud-sync refusal — the desktop port of
+ * `describeError()` in cli/src/cloudsync.js, so both hosts name a 402/401 the
+ * same way instead of surfacing whatever sentence the server happened to use.
+ *
+ * `push()`/`pull()` used to hand the renderer `err.message` alone, so a
+ * per-session memory-token 401 or a 402 reached the banner as
+ * "sync failed: free_session_limit_reached" — a string that reads like a bug
+ * and names no fix. The shared client attaches `err.status` / `err.data`
+ * (vendor/aegis.js parseResponse) while the error is still in main, which is
+ * why the classification happens here.
+ *
+ * `kind` is `quota` | `auth` | `error`; `hint` is the actionable half of the
+ * sentence (what to do about it), null when there is nothing to say.
+ */
+function describeSyncError(err) {
+  const status =
+    (err && (err.status || (err.response && err.response.status))) || 0;
+  const message = errorText(err);
+  // upgradeInfo() already knows the cap: either a 402 or the server's
+  // `free_session_limit_reached` code (an older body without a status).
+  if (upgradeInfo(err)) {
+    return {
+      kind: 'quota',
+      status: status || 402,
+      message,
+      hint:
+        "the plan's synced-token ceiling is reached — free space in the account dashboard or upgrade to keep syncing",
+    };
+  }
+  if (status === 401) {
+    return {
+      kind: 'auth',
+      status,
+      message,
+      hint: 'the memory token was refused — re-enter your AEGIS API key to exchange a new one',
+    };
+  }
+  return { kind: 'error', status: status || null, message, hint: null };
+}
+
+/** The banner line for a classified failure: the server's words + the fix. */
+function syncErrorReason(info) {
+  if (!info) return 'sync failed';
+  return info.hint ? `${info.message} — ${info.hint}` : info.message;
+}
+
+/**
  * Result shape for the two billing actions (`aegis:billingCheckout` and
  * `aegis:tokenBankTopup`). Both end in a Stripe-hosted checkout URL created
  * server-side, and both have failure modes the user has to be able to tell
@@ -841,6 +888,7 @@ function createSyncDispatch(sessions, dir, aegis) {
 
     let pushed = 0;
     let lastError = null;
+    let lastInfo = null;
     for (const session of pending) {
       try {
         const result = await aegis.conversationSyncPush({
@@ -853,25 +901,48 @@ function createSyncDispatch(sessions, dir, aegis) {
         pushed += 1;
       } catch (err) {
         lastError = err;
+        lastInfo = describeSyncError(err);
+        // A cap (402) or a refused memory token (401) fails identically for
+        // every later session — same reason the CLI stops there. One request
+        // per queued transcript against a refusal that cannot succeed is
+        // nothing but noise, so stop. The rest are left untouched (markSynced
+        // is never reached for them) and drain after the account is fixed.
+        if (lastInfo.kind === 'quota' || lastInfo.kind === 'auth') break;
       }
     }
     const queued = sessions.listPending(dir).length;
     if (pushed) lastSyncAt = Date.now();
+    // The session push is the path that hits the free-plan cap most often —
+    // every queued transcript re-bills the synced-token ceiling — so its
+    // upgrade metadata wins over the memory flush's. Without this, a capped
+    // session push answered `upgrade: null` and the renderer's capNotice()
+    // (the one place the paywall is visible) never fired.
+    const sessionUpgrade = lastError ? upgradeInfo(lastError) : null;
+    const upgrade = sessionUpgrade || memoryFlush.upgrade;
     if (pushed === 0 && lastError) {
       return {
         ok: false,
         queued,
-        reason: lastError.message || 'push failed',
+        reason: syncErrorReason(lastInfo),
+        // Additive: the renderer reads ok/queued/reason/upgrade exactly as
+        // before; these name the refusal without string-matching its wording.
+        failed: lastInfo ? [lastInfo] : [],
+        kind: lastInfo ? lastInfo.kind : 'error',
+        status: lastInfo ? lastInfo.status : 0,
+        hint: lastInfo ? lastInfo.hint : null,
         memoryFlushed: memoryFlush.flushed,
-        upgrade: memoryFlush.upgrade,
+        upgrade,
       };
     }
     return {
       ok: true,
       queued,
       pushed,
+      // A partially failed push is still `ok` (the ones that went out are
+      // synced), but the reason is carried so nothing looks silently clean.
+      failed: lastInfo ? [lastInfo] : [],
       memoryFlushed: memoryFlush.flushed,
-      upgrade: memoryFlush.upgrade,
+      upgrade,
     };
   }
 
@@ -883,9 +954,24 @@ function createSyncDispatch(sessions, dir, aegis) {
       const data = await aegis.conversationSyncPull();
       const merged = sessions.mergeRemoteSessions(dir, (data && data.sessions) || []);
       lastSyncAt = Date.now();
-      return { ok: true, merged };
+      return { ok: true, merged, failed: [], upgrade: null };
     } catch (err) {
-      return { ok: false, merged: 0, reason: err && err.message ? err.message : String(err) };
+      const info = describeSyncError(err);
+      // Same shape as cli/src/cloudsync.js pull(): a classified `failed[]`
+      // instead of a bare message to string-match, plus the cap metadata when
+      // this was a 402 — the renderer's syncNow() reads `pullResult.upgrade`
+      // alongside the push's, so a pull that hits the cap now lights the
+      // upgrade banner too.
+      return {
+        ok: false,
+        merged: 0,
+        reason: syncErrorReason(info),
+        failed: [info],
+        kind: info.kind,
+        status: info.status,
+        hint: info.hint,
+        upgrade: upgradeInfo(err),
+      };
     }
   }
 
@@ -912,6 +998,88 @@ function createSyncDispatch(sessions, dir, aegis) {
   };
 }
 
+/** First retry delay and the ceiling for the heartbeat push backoff. */
+const HEARTBEAT_RETRY_BASE_MS = 5000;
+const HEARTBEAT_RETRY_MAX_MS = 30000;
+
+/**
+ * Backoff for the fire-and-forget heartbeat push (plan §7 "retry on a
+ * heartbeat"). `model:listModels` and `sync:status` each fire one, and the
+ * renderer polls both — so a permanently failing push (offline, refused
+ * memory token, free-plan cap) used to burn a request on every single one,
+ * forever, with `.catch(() => {})` swallowing the reason.
+ *
+ * Now: exponential backoff from `baseMs` to `maxMs`, reset on success, and the
+ * last error is retained (`state()`) so a stuck sync is visible on the
+ * sync:status payload instead of disappearing into an empty catch.
+ *
+ * `push` is expected to resolve a `{ ok:false, reason }` result rather than
+ * throw (that is createSyncDispatch's contract) — both are counted, because
+ * only counting throws would leave the offline case retrying every heartbeat.
+ * `now`/`baseMs`/`maxMs` are injectable so the tests can drive the ladder
+ * without sleeping.
+ */
+function createHeartbeatRetry(push, opts = {}) {
+  const now = typeof opts.now === 'function' ? opts.now : () => Date.now();
+  const baseMs = Number(opts.baseMs) > 0 ? Number(opts.baseMs) : HEARTBEAT_RETRY_BASE_MS;
+  const maxMs = Number(opts.maxMs) > 0 ? Number(opts.maxMs) : HEARTBEAT_RETRY_MAX_MS;
+  let failures = 0;
+  let nextAttemptAt = 0;
+  let lastError = null;
+  let inFlight = false;
+
+  /** 5s, 10s, 20s, 30s, 30s… — capped, never unbounded. */
+  const delayFor = () => Math.min(maxMs, baseMs * 2 ** Math.max(0, failures - 1));
+
+  function fail(reason) {
+    failures += 1;
+    const wait = delayFor();
+    lastError = reason || 'push failed';
+    nextAttemptAt = now() + wait;
+    return { attempted: true, ok: false, error: lastError, failures, retryInMs: wait };
+  }
+
+  async function run() {
+    const t = now();
+    if (failures > 0 && t < nextAttemptAt) {
+      // Backing off: no request, no state change — the caller keeps whatever
+      // reason is already on record.
+      return { attempted: false, ok: false, error: lastError, failures, retryInMs: nextAttemptAt - t };
+    }
+    if (inFlight) {
+      return { attempted: false, ok: false, error: lastError, failures, retryInMs: 0 };
+    }
+    inFlight = true;
+    try {
+      const result = await push();
+      if (result && result.ok === false) {
+        return fail(result.reason || result.kind || 'push failed');
+      }
+      // Success resets the ladder: the next heartbeat goes straight out.
+      failures = 0;
+      nextAttemptAt = 0;
+      lastError = null;
+      return { attempted: true, ok: true, error: null, failures: 0, retryInMs: 0, result };
+    } catch (err) {
+      return fail(errorText(err));
+    } finally {
+      inFlight = false;
+    }
+  }
+
+  /** Snapshot for the renderer: what failed and how long until the retry. */
+  function state() {
+    const t = now();
+    return {
+      failures,
+      lastError,
+      retryInMs: failures > 0 && nextAttemptAt > t ? nextAttemptAt - t : 0,
+    };
+  }
+
+  return { run, state, recordFailure: (err) => fail(errorText(err)) };
+}
+
 /**
  * Register model:<name> and sync:<name> on ipcMain. `model:chat` is always
  * streaming: deltas are pushed over CHAT_DELTA_CHANNEL exactly like the
@@ -922,18 +1090,28 @@ function createSyncDispatch(sessions, dir, aegis) {
  * `model:listModels` and `sync:status` also fire a background retry push of
  * any pending sessions (plan §7 "retry on a heartbeat"): fire-and-forget,
  * never awaited, never throws — it just gives queued sessions another
- * chance to sync without a dedicated poller.
+ * chance to sync without a dedicated poller. The retry is rate-limited by
+ * createHeartbeatRetry (exponential backoff, reset on success); its last error
+ * rides along on the sync:status result so the renderer can show it.
  *
  * `onReplyFinished`, like the identical param on registerIpc, is
  * bootstrap()-only — it fires the native "reply ready" notification when the
  * window is unfocused/hidden and is never set in the headless test path.
+ * `heartbeatOpts` ({ now, baseMs, maxMs }) is for tests only.
  */
-function registerModelIpc(ipcMain, engine, sessionsDir, aegis, onReplyFinished) {
+function registerModelIpc(ipcMain, engine, sessionsDir, aegis, onReplyFinished, heartbeatOpts) {
   const modelDispatch = createModelDispatch(engine);
   const syncDispatch = createSyncDispatch(sessionStore, sessionsDir, aegis);
 
+  const heartbeat = createHeartbeatRetry(() => syncDispatch.push(), heartbeatOpts);
+
   function heartbeatRetry() {
-    syncDispatch.push().catch(() => {});
+    // run() classifies its own failures, so this catch is a last-resort guard
+    // (never an empty swallow): the reason is recorded for the banner either way.
+    const attempt = heartbeat.run();
+    if (attempt && typeof attempt.catch === 'function') {
+      attempt.catch((err) => heartbeat.recordFailure(err));
+    }
   }
 
   for (const [name, handler] of Object.entries(modelDispatch)) {
@@ -975,14 +1153,20 @@ function registerModelIpc(ipcMain, engine, sessionsDir, aegis, onReplyFinished) 
     if (name === 'status') {
       ipcMain.handle(`${SYNC_PREFIX}${name}`, (_event, payload) => {
         heartbeatRetry();
-        return handler(payload);
+        const result = handler(payload);
+        // Additive: `retry` carries the last heartbeat failure and the wait
+        // until the next attempt, so a stuck sync is visible instead of
+        // swallowed. The local status fields are untouched.
+        return result && typeof result === 'object'
+          ? { ...result, retry: heartbeat.state() }
+          : result;
       });
       continue;
     }
     ipcMain.handle(`${SYNC_PREFIX}${name}`, (_event, payload) => handler(payload));
   }
 
-  return { modelDispatch, syncDispatch };
+  return { modelDispatch, syncDispatch, heartbeat };
 }
 
 /**
@@ -1805,6 +1989,10 @@ module.exports = {
   createModelDispatch,
   createSyncDispatch,
   registerModelIpc,
+  createHeartbeatRetry,
+  describeSyncError,
+  HEARTBEAT_RETRY_BASE_MS,
+  HEARTBEAT_RETRY_MAX_MS,
   createEngine,
   resolveUserDataDir,
   importForeignMemory,

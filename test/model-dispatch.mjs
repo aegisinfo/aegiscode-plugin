@@ -14,6 +14,8 @@ const {
   createModelDispatch,
   createSyncDispatch,
   registerModelIpc,
+  createHeartbeatRetry,
+  describeSyncError,
   MODEL_PREFIX,
   SYNC_PREFIX,
   CHAT_DELTA_CHANNEL,
@@ -225,6 +227,279 @@ try {
 
   await fakeIpc.handles[`${MODEL_PREFIX}cancel`]({}, { sessionId: 's2' });
   assert(calls[calls.length - 1][0] === 'cancel', 'cancel forwards sessionId');
+
+  // 4. A quota or auth refusal is NAMED, not handed over as a bare server
+  //    sentence (the desktop twin of test/cli-sync.test.mjs §4). Same stub
+  //    harness pattern as 2b: the real sessions store in its own temp dir, and
+  //    an injected client that throws the shape vendor/aegis.js parseResponse
+  //    produces (err.status + err.data), which is what main.js can still see
+  //    while the renderer only ever gets a message string.
+  assert(typeof describeSyncError === 'function', 'describeSyncError is exported for the host + tests');
+
+  const capError = () => {
+    const err = new Error('free session limit reached');
+    err.status = 402;
+    err.data = {
+      error: 'free_session_limit_reached',
+      upgradeUrl: 'https://aegiscloud.org/subscribe',
+      tokensUsed: 12,
+      tokenLimit: 10,
+    };
+    return err;
+  };
+  const authError = () => {
+    const err = new Error('unauthorized');
+    err.status = 401;
+    err.data = { error: 'invalid_memory_token' };
+    return err;
+  };
+  const seedPending = (targetDir, id, title) => {
+    sessionsStore.upsertSession(targetDir, {
+      id,
+      title,
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    sessionsStore.markPending(targetDir, id);
+  };
+
+  // 4a. 402 on a SESSION push (the path that hits the cap most often): the
+  //     renderer's capNotice() reads `upgrade`, so a session push that leaves
+  //     it null means the paywall is invisible. It must also stay queued.
+  const capDir = mkdtempSync(join(tmpdir(), 'aegis-model-cap-'));
+  seedPending(capDir, 'cap-1', 'first capped');
+  seedPending(capDir, 'cap-2', 'second capped');
+  const capRequests = [];
+  const capDispatch = createSyncDispatch(sessionsStore, capDir, {
+    apiKey: 'k',
+    async conversationSyncPush(transcript) {
+      capRequests.push(transcript.session_id);
+      throw capError();
+    },
+    async conversationSyncPull() {
+      throw capError();
+    },
+    async memorySave() {
+      return { ok: true };
+    },
+  });
+  const capPush = await capDispatch.push();
+  assert(capPush.ok === false, 'a capped session push resolves ok:false, never throws');
+  assert(
+    capPush.upgrade && capPush.upgrade.used === 12 && capPush.upgrade.limit === 10,
+    `a 402 session push carries the quota numbers (got ${JSON.stringify(capPush.upgrade)})`
+  );
+  assert(
+    capPush.upgrade.url === 'https://aegiscloud.org/subscribe',
+    'the cap carries the URL the renderer opens'
+  );
+  assert(capPush.kind === 'quota', `a 402 is classified as quota (got ${capPush.kind})`);
+  assert(
+    /ceiling|quota|limit/i.test(capPush.reason || ''),
+    `the reason names the cap, not just the server's words (got ${JSON.stringify(capPush.reason)})`
+  );
+  assert(
+    capPush.queued === 2 && sessionsStore.getSession(capDir, 'cap-1').pending === true,
+    'a capped session stays pending — never markSynced'
+  );
+  assert(
+    capRequests.length === 1,
+    `push stops at the cap instead of one request per queued session (got ${capRequests.length})`
+  );
+  const capPull = await capDispatch.pull();
+  assert(
+    capPull.ok === false && capPull.upgrade && capPull.upgrade.limit === 10,
+    'a capped pull carries the upgrade metadata too (renderer reads pullResult.upgrade)'
+  );
+  assert(
+    capPull.failed.length === 1 && capPull.failed[0].kind === 'quota',
+    'pull() reports its failure classified, in failed[]'
+  );
+
+  // 4b. 401 — the per-session memory token was refused. Same shape, different
+  //     diagnosis: this is not an upgrade prompt, it is a credential problem.
+  const authDir = mkdtempSync(join(tmpdir(), 'aegis-model-auth-'));
+  seedPending(authDir, 'auth-1', 'refused');
+  const authDispatch = createSyncDispatch(sessionsStore, authDir, {
+    apiKey: 'k',
+    async conversationSyncPush() {
+      throw authError();
+    },
+    async conversationSyncPull() {
+      throw authError();
+    },
+    async memorySave() {
+      return { ok: true };
+    },
+  });
+  const authPush = await authDispatch.push();
+  assert(
+    authPush.ok === false && authPush.kind === 'auth' && authPush.status === 401,
+    `a 401 session push is classified as auth (got ${authPush.kind}/${authPush.status})`
+  );
+  assert(/key/i.test(authPush.hint || ''), 'the auth hint points at the credential that fixes it');
+  assert(
+    /unauthorized/.test(authPush.reason || '') && /key/i.test(authPush.reason || ''),
+    `the reason keeps the server's words and adds the fix (got ${JSON.stringify(authPush.reason)})`
+  );
+  assert(authPush.upgrade === null, 'a 401 is not dressed up as an upgrade prompt');
+  assert(
+    sessionsStore.getSession(authDir, 'auth-1').pending === true,
+    'an auth-refused session stays queued'
+  );
+  const authPull = await authDispatch.pull();
+  assert(
+    authPull.failed.length === 1 &&
+      authPull.failed[0].kind === 'auth' &&
+      authPull.failed[0].status === 401,
+    'pull() classifies a refused memory token as auth'
+  );
+  assert(authPull.upgrade === null, 'the auth failure carries no upgrade metadata');
+
+  // 4c. The heartbeat retry (fired on every model:listModels / sync:status)
+  //     backs off exponentially, caps at 30s, and resets on success — so a
+  //     permanently failing push no longer burns a request per renderer poll,
+  //     and its last error stays visible on sync:status instead of being
+  //     swallowed by `.catch(() => {})`. The clock is injected, so the ladder
+  //     is driven without sleeping.
+  const hbDir = mkdtempSync(join(tmpdir(), 'aegis-model-heartbeat-'));
+  seedPending(hbDir, 'hb-1', 'heartbeat');
+  let clock = 1000;
+  const hbRequests = [];
+  const hbServer = { fail: true };
+  const hbIpc = {
+    handles: {},
+    handle(name, cb) {
+      this.handles[name] = cb;
+    },
+  };
+  const hbWired = registerModelIpc(
+    hbIpc,
+    engine,
+    hbDir,
+    {
+      apiKey: 'k',
+      async conversationSyncPush(transcript) {
+        hbRequests.push(clock);
+        if (hbServer.fail) {
+          const err = new Error('upstream unavailable');
+          err.status = 503;
+          throw err;
+        }
+        return { session_id: `remote-${transcript.session_id}` };
+      },
+      async conversationSyncPull() {
+        return { sessions: [] };
+      },
+      async memorySave() {
+        return { ok: true };
+      },
+    },
+    undefined,
+    { now: () => clock, baseMs: 1000, maxMs: 30000 }
+  );
+  assert(
+    hbWired && hbWired.heartbeat && typeof hbWired.heartbeat.state === 'function',
+    'registerModelIpc exposes the heartbeat controller for the host + tests'
+  );
+  const hbTick = () => hbIpc.handles[`${MODEL_PREFIX}listModels`]({}, { class: 'ollama' });
+  const hbDrain = async () => {
+    for (let i = 0; i < 3; i += 1) await new Promise((r) => setImmediate(r));
+  };
+
+  await hbTick();
+  await hbDrain();
+  assert(hbRequests.length === 1, `the first heartbeat pushes (got ${hbRequests.length})`);
+  for (let i = 0; i < 3; i += 1) {
+    await hbTick();
+    await hbDrain();
+  }
+  assert(
+    hbRequests.length === 1,
+    `further polls inside the backoff window send nothing (got ${hbRequests.length})`
+  );
+
+  const hbStatusInBackoff = await hbIpc.handles[`${SYNC_PREFIX}status`]({}, undefined);
+  await hbDrain();
+  assert(
+    hbStatusInBackoff.retry && typeof hbStatusInBackoff.retry.lastError === 'string',
+    'sync:status carries the retained heartbeat error — not swallowed'
+  );
+  assert(
+    hbStatusInBackoff.retry.failures === 1 && hbStatusInBackoff.retry.retryInMs === 1000,
+    `the status payload reports the failure count and the wait (got ${JSON.stringify(hbStatusInBackoff.retry)})`
+  );
+  assert(
+    hbStatusInBackoff.pending === 1 && hbStatusInBackoff.count === 1,
+    'the pre-existing status fields are untouched'
+  );
+
+  // Walk the ladder: 1s, 2s, 4s, 8s, 16s, then the 30s cap.
+  const waits = [];
+  for (const step of [1000, 1000, 1000, 10000, 10000, 30000]) {
+    clock += step;
+    const before = hbRequests.length;
+    await hbTick();
+    await hbDrain();
+    waits.push(hbRequests.length - before);
+  }
+  assert(
+    waits.join(',') === '1,0,1,1,1,1',
+    `the retry ladder fires only when the wait has elapsed (got ${waits.join(',')})`
+  );
+  assert(hbRequests.length === 6, `six attempts over the ladder (got ${hbRequests.length})`);
+
+  // The 30s cap: after the 6th failure the next attempt is exactly 30s away,
+  // not 32s (which is where an uncapped doubling would land).
+  const cappedStatus = hbWired.heartbeat.state();
+  assert(
+    cappedStatus.failures === 6 && cappedStatus.retryInMs === 30000,
+    `the backoff is capped at 30s (got ${JSON.stringify(cappedStatus)})`
+  );
+  const beforeCap = hbRequests.length;
+  clock += 29999;
+  await hbTick();
+  await hbDrain();
+  assert(
+    hbRequests.length === beforeCap,
+    'a poll 1ms before the capped deadline still sends nothing'
+  );
+
+  // Success resets the ladder — and the session that was failing is now synced.
+  hbServer.fail = false;
+  clock += 1;
+  await hbTick();
+  await hbDrain();
+  assert(hbRequests.length === beforeCap + 1, 'the attempt at the capped deadline goes out');
+  assert(
+    hbWired.heartbeat.state().failures === 0 && hbWired.heartbeat.state().lastError === null,
+    'a successful push resets the backoff and clears the retained error'
+  );
+  assert(
+    sessionsStore.getSession(hbDir, 'hb-1').pending === false,
+    'the session that finally went out is marked synced'
+  );
+
+  // …and the reset is real: a fresh failure is attempted immediately rather
+  // than waiting out the previous ladder.
+  seedPending(hbDir, 'hb-2', 'failing again');
+  hbServer.fail = true;
+  const beforeReFail = hbRequests.length;
+  await hbTick();
+  await hbDrain();
+  assert(
+    hbRequests.length === beforeReFail + 1,
+    'after a reset the next failure is attempted immediately (no stale backoff)'
+  );
+  const afterReFail = await hbIpc.handles[`${SYNC_PREFIX}status`]({}, undefined);
+  await hbDrain();
+  assert(
+    afterReFail.retry.failures === 1 && /upstream unavailable/.test(afterReFail.retry.lastError),
+    `the new failure is retained with its message (got ${JSON.stringify(afterReFail.retry)})`
+  );
+  assert(
+    createHeartbeatRetry(() => ({ ok: true })).state().failures === 0,
+    'a fresh heartbeat controller starts with no failures'
+  );
 
   console.log(`Model/sync dispatch smoke test passed: ${channels.join(', ')}`);
 } catch (err) {
