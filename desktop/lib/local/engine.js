@@ -946,6 +946,11 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
     let shell = null;
     const getShell = () => shell || (shell = new ShellSession({ cwd: envFor(payload).cwd }));
     const toolCtx = { getShell, signal };
+    // The turn's working directory. It rides on every tool frame because a
+    // tool row's args are the command or the path — never the directory the
+    // command runs in — which left "where is it working in" unanswerable from
+    // the transcript.
+    const turnCwd = envFor(payload).cwd;
 
     try {
       const cfg = cls === 'aegis' || cls === 'ollama' ? {} : settings.get(cls) || {};
@@ -1207,6 +1212,18 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
         });
 
         for (const call of calls) {
+          // Open the live row BEFORE the tool runs. The CLI paints
+          // `Running N … · 3s` off a `phase: 'run'` frame and ticks it while
+          // the tool is still going; reporting the tool only once, after it
+          // finished, left the transcript showing a spinner verb and nothing
+          // else for the whole exec timeout (120s, up to 600s) — which reads
+          // as a wedged turn rather than a working one.
+          if (onDelta) {
+            onDelta({
+              delta: '',
+              tool: { name: call.name, args: call.args, id: call.id, cwd: turnCwd, phase: 'run' },
+            });
+          }
           const result = call.name === T.SUBAGENT_TOOL
             ? await runSubagent(call.args, {
                 cls, model, statedMaxTokens, effort: payload && payload.effort,
@@ -1215,7 +1232,15 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
             : await gatedExecuteTool(call, { toolCtx, rootSessionId, rootOnDelta, signal });
           // A subagent's spend rides back on its tool result (see runSubagent).
           if (result && result.usage) addUsage({ usage: result.usage });
-          if (onDelta) onDelta({ delta: '', tool: { name: call.name, args: call.args, ok: result.ok } });
+          // The id is carried on both frames: the CLI pairs them by id first,
+          // precisely so parallel same-name calls don't collapse into one row
+          // with the wrong plural.
+          if (onDelta) {
+            onDelta({
+              delta: '',
+              tool: { name: call.name, args: call.args, ok: result.ok, id: call.id, cwd: turnCwd, phase: 'done' },
+            });
+          }
           history.push({
             role: 'tool',
             tool_call_id: call.id,

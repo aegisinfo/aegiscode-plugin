@@ -1613,6 +1613,11 @@ async function spawnPath(card, spec) {
         card.classList.remove('pending');
         state.textContent = 'streaming…';
       }
+      // `phase: 'run'` is the frame that opens the CLI's live row before the
+      // tool executes. This line is retrospective by design (see
+      // toolActivityLabel), so acting on the run frame too would print every
+      // tool twice — once when it starts, once when it finishes.
+      if (chunk.tool.phase === 'run') return;
       appendToolActivity(card, chunk.tool, 'flow-tools', '.flow-body');
       return;
     }
@@ -2598,6 +2603,11 @@ async function send() {
       return;
     }
     if (chunk && chunk.tool) {
+      // See the flow-stream handler above: the run frame is the CLI's live
+      // row. Ignored here, and ignored *before* `toolLog.push` — a run frame
+      // counted as a completed tool would inflate the turn summary's tool
+      // count for a call that hasn't run yet.
+      if (chunk.tool.phase === 'run') return;
       toolLog.push(chunk.tool);
       const row = ensurePendingRow();
       row.classList.remove('pending');

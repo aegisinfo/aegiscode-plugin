@@ -397,16 +397,46 @@ function joinBits(bits, t) {
   return line;
 }
 
+/** Longest directory a row prints before it is contracted from the front. */
+const DIR_MAX = 40;
+
+/**
+ * A row's working directory, contracted for display: the home prefix becomes
+ * `~`, and a path still too long keeps its tail — the leaf is what identifies
+ * the checkout, the ancestors are the part a reader can spare. Returns '' when
+ * the host didn't say, so a row never implies a directory it doesn't know.
+ */
+function shortDir(dir) {
+  let p = String(dir == null ? '' : dir).trim().replace(/\/+$/, '');
+  if (!p) return '';
+  const home = String(process.env.HOME || process.env.USERPROFILE || '').replace(/\/+$/, '');
+  if (home && (p === home || p.startsWith(`${home}/`))) p = `~${p.slice(home.length)}`;
+  if (p.length > DIR_MAX) p = `${GLYPH.ellipse}${p.slice(-(DIR_MAX - 1))}`;
+  return p;
+}
+
 /** Render one transcript row to span lines. */
 function rowLines(msg, cols, ctx, now = Date.now()) {
   const t = themeOf(ctx);
   const out = [];
   if (msg.role === 'tool') {
+    // One ellipsis per row. The label already ends in one ("Running 1 shell
+    // command…") and this appended a second after the seconds, so the row read
+    // "Running 1 shell command… · 3s…" — two ellipses on one line. Normalising
+    // the label here rather than at the call site means the row stays correct
+    // whatever a host puts in `label`.
+    const label = String(msg.label || '').replace(/(?:…|\.\.\.)+$/, '');
+    // Where it runs. A tool row's args are the command or the path, so without
+    // this the transcript cannot answer "where is it working in".
+    const where = msg.cwd ? ` · ${shortDir(msg.cwd)}` : '';
     if (msg.phase === 'run') {
       const secs = msg.start ? Math.max(1, Math.round((now - msg.start) / 1000)) : 0;
-      out.push([span(t.white, GLYPH.block), span(t.gray, ` ${msg.label} · ${secs}s…`)]);
+      out.push([
+        span(t.white, GLYPH.block),
+        span(t.gray, ` ${label}${GLYPH.ellipse} · ${secs}s${where}`),
+      ]);
     } else {
-      out.push([span(t.gray, msg.label)]);
+      out.push([span(t.gray, `${label}${where}`)]);
     }
     const argsStr =
       typeof msg.args === 'string'
@@ -911,7 +941,20 @@ async function runSession(host) {
       // from one that produced nothing at all.
       reasoning: () => { sawReasoning = true; },
       tool: (tool) => {
-        turnTools.push(tool);
+        // One entry per tool call, not one per frame. The engine opens a `run`
+        // frame before the tool executes and closes it with a `done` frame
+        // after (see desktop/lib/local/engine.js), so pushing both made the
+        // turn summary report every tool twice. An id-bearing done frame
+        // replaces the run frame it closes; frames with no id keep the old
+        // push-every-frame behaviour, so a host that reports a tool once is
+        // unaffected.
+        if (tool && tool.id !== undefined) {
+          const at = turnTools.findIndex((x) => x && x.id !== undefined && x.id === tool.id);
+          if (at >= 0) turnTools[at] = tool;
+          else turnTools.push(tool);
+        } else {
+          turnTools.push(tool);
+        }
         if (tool.phase === 'run') {
           const n = ++toolSeq;
           const prefix = tool.agent ? `${tool.agent} ▸ ` : '';
