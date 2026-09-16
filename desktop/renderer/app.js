@@ -3228,6 +3228,42 @@ async function init() {
       renderMemoryOverlay();
     });
   }
+  // ── the autonomous queue card ────────────────────────────────────────────
+  // The queue half of this file (window.queue -> main.js registerQueueIpc ->
+  // desktop/lib/local/queue.js + autonomous.js) shipped with every handler
+  // written and none of them reachable: no listener on the four buttons, no
+  // paint at boot, no subscriber to the drain's progress channel. So the card
+  // was dead markup — a Queue / Run one / Drain all / Stop row that did
+  // nothing and a task list that never filled, while the module comments above
+  // described the behaviour as if it were live. This block is the missing
+  // wiring, and deliberately nothing more.
+  //
+  // Draining stays a click, exactly as the queue section above promises:
+  // nothing here starts a drain. There is no interval, no drain-on-idle and no
+  // drain at boot — the one call made here is loadQueueState(), which asks
+  // main for queue.list() and paints it.
+  //
+  // The `queueApi` guard is the preload-less case (a preload predating the
+  // queue surface has no `window.queue` at all): binding `undefined.list` would
+  // throw at boot and take every binding after this point down with it, so an
+  // old preload degrades to dead markup instead.
+  if (queueApi) {
+    if (els.queueEnqueue) els.queueEnqueue.addEventListener('click', enqueueQueueTask);
+    // `Run one` and `Drain all` are the two buttons the header of the queue
+    // section names as the only triggers of a drain; Stop cancels the turn in
+    // flight and the loop (via main), it never starts one.
+    if (els.queueDrain) els.queueDrain.addEventListener('click', () => startQueueDrain('one'));
+    if (els.queueProceed) els.queueProceed.addEventListener('click', () => startQueueDrain('all'));
+    if (els.queueStop) els.queueStop.addEventListener('click', stopQueueDrain);
+    // A worker's frames are a status line, never transcript entries (that
+    // separation is main.js's own progress channel, not aegis:chatDelta).
+    if (typeof queueApi.onProgress === 'function') queueApi.onProgress(renderQueueProgress);
+    // Paint the card once, from state that already exists on disk. A list, not a
+    // drain: queueing a task in another window (or from the CLI) and opening
+    // this one must show that task, and must not run it.
+    await loadQueueState();
+  }
+
   // The transcript's scroll/paint/Escape policy. Both listeners are registered
   // inside transcript-view.js so the behaviours they enforce are the ones
   // test/renderer-dom.test.mjs drives: the passive `scroll` listener is the

@@ -264,12 +264,51 @@ try {
   }
 
   // ── clear drops finished work and never drops waiting work ───────────────
+  //
+  // The expected count is DERIVED from the queue, not written down, and the
+  // difference matters. This block used to assert `after.length === 3` with the
+  // message "three pending tasks survive a clear" — a stale snapshot of the
+  // `add` block above that simply ignored what happened in between: task #1 was
+  // drained to `done` by the `--max 1` drain, and #2 was put back to `pending`
+  // by `retry` after its failed drain. Exactly two tasks are therefore WAITING
+  // at this point, and `clear` is *supposed* to drop the third — the finished
+  // one. Measured by hand against the module
+  // (`clearQueue({all:false})` over a queue holding one of each of
+  // pending/running/done/error) it removes only the done/error items; that
+  // behaviour is pinned directly in test/autonomous-queue.test.mjs. So the CLI
+  // was right and the number was wrong, and the number is replaced by the
+  // invariant `clear` actually promises — every task that was waiting is still
+  // there, with its status intact — which is strictly stronger than the literal
+  // it replaces (it would also fail if the finished task were kept, or if a
+  // waiting task came back with a different status) and cannot go stale when an
+  // earlier block changes how many tasks it drains.
   {
+    const before = loadQueue(envFor());
+    const waiting = before.filter((i) => i.status === 'pending' || i.status === 'running');
+    const finished = before.filter((i) => i.status !== 'pending' && i.status !== 'running');
+    assert(
+      waiting.length === 2 && finished.length === 1,
+      `fixture: one drained task and two waiting, got ${before.map((i) => `#${i.id}:${i.status}`).join(' ')}`
+    );
+
     const cleared = await cli(['autonomous', 'clear'], { env: envFor() });
     assert(cleared.code === 0, `clear must exit 0 (${cleared.err})`);
-    assert(/removed 1 finished task\(s\); \d+ kept/.test(cleared.out), `clear reports what it did: ${cleared.out}`);
+    assert(
+      cleared.out.includes(`removed ${finished.length} finished task(s); ${waiting.length} kept`),
+      `clear reports what it did: ${cleared.out}`
+    );
     const after = loadQueue(envFor());
-    assert(after.length === 3, `three pending tasks survive a clear, got ${after.length}`);
+    assert(
+      after.length === waiting.length,
+      `clear kept ${after.length} of the ${waiting.length} waiting tasks: ${after.map((i) => `#${i.id}:${i.status}`).join(' ')}`
+    );
+    for (const w of waiting) {
+      const kept = after.find((i) => i.id === w.id);
+      assert(
+        kept && kept.status === w.status && kept.task === w.task,
+        `waiting task #${w.id} survives a clear unchanged: ${JSON.stringify(kept)}`
+      );
+    }
     assert(!after.some((i) => i.status === 'done'), 'the finished task is gone');
     const emptied = await cli(['autonomous', 'clear', '--all'], { env: envFor() });
     assert(emptied.code === 0 && loadQueue(envFor()).length === 0, `clear --all empties the queue: ${emptied.out}`);

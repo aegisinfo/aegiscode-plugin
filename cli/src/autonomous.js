@@ -149,8 +149,14 @@ function progressSink(io, { json }) {
     }
     if (event.type === 'tool' && event.tool && event.tool.phase === 'run') {
       const args = event.tool.args || {};
-      const what = args.command || args.path || args.pattern || '';
-      io.stderr.write(`  ⚙ ${event.tool.name} ${String(what).slice(0, 100)}\n`);
+      // The engine spells a written file `file_path`, not `path` — knowledge
+      // the shared worker owns in writtenPath(). Asking it instead of
+      // re-listing the argument names here is what stops this line from
+      // printing `⚙ writeFile` with nothing after it, which is precisely what
+      // it did: an unattended drain could not say which file it wrote.
+      const what = args.command || args.pattern || autonomous.writtenPath(event.tool) || '';
+      const shown = String(what).slice(0, 100);
+      io.stderr.write(`  ⚙ ${event.tool.name}${shown ? ` ${shown}` : ''}\n`);
       return;
     }
     if (event.type === 'healed') {
@@ -290,11 +296,22 @@ async function runQueueCommand(command, argv, io = {}) {
         max: intFlag(args.flags, 'max') || 0,
         stopOnError: Boolean(args.flags['stop-on-error']),
       });
+      // A reconcile that could not run has to SAY WHY on stderr. It used to
+      // fall through to the success line below, which printed
+      // "aegiscode: phase undefined queued" (res.phase is absent when there is
+      // no plan) and dropped res.error on the floor — the timer's log recorded
+      // a queueing that never happened and nothing about the missing PLAN.md
+      // that caused it. Exit code and message now agree.
+      if (!res.ok) {
+        stderr.write(`aegiscode autonomous reconcile: ${res.error || 'reconcile failed'}\n`);
+        emit(res, undefined);
+        return 1;
+      }
       if (!json) printRunReport(res.ran || [], out);
       emit(res, res.exhausted
         ? 'aegiscode: every phase in PLAN.md is done — nothing to queue'
         : `aegiscode: phase ${res.phase} queued${res.ran ? ` — ${res.ran.length} task(s) run` : ''}`);
-      return res.ok ? 0 : 1;
+      return 0;
     }
 
     if (command === 'proceed' || command === 'run') {
