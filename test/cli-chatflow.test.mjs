@@ -151,6 +151,18 @@ const ctx = { light: false };
   assert(work.includes('esc to interrupt'), 'the working status line offers the interrupt');
   const yolo = plain(chatflow.statusLine({ yolo: true }, 80, ctx));
   assert(yolo.includes('YOLO mode on'), 'yolo is reflected in the status line');
+  // The idle line offers → for the mode switch and no longer advertises the
+  // agents chord: "← for agents" named a key this host never bound to anything
+  // (LEFT was wired only to editor.left()), and the agents panel is reachable
+  // by the /agents command it was really standing in for.
+  assert(idle.includes('→ for auto mode'), 'the idle line advertises the mode switch');
+  assert(yolo.includes('→ for auto mode'), 'and so does the auto-approve line');
+  for (const st of [{}, { working: true }, { streamJob: {} }, { yolo: true }, { inputPrompt: {} }]) {
+    assert(
+      !plain(chatflow.statusLine(st, 80, ctx)).includes('agents'),
+      'no state of the status line advertises the unwired agents chord'
+    );
+  }
   for (const st of [{}, { working: true }, { yolo: true }, { inputPrompt: {} }]) {
     assert(
       screen.lineWidth(chatflow.statusLine(st, 80, ctx)) === 80,

@@ -241,3 +241,37 @@ test('the shortcuts grid advertises only bindings this CLI handles', () => {
     'the live bindings are listed'
   );
 });
+
+// (g) → switches the approval mode — the chord the status line advertises.
+//     Before this the status line offered "← for agents" on every idle frame
+//     and nothing was bound to it: LEFT only moved the cursor, so the one key
+//     the line named did nothing at all.
+test('→ on an empty line switches the approval mode', async () => {
+  const { notes } = await drive(['\x1b[C', 260], { extra: { isYolo: () => false } });
+  assert.ok(
+    notes.includes('cmd:/yolo on'),
+    `an empty line toggles manual -> auto (got ${JSON.stringify(notes)})`
+  );
+});
+
+test('→ on an empty line while auto mode is on switches it back off', async () => {
+  const { notes } = await drive(['\x1b[C', 260], { extra: { isYolo: () => true } });
+  assert.ok(
+    notes.includes('cmd:/yolo off'),
+    `the switch is a toggle, not a one-way door (got ${JSON.stringify(notes)})`
+  );
+});
+
+test('→ with text in the line still moves the cursor — typing keeps its arrow', async () => {
+  const { notes, frames, rows } = await drive(['ab', '\x1b[C', 260]);
+  assert.ok(
+    !notes.some((n) => String(n).startsWith('cmd:/yolo')),
+    'a non-empty line keeps plain cursor movement, no mode switch'
+  );
+  // The last painted frame is the exit blank (cleanup paints []), so look for
+  // the typed line in the input row of any frame instead of the final one.
+  assert.ok(
+    frames.some((f) => inputRowText(f, rows).includes('ab')),
+    'the typed line is still there (the chord did not eat it)'
+  );
+});

@@ -120,7 +120,7 @@ assert(theme.GLYPH.divider === '╌', `GLYPH.divider must be ╌, got ${theme.GL
 assert(theme.GLYPH.bullet === '·', `GLYPH.bullet must be ·, got ${theme.GLYPH.bullet}`);
 assert(theme.GLYPH.pointer === '▸', `GLYPH.pointer must be ▸, got ${theme.GLYPH.pointer}`);
 assert(theme.GLYPH.ellipse === '…', 'GLYPH.ellipse must be the … character');
-assert(theme.GLYPH.leftarrow === '←', 'GLYPH.leftarrow must be ←');
+assert(theme.GLYPH.rightarrow === '→', 'GLYPH.rightarrow must be →');
 oneOf(theme.GLYPH.hook, ['⎿', '_|'], 'GLYPH.hook'); // ⎿ absent from some fonts
 oneOf(theme.GLYPH.bloom, ['✻', '*'], 'GLYPH.bloom'); // ✻ U+273B
 oneOf(theme.GLYPH.star, ['✦', '*'], 'GLYPH.star'); // ✦ renders wide on Apple fonts

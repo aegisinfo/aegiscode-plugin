@@ -12,7 +12,7 @@
  *     ─────────────────────────────
  *     ❯ what should I fix?               input line, with history + completion
  *     ─────────────────────────────
- *     ⏸ manual mode on · ? for shortcuts  status line
+ *     ⏸ manual mode on · ? for shortcuts   status line (→ switches the mode)
  *
  * driven by a raw key stream, with the turn lifecycle of the reference: a user
  * row, a live assistant row that grows as the model streams, tool rows that
@@ -258,20 +258,30 @@ function spinnerLine(state, ctx) {
   return [span(t.coral, glyph), ...tinted, span(t.white, '… '), tail];
 }
 
-/** The idle/modifier status line at the bottom of the frame. */
+/**
+ * The idle/modifier status line at the bottom of the frame.
+ *
+ * The idle form advertises `→`, the chord that switches the approval mode
+ * (manual ⇄ auto) — see the RIGHT branch in `handleKey`. It replaces the
+ * reference's "← for agents" hint, which this host printed on every idle frame
+ * while binding nothing to it: LEFT was wired only to `editor.left()`, so the
+ * one chord the status line offered did nothing. A hint for a key with no
+ * handler is worse than no hint, and the agents panel is reachable by the
+ * `/agents` command it was really standing in for.
+ */
 function statusLine(state, cols, ctx) {
   const t = themeOf(ctx);
   let left;
   if (state.inputPrompt) {
     left = [span(t.gray, 'enter to confirm · esc to cancel')];
   } else if (state.working) {
-    left = [span(t.gray, ` ${GLYPH.bullet} esc to interrupt ${GLYPH.bullet} ${GLYPH.leftarrow} for agents`)];
+    left = [span(t.gray, ` ${GLYPH.bullet} esc to interrupt`)];
   } else if (state.streamJob) {
-    left = [span(t.gray, `${GLYPH.bullet} esc to stop ${GLYPH.bullet} ${GLYPH.leftarrow} for agents`)];
+    left = [span(t.gray, `${GLYPH.bullet} esc to stop`)];
   } else if (state.yolo) {
-    left = [span(t.gray, `${GLYPH.bullet} YOLO mode on ${GLYPH.bullet} ? for shortcuts ${GLYPH.bullet} ${GLYPH.leftarrow} for agents`)];
+    left = [span(t.gray, `${GLYPH.bullet} YOLO mode on ${GLYPH.bullet} ? for shortcuts ${GLYPH.bullet} ${GLYPH.rightarrow} for auto mode`)];
   } else {
-    left = [span(t.gray, `${GLYPH.pause} manual mode on ${GLYPH.bullet} ? for shortcuts ${GLYPH.bullet} ${GLYPH.leftarrow} for agents`)];
+    left = [span(t.gray, `${GLYPH.pause} manual mode on ${GLYPH.bullet} ? for shortcuts ${GLYPH.bullet} ${GLYPH.rightarrow} for auto mode`)];
   }
   return padLine(left, cols);
 }
@@ -1513,6 +1523,14 @@ async function runSession(host) {
       if (key.name === KEY.CTRL_LEFT) editor.wordBack();
       else editor.left();
       render();
+      return;
+    }
+    // → on an empty line switches the approval mode (manual ⇄ auto) — the chord
+    // the status line advertises. With an empty buffer the cursor already sits
+    // at column 0, so `editor.right()` was a no-op there: the binding costs no
+    // editing behaviour, and a line with text keeps plain cursor movement.
+    if (key.name === KEY.RIGHT && !editor.buf) {
+      await dispatch(!(host.isYolo && host.isYolo()) ? '/yolo on' : '/yolo off');
       return;
     }
     if (key.name === KEY.RIGHT || key.name === KEY.CTRL_RIGHT) {

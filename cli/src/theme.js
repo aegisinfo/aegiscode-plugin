@@ -89,7 +89,7 @@ function glyphsFor(platform = process.platform) {
     hint: '❯', // "Try ..." suggestion marker
     pause: '⏸', // bottom status line (manual mode)
     star: stencilGlyph(STAR, platform), // own-session marker, decorations
-    leftarrow: '←', // hints on the status line
+    rightarrow: '→', // the manual ⇄ auto mode switch, advertised on the status line
     pointer: '▸', // tips list bullets
     hook: '⎿', // inline command / tip rows (tool commands, usage hints)
     block: '●', // streaming cursor / assistant answer marker
