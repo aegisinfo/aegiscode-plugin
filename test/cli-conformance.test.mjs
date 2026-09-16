@@ -38,6 +38,7 @@ const read = (rel) => readFileSync(join(cliDir, rel), 'utf8');
 
 const theme = require(join(cliDir, 'src', 'theme.js'));
 const art = require(join(cliDir, 'src', 'art.js'));
+const rend = require(join(cliDir, 'src', 'render.js'));
 
 /** Pull [r,g,b] back out of a truecolor SGR prefix. */
 function rgbOf(sgr) {
@@ -210,8 +211,49 @@ assert(sources.render.includes('GLYPH.bloom'), 'the completion line must use the
 assert(sources.render.includes('VERBS'), 'the working line must draw a verb from the shared table');
 // The art must be inked per shade, not left monochrome — the shade→token map is
 // what makes the mascot gold and the whale blue/lavender.
-for (const shade of ['▓', '▒', '░', '█', '✦']) {
-  assert(sources.render.includes(`'${shade}'`), `the art ink map must handle the ${shade} shade`);
+// Asserted BEHAVIOURALLY. The map is now *derived* through art.stencilGlyph, so
+// the runes it must key on are the stencilled ones, not the raw ones. Grepping
+// render.js for the literal '✦' would fail the instant that derivation moves
+// into a loop — the ink would be right and the guard would be lying.
+assert(sources.render.includes('stencilGlyph'),
+  'the art ink map must be derived through art.stencilGlyph, not raw runes');
+// Assert the END-TO-END property, per platform: take the art as that platform
+// will actually draw it, and require that every rune in it carries ink. Both
+// sides must agree on the platform, so the module is re-required under a faked
+// process.platform with the cli/src cache dropped — otherwise the ink map is
+// keyed on the host's stencil while the rows use the target's, and a stale map
+// would look like a passing test.
+{
+  const INK = { blue: '\x1b[34m', lavender: '\x1b[35m', dim: '\x1b[2m', white: '\x1b[37m', gold: '\x1b[33m' };
+  // Only the WHALE half is tinted per shade; artRow paints the mascot half solid
+  // gold, so a mascot outline rune like ▐ needs no entry in the ink map. Testing
+  // the whole mark would therefore demand ink for runes that are never tinted.
+  const realPlatform = process.platform;
+  const fresh = (rel, platform) => {
+    for (const key of Object.keys(require.cache)) {
+      if (key.startsWith(join(cliDir, 'src'))) delete require.cache[key];
+    }
+    Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+    return require(join(cliDir, rel));
+  };
+  try {
+    for (const platform of ['linux', 'darwin', 'win32']) {
+      const renderer = fresh(join('src', 'render.js'), platform);
+      const parts = fresh(join('src', 'art.js'), platform).welcomeArtParts(100);
+      const whale = parts.rows.map((r) => r[1] || '').join('');
+      const runes = [...new Set(whale.split(''))].filter((c) => c !== ' ');
+      assert(runes.length > 0, `the ${platform} whale must draw something`);
+      const inked = new Set(
+        renderer.tintWhale(runes.join(''), INK).filter((s) => s.s).map((s) => s.t),
+      );
+      for (const rune of runes) {
+        assert(inked.has(rune), `the ${platform} whale must ink its '${rune}' shade`);
+      }
+    }
+  } finally {
+    Object.defineProperty(process, 'platform', { value: realPlatform, configurable: true });
+    fresh(join('src', 'render.js'), realPlatform);
+  }
 }
 
 assert(sources.overlays.includes('GLYPH.cursor'), 'the command palette must use the ❯ cursor');

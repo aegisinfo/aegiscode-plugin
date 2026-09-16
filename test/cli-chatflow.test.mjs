@@ -563,5 +563,95 @@ const results = [];
   results.push('app-side interrupt');
 }
 
+// ── the end-of-turn summary ─────────────────────────────────────────────────
+
+// 10. The counts are arithmetic over the events, not a model call: `ok` decides
+//     failure, args decide files and commands, and duplicates collapse.
+{
+  const counts = chatflow.summarizeTurnTools([
+    { ok: true, args: { command: 'ls -la' } },
+    { ok: true, args: { command: '/usr/bin/node /tmp/x.mjs --flag' } },
+    { ok: true, args: { file_path: '/a/b/art.js' } },
+    { ok: true, args: { file_path: '/a/b/art.js' } },
+    { ok: false, args: { file_path: '/a/b/theme.js' } },
+  ]);
+  eq(counts.tools, 5, 'every tool event is counted');
+  eq(counts.failed, 1, 'ok:false is the failure count');
+  eq(counts.files.length, 2, 'the same file touched twice is one file');
+  eq(counts.files.join(','), '/a/b/art.js,/a/b/theme.js', 'files keep first-seen order');
+  eq(counts.names.join(','), 'art.js,theme.js', 'names are basenames — a path does not fit one line');
+  eq(counts.commands.join(','), 'ls,node', 'only the binary of a command is reported');
+  results.push('summary counts');
+}
+
+// 11. The engine reports a tool once, AFTER it ran, with no `phase` (see
+//     vendor/desktop/lib/local/engine.js). That shape used to match neither
+//     branch: `phase==='run'` was false, so the code called resolveToolDone,
+//     which only ever matches a `phase:'run'` row, found none and returned
+//     null — pushing nothing. A turn could run five commands and show no tool
+//     activity at all.
+{
+  const { rows } = await drive(['go\r'], {
+    ask: async (_prompt, { presenter }) => {
+      presenter.tool({ name: 'Bash', args: { command: 'ls' }, ok: true });
+      presenter.tool({ name: 'Write', args: { file_path: '/a/b/art.js' }, ok: true });
+      presenter.text('done');
+      return { text: 'done' };
+    },
+  });
+  const tools = rows.filter((r) => r.role === 'tool');
+  eq(tools.length, 2, 'a phase-less tool event still gets a transcript row');
+  eq(tools[0].phase, 'done', 'and is recorded as finished, since it already ran');
+  eq(tools[0].ok, true, 'carrying the outcome the engine reported');
+  assert(tools[0].label.startsWith('Ran 1'), 'numbered in the reference vocabulary');
+  const summary = rows[rows.length - 1];
+  eq(summary.role, 'summary', 'the summary is the LAST row of the turn');
+  eq(summary.counts.tools, 2, 'counting both tools');
+  eq(summary.counts.files.length, 1, 'and the one file written');
+  results.push('phase-less tool rows + summary tail');
+}
+
+// 12. The summary is the bottom of the screen, and reads as one line.
+{
+  const counts = chatflow.summarizeTurnTools([
+    { ok: true, args: { command: 'ls' } },
+    { ok: true, args: { file_path: '/a/b/art.js' } },
+    { ok: false, args: { file_path: '/a/b/theme.js' } },
+  ]);
+  const line = plain(chatflow.rowLines({ role: 'summary', counts }, 80, { light: false }));
+  assert(line.includes('3 commands'), `the summary counts the commands (got ${JSON.stringify(line)})`);
+  assert(line.includes('2 files changed'), 'and the files changed');
+  assert(line.includes('1 failed'), 'and surfaces failures, which the tool rows only implied');
+  assert(!line.includes('\n'), 'the whole summary is one line — it is the thing you read without scrolling');
+  results.push('summary line');
+}
+
+// 13. A turn that used no tools adds no summary: there is no delta to report,
+//     and a "0 commands" row under every plain answer is noise.
+{
+  const { rows } = await drive(['hi\r']);
+  eq(rows.filter((r) => r.role === 'summary').length, 0, 'a tool-less turn pushes no summary row');
+  results.push('summary is conditional');
+}
+
+// 14. The summary wraps nothing and never throws on a malformed event: hosts
+//     vary, and a bad args blob must not take down the turn's tail.
+{
+  const counts = chatflow.summarizeTurnTools([
+    { args: null },
+    { args: 'not-an-object' },
+    {},
+    { ok: true, args: { command: '   ' } },
+    { ok: true, args: {} },
+  ]);
+  eq(counts.tools, 5, 'events with useless args are still counted');
+  eq(counts.files.length, 0, 'and contribute no files');
+  eq(counts.commands.length, 0, 'and no commands — a blank command is not a command');
+  const line = plain(chatflow.rowLines({ role: 'summary', counts }, 80, { light: false }));
+  assert(line.includes('5 commands'), 'the line still renders, showing only what is known');
+  assert(!line.includes('files changed') && !line.includes('failed'), 'with no invented detail');
+  results.push('summary tolerates junk');
+}
+
 console.log('CLI chatflow test passed');
 for (const r of results) console.log(`  ✓ ${r}`);

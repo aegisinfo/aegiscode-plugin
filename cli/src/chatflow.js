@@ -132,6 +132,50 @@ function resolveToolDone(transcript, t) {
 }
 
 /**
+ * Fold one turn's tool events into the counts the end-of-turn summary prints.
+ *
+ * Deterministic and purely local, on purpose. The tail of every turn is the
+ * wrong place to spend a model call: it would bill the reader for a restatement
+ * of work they have already paid to have done, and it would arrive after a
+ * network round-trip instead of at the instant the turn ends. The data needed
+ * is already in the tool events — the engine hands us `ok` on every call and
+ * the args name every file and command — so the summary is arithmetic, not
+ * inference.
+ *
+ * @param {Array<{ok?:boolean,args?:object}>} tools This turn's tool events, in order.
+ * @returns {{tools:number,failed:number,files:string[],names:string[],more:number,commands:string[]}}
+ */
+function summarizeTurnTools(tools, { maxNames = 3 } = {}) {
+  const files = [];
+  const commands = [];
+  let failed = 0;
+  for (const tool of tools || []) {
+    if (!tool) continue;
+    if (tool.ok === false) failed += 1;
+    const args = tool.args;
+    if (!args || typeof args !== 'object') continue;
+    const file = args.file_path || args.path || args.notebook_path;
+    if (typeof file === 'string' && file && !files.includes(file)) files.push(file);
+    const cmd = args.command;
+    if (typeof cmd === 'string' && cmd.trim()) {
+      // First word only — the binary or builtin that ran, not its whole argv.
+      // "node /a/b/c.mjs --flag" reports as "node", which is what a one-line
+      // summary has room for.
+      const head = cmd.trim().split(/\s+/)[0].split('/').pop();
+      if (head && !commands.includes(head)) commands.push(head);
+    }
+  }
+  return {
+    tools: (tools || []).length,
+    failed,
+    files,
+    names: files.slice(0, maxNames).map((f) => f.split('/').pop()),
+    more: Math.max(0, files.length - maxNames),
+    commands,
+  };
+}
+
+/**
  * Finalize an assistant message's text: append a "(backend error: …)" marker
  * when the turn failed mid-stream, a single "(stopped)" marker on abort, and
  * fall back to "(no response)" for empty text. An abort wins over an error so
@@ -355,6 +399,36 @@ function rowLines(msg, cols, ctx, now = Date.now()) {
       const bits = metaBits(msg.meta, t, { omitMs: true });
       if (bits.length) line.push(span(t.dim, '  '), ...joinBits(bits, t));
     }
+    out.push(line);
+    return out;
+  }
+  if (msg.role === 'summary') {
+    // The end-of-turn delta line. Rendered as the LAST row of the turn so the
+    // bottom of the screen answers "what did that actually do?" without the
+    // reader scrolling back up through the tool rows that produced it.
+    const s = msg.counts || {};
+    if (!s.tools) return out;
+    const line = [span(t.dim, GLYPH.hook), span('', '  ')];
+    const bits = [
+      span(t.white, String(s.tools)),
+      span(t.gray, ` ${s.tools === 1 ? 'command' : 'commands'}`),
+    ];
+    if (s.files && s.files.length) {
+      bits.push(span(t.gray, ` ${GLYPH.bullet} `));
+      bits.push(
+        span(t.white, String(s.files.length)),
+        span(t.gray, ` ${s.files.length === 1 ? 'file changed' : 'files changed'}`)
+      );
+    }
+    if (s.failed) {
+      bits.push(span(t.gray, ` ${GLYPH.bullet} `));
+      bits.push(span(t.coral, `${s.failed} failed`));
+    }
+    if (s.names && s.names.length) {
+      const more = s.more ? ` +${s.more}` : '';
+      bits.push(span(t.dim, `  ${s.names.join(', ')}${more}`));
+    }
+    line.push(...bits);
     out.push(line);
     return out;
   }
@@ -591,6 +665,10 @@ async function runSession(host) {
   let verb = VERBS[0];
   let turnCount = 0;
   let toolSeq = 0;
+  // This turn's raw tool events, kept so the end-of-turn summary can report the
+  // deltas (commands run, files touched, failures) without re-reading the
+  // transcript — the rows are display state, the events are the record.
+  let turnTools = [];
   let suggestionIdx = 0;
   let scroll = 0;
   let anchorEnd = null;
@@ -730,7 +808,6 @@ async function runSession(host) {
 
   let streamedChars = 0;
   const streamedCells = () => streamedChars;
-
   // ── the turn ──
 
   const confirmTool = (info) =>
@@ -779,6 +856,7 @@ async function runSession(host) {
     startedAt = Date.now();
     streamedChars = 0;
     toolSeq = 0;
+    turnTools = [];
     verb = VERBS[turnCount % VERBS.length];
     abort = new AbortController();
     spinnerTimer = setInterval(() => {
@@ -803,6 +881,7 @@ async function runSession(host) {
       // from one that produced nothing at all.
       reasoning: () => { sawReasoning = true; },
       tool: (tool) => {
+        turnTools.push(tool);
         if (tool.phase === 'run') {
           const n = ++toolSeq;
           const prefix = tool.agent ? `${tool.agent} ▸ ` : '';
@@ -819,8 +898,27 @@ async function runSession(host) {
             },
             { follow: false }
           );
-        } else {
-          resolveToolDone(transcript, tool);
+        } else if (!resolveToolDone(transcript, tool)) {
+          // A host that reports a tool once, after it ran, never opens a
+          // `phase: 'run'` row for resolveToolDone to close — the vendored
+          // local engine does exactly this (one `tool: {name,args,ok}` frame
+          // post-execution). Falling through left the row unwritten, so the
+          // turn silently showed no tool activity at all. Record the finished
+          // tool directly instead.
+          const n = ++toolSeq;
+          push(
+            {
+              role: 'tool',
+              phase: 'done',
+              name: tool.name,
+              args: tool.args,
+              agent: tool.agent,
+              id: tool.id,
+              ok: tool.ok,
+              label: `Ran ${n} ${tool.agent ? `${tool.agent} ▸ ` : ''}${toolLabel(tool.name, n)}`,
+            },
+            { follow: false }
+          );
         }
         scheduleRender();
       },
@@ -909,6 +1007,17 @@ async function runSession(host) {
         },
         { follow: false }
       );
+      // The turn's last row: a one-line delta of what the tools actually did.
+      // Without it the tail of a tool-heavy turn was the accounting row, and
+      // the answer to "what did that change?" was only reachable by scrolling
+      // back up through the tool rows. Follows the viewport EXCEPT when the
+      // reader has scrolled up themselves — scroll is non-zero exactly when
+      // they are mid-read, and yanking them to the bottom then would undo the
+      // scroll they asked for.
+      const counts = summarizeTurnTools(turnTools);
+      if (counts.tools > 0) {
+        push({ role: 'summary', counts }, { follow: scroll === 0 });
+      }
       render();
     }
   };
@@ -1645,6 +1754,7 @@ module.exports = {
   FRAME_MS,
   toolLabel,
   resolveToolDone,
+  summarizeTurnTools,
   finalizeTurnText,
   historyPairs,
   paletteQuery,
