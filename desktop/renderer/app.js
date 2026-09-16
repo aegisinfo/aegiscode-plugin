@@ -2571,8 +2571,39 @@ async function send() {
   }
 }
 
+// ------------------------------------------------------------ scroll lift
+
+/**
+ * Toggle `body.is-scrolled` while any scrolling pane is off its top edge, so
+ * the topbar can lift off the content sliding under it (see the "scroll lift"
+ * section in style.css).
+ *
+ * This only *chooses the panes*: the listener, the per-frame coalescing and the
+ * class toggle are `attachScrollLift()` in transcript-view.js, the one owner of
+ * `scroll` listeners (see the guard at 5b in test/renderer-wiring.test.mjs). A
+ * second registration here would be a second definition of "how far down the
+ * reader is", which is how such flags silently stop agreeing.
+ *
+ * The panes are found by the classes that give them `overflow-y: auto` rather
+ * than through `els`: `.side` and `.memory-scroll` have no element ids to
+ * register, and those three classes are exactly the set the stylesheet names.
+ * The `requestFrame` wrapper (not the bare global) keeps the receiver —
+ * `requestAnimationFrame` throws when called detached from `window`.
+ */
+function installScrollLift() {
+  attachScrollLift({
+    panes: document.querySelectorAll('.messages, .side, .memory-scroll'),
+    target: document.body,
+    requestFrame: (fn) => window.requestAnimationFrame(fn),
+  });
+}
+
 // --------------------------------------------------------------------- boot
 
+/**
+ * Wire the host-facing surfaces: any listeners to the preload API and to the
+ * local element handles that need to exist for the rest of the app to respond.
+ */
 async function init() {
   try {
     renderStatus(await aegis.status());
@@ -2693,6 +2724,9 @@ async function init() {
   // Billing actions in the Status card — see startBilling()/renderBillingError().
   els.upgradePlan.addEventListener('click', () => startBilling('upgrade'));
   els.topupBtn.addEventListener('click', () => startBilling('topup'));
+
+  // Depth on the chrome while the panes are scrolled (see style.css).
+  installScrollLift();
 
   els.quickLauncherSave.addEventListener('click', saveQuickLauncherSettings);
   els.quickLauncherShortcut.addEventListener('keydown', (e) => {

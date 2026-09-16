@@ -130,6 +130,80 @@ function createTranscriptView(deps) {
 }
 
 /**
+ * The pane-scroll signal behind the UI "lift" (see the scroll-lift section in
+ * style.css): while any scrolling pane is off its top edge, the chrome around
+ * it gains depth instead of reading as a static page.
+ *
+ * Registered *here*, next to the veto, for the same reason that veto lives
+ * here and not inline: this file is the one owner of `scroll` listeners, so
+ * "the reader's scroll position" has exactly one definition. A second listener
+ * with its own idea of it is how the two drift apart — which is what
+ * test/renderer-wiring.test.mjs's 5b guard exists to prevent.
+ *
+ * The panes arrive from app.js (it knows which elements scroll); this function
+ * owns the listener, the frame coalescing and the class toggle. A `window`
+ * listener would never fire at all — html/body are `height: 100%`, so the
+ * window itself never scrolls — hence the explicit pane list.
+ *
+ * `threshold` is 4px, not 0: sub-pixel scroll positions read from a pane at
+ * rest would otherwise flicker the shadow on and off at the top.
+ */
+function attachScrollLift(deps) {
+  const d = deps || {};
+  const panes = Array.prototype.slice.call(d.panes || []);
+  const target =
+    d.target || (typeof document !== 'undefined' && document.body ? document.body : null);
+  if (!panes.length || !target || !target.classList) return null;
+
+  const schedule =
+    typeof d.requestFrame === 'function'
+      ? d.requestFrame
+      : typeof requestAnimationFrame === 'function'
+        ? requestAnimationFrame
+        : (fn) => fn();
+  const className = d.className || 'is-scrolled';
+  const threshold = typeof d.threshold === 'number' ? d.threshold : 4;
+
+  let queued = false;
+  /** Idempotent: one class toggle per frame no matter how many events fired. */
+  function sync() {
+    queued = false;
+    let lifted = false;
+    for (const pane of panes) {
+      if (pane && pane.scrollTop > threshold) {
+        lifted = true;
+        break;
+      }
+    }
+    target.classList.toggle(className, lifted);
+  }
+  function onScroll() {
+    if (queued) return;
+    queued = true;
+    schedule(sync);
+  }
+
+  for (const pane of panes) {
+    if (pane && typeof pane.addEventListener === 'function') {
+      pane.addEventListener('scroll', onScroll, { passive: true });
+    }
+  }
+  sync();
+
+  return {
+    sync: sync,
+    panes: panes,
+    unbind: () => {
+      for (const pane of panes) {
+        if (pane && typeof pane.removeEventListener === 'function') {
+          pane.removeEventListener('scroll', onScroll);
+        }
+      }
+    },
+  };
+}
+
+/**
  * Escape → the running turn's interrupt (the keyboard twin of the cancel
  * button, for the window that is too busy to aim at it).
  *
@@ -172,5 +246,5 @@ function bindEscapeInterrupt(deps) {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { createTranscriptView, bindEscapeInterrupt };
+  module.exports = { createTranscriptView, bindEscapeInterrupt, attachScrollLift };
 }

@@ -333,6 +333,88 @@ function boot({ messages, clock }) {
   assert(transcript.metrics() === null, 'metrics degrade to null without an element');
 }
 
+// ============ 2b. the UI "lift" signal (and why .messages is never smooth) ==
+{
+  const styleSrc = readFileSync(join(rendererDir, 'style.css'), 'utf8').replace(
+    /\/\*[\s\S]*?\*\//g,
+    ''
+  );
+  // `scroll-behavior: smooth` turns every programmatic `scrollTop =` into an
+  // animation. Section 2 above is exactly a loop of those assignments, so with
+  // it on `.messages` the pane would always be mid-animation toward a tail it
+  // never reaches, the scroll events would report "not at the bottom", and the
+  // reader's veto would latch itself on. Asserted as CSS because that is where
+  // the mistake is made: a one-line addition to a pane selector.
+  const smoothTargets = [...styleSrc.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter((m) => /(?:^|;)\s*scroll-behavior\s*:\s*smooth/.test(m[2]))
+    .flatMap((m) => m[1].split(',').map((s) => s.trim()));
+  assert(
+    !smoothTargets.includes('.messages'),
+    '.messages must not set scroll-behavior: smooth — follow() assigns scrollTop every ' +
+      'streaming frame, so animating those assignments stalls the transcript short of the tail'
+  );
+  for (const sel of smoothTargets) {
+    assert(
+      /^\.(side|memory-scroll)$/.test(sel),
+      `scroll-behavior: smooth added for ${sel} — only panes with no programmatic scroll path may use it`
+    );
+  }
+
+  const { attachScrollLift } = realm;
+  assert(typeof attachScrollLift === 'function', 'transcript-view.js must publish attachScrollLift');
+
+  const clock = makeFrameClock();
+  const classes = new Set();
+  const body = {
+    classList: {
+      toggle: (name, on) => (on ? classes.add(name) : classes.delete(name)),
+    },
+  };
+  const transcriptPane = new FakeElement({ scrollHeight: 5000, clientHeight: 400 });
+  const sidePane = new FakeElement({ scrollHeight: 2000, clientHeight: 900 });
+  const lift = attachScrollLift({
+    panes: [transcriptPane, sidePane],
+    target: body,
+    requestFrame: clock.requestFrame,
+  });
+
+  const opts = transcriptPane.listenerOptions('scroll');
+  assert(opts.length === 1, 'attachScrollLift registers exactly one scroll listener per pane');
+  assert(
+    opts[0] && opts[0].passive === true,
+    'the lift scroll listener is passive — it fires every frame and must never block scrolling'
+  );
+  assert(
+    !classes.has('is-scrolled'),
+    'a pane at its top edge does not lift the chrome (the 4px threshold keeps rest-state sub-pixel scroll from flickering it)'
+  );
+
+  sidePane.scrollTop = 600;
+  sidePane.dispatch({ type: 'scroll' });
+  assert(clock.pending === 1, 'a scroll schedules exactly one frame, not one per event');
+  sidePane.dispatch({ type: 'scroll' });
+  sidePane.dispatch({ type: 'scroll' });
+  assert(clock.pending === 1, 'further scroll events in the same frame coalesce into that one frame');
+  clock.flush();
+  assert(classes.has('is-scrolled'), 'scrolling any watched pane off its top edge lifts the chrome');
+
+  transcriptPane.scrollTop = 0; // the transcript is back at its top, the side pane is still down
+  transcriptPane.dispatch({ type: 'scroll' });
+  clock.flush();
+  assert(classes.has('is-scrolled'), 'the lift holds while any pane is still off its top edge');
+
+  sidePane.scrollTop = 0;
+  sidePane.dispatch({ type: 'scroll' });
+  clock.flush();
+  assert(!classes.has('is-scrolled'), 'the chrome drops back flat once every pane is at its top');
+
+  lift.unbind();
+  assert(
+    transcriptPane.listenerOptions('scroll').length === 0,
+    'unbind() removes the listeners it registered (no leak across a re-init)'
+  );
+}
+
 // ================================== 3. Escape → stopPendingTurn (interrupt) ==
 {
   const doc = new FakeTarget();

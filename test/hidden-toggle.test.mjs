@@ -50,22 +50,75 @@ const stripComments = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '');
 
 const CSS = stripComments(CSS_SRC);
 
+/** Every `display:` value declared anywhere in a declaration body. */
+const displaysIn = (body) => [...body.matchAll(/(?:^|;)\s*display\s*:\s*([^;]+)/g)].map((m) => m[1].trim());
+
 /**
- * Flat rule parse. style.css has no @media blocks (asserted below), so every
- * `selector { body }` pair is a top-level rule and no nesting model is needed.
+ * Brace-balanced split into top-level rules and at-rule blocks.
+ *
+ * A flat `selector { body }` regex cannot survive an at-rule: `@media (…) { a
+ * { … } b { … } }` yields the pseudo-selector `… } b`, and every declaration
+ * inside the block gets attributed to whichever element the regex happened to
+ * glue it to. So the scan walks braces by depth and keeps the two kinds apart.
  */
-const RULES = [...CSS.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
-  .map((m) => {
-    const selector = m[1].trim().replace(/\s+/g, ' ');
-    const body = m[2];
-    const dm = /(?:^|;)\s*display\s*:\s*([^;]+)/.exec(body);
-    return {
-      selector,
-      display: dm ? dm[1].trim() : null,
-      hiddenQualified: /\[hidden\]/.test(selector),
-    };
-  })
-  .filter((r) => r.selector && !r.selector.startsWith('@'));
+function topLevelBlocks(src) {
+  const rules = [];
+  const atRules = [];
+  let cursor = 0;
+  for (;;) {
+    const open = src.indexOf('{', cursor);
+    if (open === -1) break;
+    let depth = 0;
+    let close = open;
+    for (; close < src.length; close += 1) {
+      if (src[close] === '{') depth += 1;
+      else if (src[close] === '}') {
+        depth -= 1;
+        if (depth === 0) break;
+      }
+    }
+    const prelude = src.slice(cursor, open).trim().replace(/\s+/g, ' ');
+    const body = src.slice(open + 1, close);
+    if (prelude.startsWith('@')) atRules.push({ prelude, body });
+    else rules.push({ prelude, body });
+    cursor = close + 1;
+  }
+  return { rules, atRules };
+}
+
+const { rules: RAW_RULES, atRules: AT_RULES } = topLevelBlocks(CSS);
+
+/**
+ * At-rules are dropped rather than audited: a `display` inside a conditional or
+ * keyframe block is not an *unconditional* author rule, which is all this test
+ * reasons about. Two assertions keep that from becoming a hiding place — the
+ * at-rules here are a short, reviewed allowlist (`@keyframes` bodies hold no
+ * selectors at all; the reduce-motion block only stops animations), and no
+ * at-rule may set a `display`.
+ */
+const ALLOWED_AT_RULES = [/^@keyframes [\w-]+$/, /^@media \(prefers-reduced-motion: reduce\)$/];
+assert(
+  AT_RULES.every((r) => ALLOWED_AT_RULES.some((re) => re.test(r.prelude))),
+  `style.css gained an at-rule this parse does not reason about (${AT_RULES.map((r) => r.prelude).join(', ') || 'none'}) — ` +
+    'extend the parse or drop the rule',
+);
+for (const at of AT_RULES) {
+  const displays = displaysIn(at.body);
+  assert(
+    displays.every((v) => v === 'none'),
+    `${at.prelude} sets display (${displays.join(', ') || 'none'}) — conditional author display rules are not audited here`,
+  );
+}
+
+const RULES = RAW_RULES.map((m) => {
+  const selector = m.prelude;
+  const dm = /(?:^|;)\s*display\s*:\s*([^;]+)/.exec(m.body);
+  return {
+    selector,
+    display: dm ? dm[1].trim() : null,
+    hiddenQualified: /\[hidden\]/.test(selector),
+  };
+}).filter((r) => r.selector && !r.selector.startsWith('@'));
 
 /** Does this selector contain `#id` or `.class` as a whole token? */
 function selectorTargets(selector, { id, classes }) {
@@ -97,8 +150,6 @@ function attrsOf(tagAttrs) {
 }
 
 function main() {
-  assert(!/@media/.test(CSS), 'style.css grew an @media block — the flat rule parse in this test needs updating');
-
   // ---------------------------------------------------- elements to check
   const elements = new Map(); // id -> {id, classes}
 

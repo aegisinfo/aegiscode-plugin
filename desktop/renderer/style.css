@@ -1840,3 +1840,136 @@ label {
 .tok-variable {
   color: var(--amber);
 }
+
+/* ---------------------------------------------------------- scroll lift */
+/* "Lift": the panes scroll, the chrome around them does not, and the chrome
+   only gains depth once something has actually slid underneath it.
+
+   A flat, always-shadowed topbar reads as a static web page; a topbar that
+   stays flat while the conversation scrolls *under* it reads as a window onto
+   content. The signal is the scroll position of the panes (`body.is-scrolled`
+   is toggled by installScrollLift() in app.js — the window itself never
+   scrolls, since html/body are height:100%, so a `window` scroll listener
+   would never fire), and the topbar's `::after` is the soft edge the content
+   disappears behind.
+
+   `--surface-glass` is --surface (#12161e) at 86%: the blur needs anything
+   other than full opacity to be visible at all, while staying close enough to
+   the token that the topbar still reads as the same surface. */
+.topbar {
+  position: relative;
+  z-index: 3;
+  transition: background-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.topbar::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 20px;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    rgba(10, 14, 20, 0.6),
+    rgba(10, 14, 20, 0)
+  );
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+
+body.is-scrolled .topbar {
+  background-color: rgba(18, 22, 30, 0.86);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  backdrop-filter: blur(12px) saturate(140%);
+  box-shadow: 0 1px 0 var(--border), 0 14px 34px -22px rgba(0, 0, 0, 0.9);
+}
+
+body.is-scrolled .topbar::after {
+  opacity: 1;
+}
+
+/* The composer is the other fixed edge of the chat pane, so it lifts too.
+   `.composer` already transitions box-shadow (see the composer section), so
+   this animates with no new transition to keep in sync. */
+body.is-scrolled .composer {
+  box-shadow: 0 18px 40px -26px rgba(0, 0, 0, 0.95);
+}
+
+/* Scrollbars: thin, self-effacing, and only really visible while in use —
+   the default Chromium bar is the single most "unstyled browser" thing left
+   in the window. Firefox/Electron read the standard properties, Blink reads
+   the ::-webkit- pseudo-elements, so both spellings are needed. */
+.messages,
+.side,
+.memory-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border2) transparent;
+  overscroll-behavior: contain;
+}
+
+/* Smooth scrolling is for the panes a human drives by wheel — never `.messages`.
+   `scroll-behavior: smooth` turns *every* programmatic `scrollTop` assignment
+   into an animation, and transcript-view.js's `follow()` assigns
+   `messages.scrollTop = messages.scrollHeight` on each streaming frame. The pane
+   would then perpetually be animating toward a tail it never reaches, and the
+   `metrics()` read taken from the resulting scroll events reports "not at the
+   bottom" — which sets the reader's veto in transcript-view.js and stops the
+   transcript following at all. That is the exact symptom stream-policy.js and
+   its guards exist to prevent, so it is asserted in test/renderer-dom.test.mjs. */
+.side,
+.memory-scroll {
+  scroll-behavior: smooth;
+}
+
+.messages::-webkit-scrollbar,
+.side::-webkit-scrollbar,
+.memory-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.messages::-webkit-scrollbar-track,
+.side::-webkit-scrollbar-track,
+.memory-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.messages::-webkit-scrollbar-thumb,
+.side::-webkit-scrollbar-thumb,
+.memory-scroll::-webkit-scrollbar-thumb {
+  /* background-clip + a transparent border is what insets the thumb: the bar
+     stays 10px wide (no layout shift on hover) while the visible pill is
+     narrower than the track. */
+  background-color: var(--border);
+  background-clip: padding-box;
+  border: 3px solid transparent;
+  border-radius: 999px;
+}
+
+.messages::-webkit-scrollbar-thumb:hover,
+.side::-webkit-scrollbar-thumb:hover,
+.memory-scroll::-webkit-scrollbar-thumb:hover {
+  background-color: var(--border2);
+}
+
+.messages::-webkit-scrollbar-corner,
+.side::-webkit-scrollbar-corner,
+.memory-scroll::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Respect the OS "reduce motion" setting: the lift stays (it is information,
+   not decoration), the animation goes. */
+@media (prefers-reduced-motion: reduce) {
+  .topbar,
+  .topbar::after {
+    transition: none;
+  }
+
+  .side,
+  .memory-scroll {
+    scroll-behavior: auto;
+  }
+}
