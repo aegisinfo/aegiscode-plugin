@@ -298,6 +298,27 @@ function shortcutsGrid(cols, ctx) {
   ];
 }
 
+/**
+ * The engine's approval vocabulary — and the ONLY tokens that survive
+ * `respondApproval` (see cli/vendor/desktop/lib/local/engine.js). It accepts
+ * 'once' and 'session' and coerces EVERYTHING ELSE to 'deny'.
+ *
+ * This overlay used to answer 'allow': the desktop renderer's word for "yes",
+ * not the engine's. So a user who pressed "1. Yes" was denied anyway — silently,
+ * on every mutating tool, every time. The model then read "the user denied the
+ * request" and retried with a different command, which was denied too, and the
+ * turn burned several rounds of tokens to accomplish nothing. Emitting the
+ * engine's own words is the whole fix; `test/cli-approval.test.mjs` pins it so
+ * the two vocabularies cannot drift apart again.
+ */
+const APPROVE_ONCE = 'once';
+const APPROVE_SESSION = 'session';
+const DENY_TOKEN = 'deny';
+
+/** Choice labels, in overlay order. Index maps 1:1 onto DECISIONS. */
+const APPROVAL_CHOICES = ['Yes', 'Yes, allow for this session', 'No'];
+const APPROVAL_DECISIONS = [APPROVE_ONCE, APPROVE_SESSION, DENY_TOKEN];
+
 /** The tool-approval dialog body. */
 function confirmLines(overlay, cols, ctx) {
   const t = themeOf(ctx);
@@ -322,8 +343,13 @@ function confirmLines(overlay, cols, ctx) {
     const left = active ? span(t.lavender, GLYPH.cursor) : span('', ' ');
     return [left, span(t.gray, ` ${i + 1}. `), span(active ? t.lavender : t.white, label)];
   };
-  lines.push(opt(0, 'Yes'));
-  lines.push(opt(1, 'No'));
+  const toolName = overlay.name || 'this tool';
+  APPROVAL_CHOICES.forEach((label, i) => {
+    // The session option names the tool it will stop asking about, so the
+    // blanket allow is never something the user has to infer.
+    const text = i === 1 ? `Yes, and allow ${toolName} for this session` : label;
+    lines.push(opt(i, text));
+  });
   lines.push([span('', '')]);
   lines.push([span(t.gray, 'Esc to cancel')]);
   return lines;
@@ -815,34 +841,28 @@ async function runSession(host) {
       overlay = { type: 'confirm', name: info.tool || info.name || 'tool', args: info.args || {}, sel: 0, info };
       render();
       (async () => {
+        const choose = (decision) => {
+          overlay = null;
+          render();
+          resolve(decision);
+        };
         for (;;) {
           const key = await nextKey();
           if (key.name === KEY.UP || key.name === KEY.DOWN || key.name === KEY.TAB) {
-            overlay.sel = 1 - overlay.sel;
+            const step = key.name === KEY.UP ? -1 : 1;
+            overlay.sel = (overlay.sel + step + APPROVAL_CHOICES.length) % APPROVAL_CHOICES.length;
             render();
           } else if (key.name === KEY.ENTER) {
-            const yes = overlay.sel === 0;
-            overlay = null;
-            render();
-            resolve(yes ? 'allow' : 'deny');
+            choose(APPROVAL_DECISIONS[overlay.sel] || DENY_TOKEN);
             return;
           } else if (key.name === KEY.ESC || key.name === KEY.CTRL_C) {
-            overlay = null;
-            render();
-            resolve('deny');
+            choose(DENY_TOKEN);
             return;
           } else if (key.name === 'char') {
             const ch = String(key.ch).trim();
-            if (ch === '1') {
-              overlay = null;
-              render();
-              resolve('allow');
-              return;
-            }
-            if (ch === '2') {
-              overlay = null;
-              render();
-              resolve('deny');
+            const idx = Number(ch) - 1;
+            if (Number.isInteger(idx) && idx >= 0 && idx < APPROVAL_DECISIONS.length) {
+              choose(APPROVAL_DECISIONS[idx]);
               return;
             }
           }
@@ -1765,6 +1785,10 @@ module.exports = {
   statusLine,
   shortcutsGrid,
   confirmLines,
+  // The approval vocabulary, exported so a test can assert the CLI only ever
+  // answers with tokens the engine actually honours (see APPROVAL_CHOICES).
+  APPROVAL_CHOICES,
+  APPROVAL_DECISIONS,
   rowLines,
   transcriptLines,
   inputPreviewText,

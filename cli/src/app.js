@@ -65,6 +65,26 @@ function defaultSystemPrompt() {
   return _defaultSystem || undefined;
 }
 
+// The engine accepts exactly 'once' | 'session' and coerces anything else to
+// 'deny' (vendor/desktop/lib/local/engine.js → respondApproval). Bridging the
+// vocabularies here, rather than trusting every prompter to speak the engine's
+// dialect, is what stops an approval from silently becoming a denial. The
+// failure mode is invisible from the outside: the tool is refused, the model
+// is told the user declined, and it retries against a gate that can only ever
+// say no — the turn burns its whole budget.
+//
+// Module scope on purpose: this must exist before createApp() runs, because it
+// is re-exported for the conformance tests. A nested copy here previously left
+// the export binding undefined and threw on require.
+function normalizeDecision(decision) {
+  const v = typeof decision === 'string' ? decision.trim().toLowerCase() : '';
+  if (v === 'session') return 'session';
+  if (v === 'once' || v === 'allow' || v === 'yes' || v === 'approve' || v === 'approved') {
+    return 'once';
+  }
+  return 'deny';
+}
+
 function createApp(options = {}) {
   const opts = {
     model: null,
@@ -453,6 +473,8 @@ function createApp(options = {}) {
       return Promise.resolve('deny');
     };
 
+    // Vocabulary bridging lives at module scope (see normalizeDecision) so the
+    // same function the tests import is the one the live path calls.
     const onDelta = (chunk) => {
       if (!chunk) return;
       if (chunk.reasoning) {
@@ -481,7 +503,7 @@ function createApp(options = {}) {
         const decide = p.approval || approvalPrompter || denyNoPrompter;
         Promise.resolve(decide(info))
           .catch(() => 'deny')
-          .then((decision) => engine.respondApproval(info.id, decision));
+          .then((decision) => engine.respondApproval(info.id, normalizeDecision(decision)));
       }
     };
 
@@ -1366,4 +1388,4 @@ function createApp(options = {}) {
   };
 }
 
-module.exports = { createApp, VERSION };
+module.exports = { createApp, VERSION, normalizeDecision };
