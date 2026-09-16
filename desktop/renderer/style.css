@@ -1143,17 +1143,69 @@ body.memory-open {
   min-height: 34px;
 }
 
-.flow-toggle {
+/* Composer mode strip: the tool-approval mode hoisted out of the Settings
+   column and under the chat bar, so it is readable while typing. Painted only
+   from renderConfirmMode()/renderAutoModeChip() in app.js. */
+.composer-modes {
   display: flex;
   align-items: center;
-  gap: 5px;
-  margin-top: 0;
-  font-size: 11px;
+  gap: 10px;
+  padding: 0 16px 10px;
+  min-height: 22px;
+}
+
+.mode-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.7;
   color: var(--text2);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
 }
+
+.mode-chip:hover:not(:disabled) {
+  border-color: var(--border2);
+  color: var(--text);
+}
+
+.mode-chip:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.mode-chip .mode-dot {
+  font-size: 8px;
+  color: var(--text3);
+}
+
+/* Auto mode is the state worth noticing — tools run unattended — so it takes
+   the accent colour and a lit dot; "ask before tools" stays deliberately
+   quiet, because the safe state should not look like the exciting one. */
+.mode-chip.is-auto {
+  color: var(--teal);
+  border-color: var(--teal);
+}
+
+.mode-chip.is-auto .mode-dot {
+  color: var(--teal);
+  text-shadow: 0 0 6px var(--teal);
+}
+
+.composer-modes .hint {
+  font-size: 10.5px;
+  color: var(--text3);
+  margin: 0;
+}
+
+
 
 .max-tokens-row {
   display: flex;
@@ -1211,6 +1263,18 @@ label[hidden] {
    above: `display: flex` here needs an explicit [hidden] override too. */
 .autonomous-controls[hidden] {
   display: none;
+}
+
+.flow-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 0;
+  font-size: 11px;
+  color: var(--text2);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
 }
 
 .flow-toggle input {

@@ -304,6 +304,23 @@
           <button type="submit" id="send">Send</button>
         </div>
       </form>
+      <!-- Mode strip: the same switch as Settings → Tool approvals, hoisted
+           directly under the chat bar so the current mode is readable while
+           typing and one click from the other. Both controls are painted from
+           renderConfirmMode() in app.js, so they cannot disagree. -->
+      <div class="composer-modes">
+        <button
+          type="button"
+          id="auto-mode-toggle"
+          class="mode-chip"
+          aria-pressed="false"
+          title="Auto mode lets the agent run exec, writeFile and editFile without asking. Click to switch, or set it in Settings → Tool approvals."
+        >
+          <span class="mode-dot" aria-hidden="true">●</span>
+          <span id="auto-mode-label">ask before tools</span>
+        </button>
+        <span class="hint" id="auto-mode-hint"></span>
+      </div>
     </section>
   </main>
 

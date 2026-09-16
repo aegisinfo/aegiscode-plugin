@@ -91,6 +91,9 @@ const ELEMENT_IDS = {
   quickLauncherHint: 'quick-launcher-hint',
   confirmMode: 'confirm-mode-toggle',
   confirmModeHint: 'confirm-mode-hint',
+  autoMode: 'auto-mode-toggle',
+  autoModeLabel: 'auto-mode-label',
+  autoModeHint: 'auto-mode-hint',
   sessionsRefresh: 'sessions-refresh',
   sessionsExport: 'sessions-export',
   sessionsList: 'sessions-list',
@@ -690,6 +693,36 @@ function renderConfirmMode(status) {
   els.confirmModeHint.textContent = enabled
     ? 'On — exec, writeFile and editFile ask for your approval before they run.'
     : 'Off — the agent runs exec, writeFile and editFile without asking.';
+  renderAutoModeChip(enabled);
+}
+
+/**
+ * Paint the composer's mode strip from the *same* boolean as the Settings
+ * switch. "Auto mode" is simply the absence of confirmation, so the chip is
+ * the inverse of `confirmMode`; deriving it here — instead of letting the chip
+ * keep its own copy — is what stops one click from leaving the two controls
+ * disagreeing about what the app is about to do.
+ *
+ * The caption always names both the current state and the setting that owns
+ * it, because "how do I change this?" is the only reason the strip exists.
+ *
+ * Deliberately does not touch `disabled`: `saveConfirmMode` raises that around
+ * the await and must be the one to lower it, or a repaint mid-save would leave
+ * the chip permanently unclickable.
+ */
+function renderAutoModeChip(confirming) {
+  if (!els.autoMode) return;
+  const auto = !confirming;
+  els.autoMode.setAttribute('aria-pressed', auto ? 'true' : 'false');
+  els.autoMode.classList.toggle('is-auto', auto);
+  if (els.autoModeLabel) {
+    els.autoModeLabel.textContent = auto ? 'auto mode' : 'ask before tools';
+  }
+  if (els.autoModeHint) {
+    els.autoModeHint.textContent = auto
+      ? 'on — tools run without asking. Click to require approval.'
+      : 'off — click for auto mode, or use Settings → Tool approvals.';
+  }
 }
 
 /** Read the persisted value. Called on boot (the Settings pane is a single
@@ -711,14 +744,19 @@ async function loadConfirmMode() {
 async function saveConfirmMode(enabled) {
   if (!els.confirmMode) return;
   els.confirmMode.disabled = true;
+  if (els.autoMode) els.autoMode.disabled = true;
   try {
     renderConfirmMode(await aegis.setConfirmMode(enabled));
   } catch (err) {
     els.confirmMode.checked = !enabled;
     els.confirmModeHint.textContent =
       `save failed: ${err && err.message ? err.message : err}`;
+    // Repaint the strip from the value that survived, so a failed write does
+    // not leave the chip advertising a mode the app never entered.
+    renderAutoModeChip(els.confirmMode.checked);
   } finally {
     els.confirmMode.disabled = false;
+    if (els.autoMode) els.autoMode.disabled = false;
   }
 }
 
@@ -1639,6 +1677,26 @@ function addFlowLane(spec) {
   return lane;
 }
 
+/**
+ * The element a streaming turn paints into, recreated if it is missing.
+ *
+ * `setBusy(false)` removes the row and nulls it, and a late chunk can still
+ * land after that (a stray delta from a superseded turn, or the tail of a
+ * stream that resolved while the next one was arming). Every handler below
+ * used to read `if (pendingEl) { … }` and silently drop the chunk when it was
+ * null. For text that is cosmetic. For an `{ approval }` chunk it is not: the
+ * engine is blocked on a promise that only `models.respondApproval` can
+ * settle, so a dropped card left the tool round waiting on a decision the user
+ * was never shown — an unanswerable hang that only ended at the turn timeout.
+ * Recreating the row costs one empty bubble and makes the chunk undroppable.
+ */
+function ensurePendingRow() {
+  if (pendingEl) return pendingEl;
+  pendingEl = addMessage('assistant', '');
+  pendingEl.classList.remove('pending');
+  return pendingEl;
+}
+
 function setBusy(busy, { cancellable } = {}) {
   els.send.disabled = busy;
   els.prompt.disabled = busy;
@@ -1666,6 +1724,14 @@ function setBusy(busy, { cancellable } = {}) {
 }
 
 /**
+ * Longest argument shown on a tool-activity line before it is elided. The
+ * container is `white-space: nowrap` with a column flex parent, so an
+ * unbounded `command` used to widen the row and shove the transcript
+ * horizontally on a long pipeline.
+ */
+const TOOL_LABEL_MAX = 72;
+
+/**
  * One display line for a completed tool call (`onDelta`'s `{ tool: {name,
  * args, ok} }` chunk — see desktop/lib/local/engine.js). Fires after the tool
  * already ran, so this is a retrospective log line, not a live spinner.
@@ -1676,10 +1742,18 @@ function toolActivityLabel(tool) {
   const a = args || {};
   if (name === 'task') {
     const kind = a.subagent_type && a.subagent_type !== 'general' ? a.subagent_type : 'general';
-    return `${mark} task → ${a.description || 'subagent'} (${kind})`;
+    return `→ task ▸ ${a.description || 'subagent'} (${kind}) ${mark}`;
   }
-  const detail = a.file_path || a.path || a.pattern || (a.command ? a.command.slice(0, 60) : '') || '';
-  return `${mark} ${name}${detail ? `(${detail})` : ''}`;
+  // The command *is* the answer to "what is it doing?", so it leads the line
+  // behind an arrow and is what the eye lands on. `file_path` (Read/Edit/
+  // Write) and `command` (exec) are the two that matter; the rest are
+  // fallbacks for the remaining tool schemas. Collapse newlines first — a
+  // multi-line command would otherwise push the log line to two rows and
+  // `white-space: nowrap` (see .tool-activity) would clip the second.
+  const raw = a.file_path || a.path || a.command || a.pattern || a.query || a.description || '';
+  const flat = String(raw).replace(/\s+/g, ' ').trim();
+  const shown = flat.length > TOOL_LABEL_MAX ? `${flat.slice(0, TOOL_LABEL_MAX - 1)}…` : flat;
+  return `→ ${name}${shown ? ` ${shown}` : ''} ${mark}`;
 }
 
 /** Append one tool-activity line to `row`, creating the container on first use. */
@@ -2478,22 +2552,20 @@ async function send() {
       return;
     }
     if (chunk && chunk.approval) {
-      if (pendingEl) {
-        pendingEl.classList.remove('pending');
-        renderApprovalCard(pendingEl, chunk.approval, '.body');
-        // Forced on purpose: the turn is blocked until this is answered, so
-        // the card has to be brought into view even if the reader scrolled up.
-        stickToBottom({ force: true });
-      }
+      const row = ensurePendingRow();
+      row.classList.remove('pending');
+      renderApprovalCard(row, chunk.approval, '.body');
+      // Forced on purpose: the turn is blocked until this is answered, so
+      // the card has to be brought into view even if the reader scrolled up.
+      stickToBottom({ force: true });
       return;
     }
     if (chunk && chunk.tool) {
       toolLog.push(chunk.tool);
-      if (pendingEl) {
-        pendingEl.classList.remove('pending');
-        appendToolActivity(pendingEl, chunk.tool, 'tool-activity', '.body');
-        stickToBottom();
-      }
+      const row = ensurePendingRow();
+      row.classList.remove('pending');
+      appendToolActivity(row, chunk.tool, 'tool-activity', '.body');
+      stickToBottom();
       return;
     }
     const delta =
@@ -2740,6 +2812,16 @@ async function init() {
   // what the main process stored — see saveConfirmMode.
   if (els.confirmMode) {
     els.confirmMode.addEventListener('change', () => saveConfirmMode(els.confirmMode.checked));
+  }
+
+  // The composer chip drives the same switch. It reads the *painted* checkbox
+  // (not a cached flag) so the chip and the Settings card can never drift, and
+  // it goes through saveConfirmMode so both are repainted from what main
+  // actually stored.
+  if (els.autoMode) {
+    els.autoMode.addEventListener('click', () => {
+      if (els.confirmMode) saveConfirmMode(!els.confirmMode.checked);
+    });
   }
 
   els.composer.addEventListener('submit', (e) => {
