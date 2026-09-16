@@ -664,9 +664,19 @@ function createClient(opts = {}) {
     return apiGet('/api/token-bank/balance');
   }
 
-  /** Start a token-bank top-up; resolves to { url } for the payment page. */
+  /** Start a token-bank top-up; resolves to { url } for the payment page.
+   *  aegis1 requires a signed-in account (403/401 without a key) and rejects
+   *  an amount outside 2..1000 EUR with 400. */
   async function tokenBankTopup(amountEur) {
     return apiPost('/api/token-bank/topup', { amount_eur: amountEur });
+  }
+
+  /** Start a plan checkout; resolves to { url } for Stripe's hosted page.
+   *  aegis1 `/api/billing/checkout` is deliberately public (the Stripe page
+   *  collects the email), so this works with no key configured — but answers
+   *  503 `setup_required` while the price id is unset on the server. */
+  async function billingCheckout() {
+    return apiPost('/api/billing/checkout', {});
   }
 
   async function byokStatus() {
@@ -797,6 +807,7 @@ function createClient(opts = {}) {
     listModels,
     tokenBankBalance,
     tokenBankTopup,
+    billingCheckout,
     byokStatus,
     byokSet,
     getMemoryToken,

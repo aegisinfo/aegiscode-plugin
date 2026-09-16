@@ -79,6 +79,14 @@ const stubClient = {
   async tokenBankBalance() {
     return { balance: 100 };
   },
+  async billingCheckout() {
+    calls.push(['billingCheckout']);
+    return { url: 'https://checkout.stripe.com/c/smoke' };
+  },
+  async tokenBankTopup(amountEur) {
+    calls.push(['tokenBankTopup', amountEur]);
+    return { url: 'https://checkout.stripe.com/c/topup' };
+  },
   async byokStatus() {
     return { keys: [] };
   },
@@ -119,6 +127,7 @@ const stubClient = {
 };
 
 const EXPECTED = [
+  'billingCheckout',
   'byokSet',
   'byokStatus',
   'chatCompletion',
@@ -135,6 +144,7 @@ const EXPECTED = [
   'setApiKey',
   'status',
   'tokenBankBalance',
+  'tokenBankTopup',
   'verifyApiKey',
   'verifyToken',
 ];
@@ -384,6 +394,78 @@ try {
   // section 2), the method still resolves safely rather than throwing.
   const noOpenerResult = await dispatch.openExternal({ url: 'https://example.com' });
   assert(noOpenerResult.ok === false, 'no injected opener resolves ok:false, never throws');
+
+  // 7c. Billing (plan upgrade + token-bank top-up). aegis1 creates a Stripe
+  //     checkout session and answers `{ url }`; the renderer hands that URL to
+  //     openExternal. Both entries must RESOLVE a shaped result: invoke()
+  //     carries only the message STRING across the boundary, so a rejection
+  //     would strip err.status/err.data and the renderer could no longer tell
+  //     a free-plan cap from a missing key from Stripe not being configured.
+  const checkoutResult = await dispatch.billingCheckout();
+  assert(checkoutResult.ok === true, 'a created checkout session resolves ok:true');
+  assert(
+    checkoutResult.url === 'https://checkout.stripe.com/c/smoke',
+    'the Stripe URL is handed to the renderer to open externally'
+  );
+  assert(
+    calls.some((c) => c[0] === 'billingCheckout'),
+    'billingCheckout reaches the shared client'
+  );
+
+  const topupCall = await dispatch.tokenBankTopup({ amountEur: 25 });
+  assert(
+    topupCall.ok === true && topupCall.url === 'https://checkout.stripe.com/c/topup',
+    'a top-up resolves with its checkout URL'
+  );
+  const topupSeen = calls.filter((c) => c[0] === 'tokenBankTopup').pop();
+  assert(
+    topupSeen && topupSeen[1] === 25,
+    `the chosen amount reaches the client unwrapped (got ${topupSeen && topupSeen[1]})`
+  );
+
+  // The failure modes, driven through the real dispatcher: a 402 free-plan cap
+  // must arrive as upgrade metadata, a 503 setup_required as a flag, and a
+  // failed call must never hand the renderer a URL to open.
+  const billingFailClient = {
+    ...stubClient,
+    async billingCheckout() {
+      const err = new Error('free session limit reached');
+      err.status = 402;
+      err.data = {
+        error: 'free_session_limit_reached',
+        upgradeUrl: 'https://aegiscloud.org/subscribe',
+        tokensUsed: 12,
+        tokenLimit: 10,
+      };
+      throw err;
+    },
+    async tokenBankTopup() {
+      const err = new Error('billing is not configured on this server');
+      err.status = 503;
+      err.data = { error: 'billing_unavailable', setup_required: true };
+      throw err;
+    },
+  };
+  const failingDispatch = createIpcDispatch(billingFailClient);
+  const capped = await failingDispatch.billingCheckout();
+  assert(
+    capped.ok === false && capped.status === 402,
+    'a 402 resolves ok:false carrying its status'
+  );
+  assert(
+    capped.upgrade && capped.upgrade.url === 'https://aegiscloud.org/subscribe',
+    'the cap carries the upgrade URL through IPC'
+  );
+  assert(
+    capped.upgrade.used === 12 && capped.upgrade.limit === 10,
+    'the cap carries the quota numbers'
+  );
+  const unconfigured = await failingDispatch.tokenBankTopup({ amountEur: 5 });
+  assert(
+    unconfigured.ok === false && unconfigured.setupRequired === true,
+    'a 503 setup_required is surfaced as a flag, not a string to match'
+  );
+  assert(unconfigured.url === null, 'a failed billing call yields no URL to open');
 
   // 8. Discovery lane (D2.2): the horizontal chat-flow track. The lane is
   //    built in the renderer, so assert the wiring that makes it possible —
