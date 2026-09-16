@@ -49,7 +49,7 @@ async function chat({
   messages,
   system,
   prompt,
-  maxTokens = 4096,
+  maxTokens,
   temperature,
   tools,
   toolChoice,

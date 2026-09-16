@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * The budget control, in both hosts.
+ * Effort is the budget control, in both hosts — and nothing else is.
  *
  * Aegis Cloud sizes each call server-side from `effort` (aegis1
  * services/pool_brain.py: the ladder is low/medium/high → 16384/32768/65536
  * tokens *total* across the worker fan-out + synthesis pass). Neither host
- * wired that up:
+ * wired that up at first:
  *
  *   - the desktop showed a "Max tokens" dropdown, read it on every send, and
  *     the server raised it to the ladder anyway — so the number on screen was
@@ -16,9 +16,13 @@
  *     it on the wire, while its default was a *pin* on the top rung — the most
  *     expensive turn it could make, as the default, for every user.
  *
- * Static half: the renderer's control swap is real (functions exist, are
- * called, and the markup + CSS can actually hide a row). The behavioural half
- * lives in test/local-engine.test.mjs (effort travels, workers do not),
+ * The dropdown is now removed rather than repaired, because the question it
+ * asked — how long will the answer be? — has no answer before the answer
+ * exists. Static half: the row is gone from markup and CSS, no dead element
+ * handles or clamps survive in app.js, and send() derives its budget from the
+ * rung through budgetFor() (whose value table is audited in test/budget.test.mjs
+ * against the engine's own copy). The behavioural half lives in
+ * test/local-engine.test.mjs (effort travels, workers do not),
  * test/client.test.mjs (no invented token ceiling) and test/cli-run.test.mjs
  * (a one-shot turn sends no cap unless asked).
  */
@@ -40,55 +44,79 @@ function assert(cond, msg) {
   if (!cond) throw new Error(`ASSERT FAILED: ${msg}`);
 }
 
-// ── 1. The renderer has one budget control, and it follows the class ────────
+// ── 1. One budget control, and it follows the class ─────────────────────────
 assert(/function updateBudgetControls\s*\(/.test(app), 'app.js defines updateBudgetControls()');
 assert(
   /updateBudgetControls\s*\(\s*cls\s*\)/.test(app),
-  'loadModels() applies the budget control for the class it just loaded'
+  'loadModels() applies the budget surface for the class it just loaded'
 );
 assert(
   /updateBudgetControls\s*\(\s*els\.classSelect\.value\s*\)/.test(app),
-  'the class-change handler applies it synchronously, without waiting for the model list'
+  'the class-change handler repaints it synchronously, without waiting for the model list'
 );
 assert(/function effortFor\s*\(/.test(app), 'app.js defines effortFor()');
+assert(
+  !/effortFor\(\s*cls/.test(app),
+  'effortFor() takes no class: every class sizes from the rung now, not just the pooled one'
+);
+assert(/id="budget-hint"/.test(html), 'the markup carries the line that states what the rung buys');
 
-// ── 2. The markup offers both, and neither is shown for the wrong class ─────
+// ── 2. The max-tokens control is gone from every layer ─────────────────────
+assert(!/max-tokens-row/.test(html), 'index.html no longer declares a max-tokens row');
+assert(!/max-tokens-row/.test(css), 'style.css no longer styles one');
+assert(!/id="max-tokens-row"/.test(html), 'and no element keeps the id');
+assert(
+  !/els\.maxTokens|applyMaxTokensClamp|maxTokensAdaptive|MAX_TOKENS_KEY|MAX_TOKENS_ADAPTIVE_KEY/.test(app),
+  'no dead element handle, clamp or storage key survives in app.js'
+);
+assert(
+  !/parseInt\(els\.maxTokens/.test(app) && !/\|\|\s*4096/.test(app),
+  'send() no longer reads a dropdown value or invents a 4096 fallback'
+);
+assert(
+  !/maxTokensCeiling\(meta\)/.test(app) || /maxTokensCeiling\(modelMeta\.get\(/.test(app),
+  'the ceiling is read from model metadata for display, not from a control'
+);
+
+// The row that remains is never hidden: with nothing to swap it for, a `hidden`
+// attribute (or the old class-swap override in CSS) would be a latent bug.
 assert(/id="effort-row"/.test(html), 'index.html carries an #effort-row');
-assert(/id="max-tokens-row"/.test(html), 'and the #max-tokens-row it replaces');
 assert(
-  /<div class="max-tokens-row" id="effort-row" hidden>/.test(html),
-  '#effort-row starts hidden — it must not show before the class is known'
+  !/id="effort-row"[^>]*hidden/.test(html),
+  '#effort-row is always on screen — there is no second control to show instead'
 );
-// The hide has to actually work: `.max-tokens-row { display: flex }` is an
-// author rule and outranks the UA stylesheet's `[hidden] { display: none }`,
-// so the attribute alone is a no-op. (test/hidden-toggle.test.mjs audits this
-// too; asserted here as well because THIS feature depends on it directly —
-// without the override both controls stay on screen at once.)
 assert(
-  /\.max-tokens-row\[hidden\][\s\S]{0,40}display:\s*none/.test(css),
-  'a .max-tokens-row[hidden] override exists, so hiding the row really hides it'
+  /<select id="effort-select">[\s\S]*?<option value="auto"/.test(html),
+  "the effort control offers 'auto' — the default state has to be selectable"
+);
+assert(/\.budget-row\s*\{[\s\S]{0,60}display:\s*flex/.test(css), '.budget-row is laid out like the row it replaced');
+
+// budget.js has to be loaded BEFORE app.js: app.js reads budgetFor /
+// EFFORT_TOKEN_BUDGET / DEEPSEEK_REASONING_MODEL_RE off the global scope those
+// classic scripts share, and a later <script> would leave all three undefined —
+// a ReferenceError inside updateBudgetControls, i.e. a dead UI on model change.
+assert(/<script src="budget\.js"><\/script>/.test(html), 'index.html loads budget.js');
+assert(
+  html.indexOf('src="budget.js"') < html.indexOf('src="app.js"'),
+  'budget.js loads before app.js'
 );
 
-// ── 3. The pooled class sends effort, and no token cap ──────────────────────
+// ── 3. send() states the budget it derived, and no cap of its own ──────────
 assert(
-  /cls === AUTONOMOUS_CLASS\s*\?\s*undefined[\s\S]{0,80}parseInt\(els\.maxTokens\.value/.test(app),
-  'the Aegis class sends no max_tokens of its own; other classes keep the dropdown'
+  /const maxTokens = budgetFor\(cls, model, undefined, effort\)/.test(app),
+  'send() derives the budget from the rung through budgetFor()'
 );
 assert(
-  /const effort = effortFor\(cls\)/.test(app),
-  'effort is resolved through effortFor(cls), not read straight off the control'
+  /const effort = effortFor\(\)/.test(app),
+  'effort is resolved through effortFor(), not read straight off the control'
 );
 assert(
   !/const effort = autonomous \?/.test(app),
-  'effort is no longer gated on the autonomous checkbox'
+  'effort is not gated on the autonomous checkbox'
 );
 assert(
-  /els\.autonomousEffort\.value === 'auto'|!== 'auto'/.test(app),
+  /els\.effortSelect\.value === 'auto'|value !== 'auto'/.test(app),
   "effortFor() treats the 'auto' row as 'no rung pinned'"
-);
-assert(
-  /id="autonomous-effort"[\s\S]*?<option value="auto"/.test(html),
-  "the effort control offers 'auto' — the default state has to be selectable"
 );
 // An empty Workers field is the client saying "size the fan-out yourself"
 // (parse_brain_request's auto path). A hardcoded value here made every turn a
@@ -139,5 +167,5 @@ assert(
 );
 
 console.log(
-  'Effort-budget tests passed: renderer control swap wired, pooled class sends effort not a cap, CLI effort on the wire.'
+  'Effort-budget tests passed: the max-tokens control is gone, effort sizes every class, and CLI effort is on the wire.'
 );

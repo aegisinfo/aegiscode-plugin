@@ -13,10 +13,13 @@
  * selection, routed in the main process. If this file grows engine logic it is
  * wrong.
  *
- * `maxTokensCeiling`/`FLAT_CEILING` come from max-tokens.js and `usageTokens`
- * from usage.js, sibling classic scripts loaded before this one (see
- * index.html) so the per-model ceiling math and the token-usage → displayed
- * number mapping stay unit-testable without window.aegis/window.models.
+ * `budgetFor`/`maxTokensCeiling`/`FLAT_CEILING`/`EFFORT_TOKEN_BUDGET` come from
+ * budget.js and `usageTokens` from usage.js, sibling classic scripts loaded
+ * before this one (see index.html). There is no max-tokens control on this
+ * surface at all: the ceiling is display-only (what a model says its own output
+ * limit is, reported in the Model hint) and `budgetFor` answers — from the
+ * Effort rung — what a request actually travels with. The token-usage →
+ * displayed-number mapping stays unit-testable without window.aegis/models.
  */
 
 // Everything below runs inside an IIFE. preload.js's contextBridge.exposeInMainWorld
@@ -72,15 +75,11 @@ const ELEMENT_IDS = {
   modelSelect: 'model-select',
   modelPreset: 'model-preset',
   modelInput: 'model-input',
-  maxTokens: 'max-tokens',
-  maxTokensLabel: 'max-tokens-label',
-  maxTokensRow: 'max-tokens-row',
-  maxTokensAdaptive: 'max-tokens-adaptive',
-  effortRow: 'effort-row',
+  budgetHint: 'budget-hint',
   autonomousToggle: 'autonomous-toggle',
   autonomousToggleWrap: 'autonomous-toggle-wrap',
   autonomousControls: 'autonomous-controls',
-  autonomousEffort: 'autonomous-effort',
+  effortSelect: 'effort-select',
   autonomousWorkers: 'autonomous-workers',
   modelHint: 'model-hint',
   settingsList: 'settings-list',
@@ -137,10 +136,12 @@ for (const [prop, id] of Object.entries(ELEMENT_IDS)) {
 }
 
 const CLASS_KEY = 'aegis.class';
-const MAX_TOKENS_KEY = 'aegis.maxTokens';
-const MAX_TOKENS_ADAPTIVE_KEY = 'aegis.maxTokensAdaptive';
 const AUTONOMOUS_KEY = 'aegis.autonomous';
-const AUTONOMOUS_EFFORT_KEY = 'aegis.autonomousEffort';
+// The budget rung. Applies to every class now that the Max tokens dropdown is
+// gone, so it is no longer stored under the autonomous-mode namespace; the old
+// key is still read once at boot so an existing install keeps its rung.
+const EFFORT_KEY = 'aegis.effort';
+const LEGACY_EFFORT_KEY = 'aegis.autonomousEffort';
 const AUTONOMOUS_WORKERS_KEY = 'aegis.autonomousWorkers';
 const EXPLORE_KEY = 'aegis.explore';
 // "Work autonomously" (pool_brain worker fan-out, aegis1 services/pool_brain.py)
@@ -173,8 +174,22 @@ const CUSTOM_MODEL_PRESETS = {
   anthropic: [
     { label: 'Anthropic — Claude Sonnet 5', baseURL: 'https://api.anthropic.com/v1', model: 'claude-sonnet-5' },
     { label: 'Anthropic — Claude Haiku 4.5', baseURL: 'https://api.anthropic.com/v1', model: 'claude-haiku-4-5' },
-    { label: 'DeepSeek — v4 Flash', baseURL: 'https://api.deepseek.com/anthropic', model: 'deepseek-v4-flash' },
-    { label: 'DeepSeek — v4 Pro', baseURL: 'https://api.deepseek.com/anthropic', model: 'deepseek-v4-pro' },
+    // DeepSeek's live API serves exactly two ids (verified against
+    // GET https://api.deepseek.com/v1/models): `deepseek-flash` — the current
+    // generation, which DeepSeek calls "Flash 4.1" — and the slow tier
+    // `deepseek-v4-pro`, retired 2026-09-14 and now served as 4.1 too. The
+    // preset that used to sit here, `deepseek-v4-flash`, is a *legacy alias*
+    // DeepSeek keeps alive only for configs already carrying it, so the picker
+    // was advertising a previous generation by its dead id. Ids and labels
+    // match aegiscodex-dev src/models.js; the base URL is DeepSeek's
+    // Anthropic-Messages transport (aegis1 services/nexus_provider/catalog.py
+    // DEEPSEEK_DEFAULT_BASE), which is why these two sit under this class and
+    // not the OpenAI-compatible one. Both ids are reasoning models: the token
+    // budget for them is the Effort rung, never a stated number (they bill
+    // hidden chain-of-thought against the same budget as the answer — see
+    // budget.js).
+    { label: 'DeepSeek — Flash 4.1', baseURL: 'https://api.deepseek.com/anthropic', model: 'deepseek-flash' },
+    { label: 'DeepSeek — V4 Pro (retired → 4.1)', baseURL: 'https://api.deepseek.com/anthropic', model: 'deepseek-v4-pro' },
   ],
 };
 // The in-app AEGIS key is stored in a reserved namespace the main process
@@ -343,11 +358,6 @@ function exploreEnabled() {
   return Boolean(box && box.checked);
 }
 
-function maxTokensAdaptive() {
-  const box = els.maxTokensAdaptive;
-  return Boolean(box && box.checked);
-}
-
 function autonomousEnabled() {
   const box = els.autonomousToggle;
   return Boolean(box && box.checked);
@@ -361,32 +371,79 @@ function updateAutonomousControlsVisibility() {
   els.autonomousControls.hidden = !(wrapVisible && autonomousEnabled());
 }
 
+// Which models get their budget from the Effort rung — because they reason
+// against their own output limit (DeepSeek counts hidden chain-of-thought
+// against the same budget as the answer) or because their wire format requires
+// the field at all (Anthropic's Messages API) — is answered in ONE place:
+// desktop/renderer/budget.js, loaded before this file, whose
+// DEEPSEEK_REASONING_MODEL_RE / REQUIRES_STATED_BUDGET / EFFORT_TOKEN_BUDGET
+// globals are read below. test/budget.test.mjs asserts that copy and
+// desktop/lib/local/engine.js answer identically, so neither can drift.
+
 /**
- * Which budget control applies to the selected class.
- *
- * Aegis Cloud is sized server-side from `effort`; the other three classes take
- * a per-call token ceiling from the dropdown. Showing both at once is what made
- * the token cap untrustworthy on the pooled class — the dropdown was displayed,
- * read on every send, and then raised by the server's effort ladder, so the
- * number beside it was never the budget the call ran on. Exactly one control is
- * on offer now, and it is the one the request actually travels with.
+ * The model id the budget control has to reason about right now: the typed id
+ * for a custom endpoint, the picker's value everywhere else.
  */
-function updateBudgetControls(cls) {
-  const pooled = cls === AUTONOMOUS_CLASS;
-  if (els.effortRow) els.effortRow.hidden = !pooled;
-  if (els.maxTokensRow) els.maxTokensRow.hidden = pooled;
-  if (els.maxTokensLabel) els.maxTokensLabel.hidden = pooled;
+function currentBudgetModel() {
+  return CUSTOM_CLASSES.has(els.classSelect.value)
+    ? els.modelInput.value.trim()
+    : els.modelSelect.value;
 }
 
 /**
- * The effort to send, or undefined for the classes the server does not size
- * from it. `auto` means "let the server infer it from the ask" — the same thing
- * the server already does for a request that names no effort, and a deliberate
- * choice rather than the old silent fall-through to the top rung.
+ * The one-line statement of what the current selection means in tokens.
+ *
+ * Written on every class/model change so the rung is never an invisible
+ * decision: "Effort: high" says nothing about the budget it buys, and the whole
+ * reason the Max tokens dropdown was removed is that the number it showed was
+ * never the number the call ran on. The ladder printed here is the one the
+ * request will actually be sized by — the engine's effort rung for a local
+ * reasoning model or an Anthropic call, the server's own fan-out ladder for the
+ * pooled class — and for the two classes that send no number at all the note
+ * says so rather than implying a cap nobody set.
  */
-function effortFor(cls) {
-  if (cls !== AUTONOMOUS_CLASS) return undefined;
-  const value = els.autonomousEffort && els.autonomousEffort.value;
+function budgetNote(cls, model) {
+  const chosen = effortFor();
+  const rung = chosen || 'high';
+  const rungText = chosen || 'auto → high';
+  if (cls === AUTONOMOUS_CLASS) {
+    // aegis1 services/pool_brain.py pass_budgets — the total across the worker
+    // fan-out + synthesis pass, which is why it is not the local table.
+    const totals = { low: 16384, medium: 32768, high: 65536 };
+    return `budget: ${totals[rung].toLocaleString()} tokens from effort (${rungText}), ` +
+      'summed across the worker fan-out by the Aegis Cloud pool — no max_tokens is sent.';
+  }
+  if (DEEPSEEK_REASONING_MODEL_RE.test(String(model || '')) || REQUIRES_STATED_BUDGET.has(cls)) {
+    const tokens = EFFORT_TOKEN_BUDGET[rung];
+    return `budget: ${tokens.toLocaleString()} tokens from effort (${rungText}) — ` +
+      'this model reasons against its own output budget, and the length of the answer ' +
+      'is not predictable from the prompt.';
+  }
+  return `no token cap is sent (effort: ${rungText}) — output length cannot be predicted ` +
+    'from the prompt, so this app states no max_tokens and the provider\'s own limit applies.';
+}
+
+/**
+ * Refresh the budget surface for the selected class + model. There is no
+ * control to swap any more (the Max tokens dropdown is gone), so this only
+ * restates what the rung buys — but it still has to run on every class and
+ * model change, because that note is the only place the number appears.
+ */
+function updateBudgetControls(cls, model) {
+  const resolved = model === undefined ? currentBudgetModel() : model;
+  if (els.budgetHint) els.budgetHint.textContent = budgetNote(cls, resolved);
+}
+
+/**
+ * The effort to send, or undefined for "no rung pinned".
+ *
+ * Sent for EVERY class and model, not just the pooled one: with no max-tokens
+ * control there is nothing else that sizes a call, and `auto` means "no rung
+ * pinned" — the engine's high default — rather than the old silent
+ * fall-through to the top rung.
+ */
+function effortFor() {
+  const value = els.effortSelect && els.effortSelect.value;
   return value && value !== 'auto' ? value : undefined;
 }
 
@@ -1943,31 +2000,6 @@ async function loadClasses() {
   await loadModels(els.classSelect.value);
 }
 
-// Disable max-tokens options above the selected model's ceiling and clamp the
-// current selection down if it no longer fits; falls back to the flat 300k
-// ceiling (all options enabled) when no per-model metadata is known. When
-// "adaptive" is on, the manual select is irrelevant — the effective value
-// (returned here, read by send()) is always the model's own ceiling — so the
-// select is disabled rather than clamped.
-function applyMaxTokensClamp(modelId) {
-  const meta = modelId ? modelMeta.get(modelId) : null;
-  const ceiling = maxTokensCeiling(meta);
-  const adaptive = maxTokensAdaptive();
-  els.maxTokens.disabled = adaptive;
-  for (const opt of els.maxTokens.options) {
-    opt.disabled = Number(opt.value) > ceiling;
-  }
-  if (!adaptive && Number(els.maxTokens.value) > ceiling) {
-    const enabled = Array.from(els.maxTokens.options).filter((o) => !o.disabled);
-    const fallback = enabled[enabled.length - 1];
-    if (fallback) {
-      els.maxTokens.value = fallback.value;
-      localStorage.setItem(MAX_TOKENS_KEY, els.maxTokens.value);
-    }
-  }
-  return ceiling;
-}
-
 async function loadModels(cls) {
   // "Work autonomously" only makes sense for the pooled AEGIS Cloud class —
   // hide it for Ollama/custom endpoints rather than showing a checkbox that
@@ -1988,7 +2020,6 @@ async function loadModels(cls) {
 
   if (custom) {
     modelMeta = new Map();
-    applyMaxTokensClamp(null);
     let cfg = { baseURL: '', configured: false, keyMask: null };
     try {
       const settings = (await models.settings.get()) || [];
@@ -2091,7 +2122,9 @@ async function loadModels(cls) {
     } else {
       hint = `${list.length} model${list.length === 1 ? '' : 's'} available.`;
     }
-    const ceiling = applyMaxTokensClamp(els.modelSelect.value);
+    // Display-only: what this model says its own output limit is. It sizes no
+    // request — budgetFor() answers that from the Effort rung.
+    const ceiling = maxTokensCeiling(modelMeta.get(els.modelSelect.value));
     if (needsKey) {
       // The hint elements are bare <p>s, so the link has to be a real child
       // node — a text assignment would wipe it (same shape as capNotice).
@@ -2110,7 +2143,6 @@ async function loadModels(cls) {
       ceiling < FLAT_CEILING ? `${hint} · max output: ${ceiling.toLocaleString()}` : hint;
   } catch (err) {
     modelMeta = new Map();
-    applyMaxTokensClamp(null);
     els.modelHint.textContent =
       `listModels failed: ${err && err.message ? err.message : err}`;
   }
@@ -2127,6 +2159,10 @@ function applyCustomPreset(cls, modelId) {
   const preset = (CUSTOM_MODEL_PRESETS[cls] || []).find((p) => p.model === modelId);
   if (!preset) return;
   els.modelInput.value = preset.model;
+  // The id just changed, so the budget note may have to as well: DeepSeek —
+  // Flash 4.1 is sized by the Effort rung (budget.js), which is a different
+  // statement than the one for a plain OpenAI-compatible id.
+  updateBudgetControls(cls);
 
   const row = els.settingsList.querySelector(`.setting-row[data-provider="${cls}"]`);
   const baseInput = row && row.querySelector('.setting-base');
@@ -2481,22 +2517,23 @@ async function send() {
   userStopped = false;
   addMessage('user', prompt);
 
-  const ceiling = applyMaxTokensClamp(model);
-  // Aegis Cloud takes no token cap from here at all: the server sizes the call
-  // from `effort`, and a number in this position is a per-pass ceiling *over*
-  // that ladder (aegis1 services/pool_brain.py pass_budgets). Sending the
-  // dropdown's value anyway is what made "Max tokens: 4k" beside a turn a
-  // figure the turn never ran on. The row is hidden for this class as well, so
-  // the two controls can never disagree.
-  const maxTokens = cls === AUTONOMOUS_CLASS
-    ? undefined
-    : maxTokensAdaptive() ? ceiling : parseInt(els.maxTokens.value, 10) || 4096;
+  // What this request travels with, resolved from ONE authority by budgetFor:
+  // the Effort rung for a model that reasons against its own output budget (or
+  // a class that requires the field), and no `max_tokens` at all otherwise.
+  // Nothing here guesses an answer's length — the old dropdown asked the user
+  // to, and the guess was wrong in both directions: aegis1 sizes the pooled
+  // class from `effort` itself and reads a body max_tokens as a ceiling *over*
+  // its ladder (services/pool_brain.py pass_budgets), while a DeepSeek
+  // reasoning model bills hidden chain-of-thought against this same budget, so
+  // the 4k default was spent before the first visible token.
   const autonomous = cls === AUTONOMOUS_CLASS && autonomousEnabled();
-  // Sent for the pooled class whether or not the fan-out is ticked: the fan-out
-  // is enabled by the model id this class sends, so a turn that never entered
-  // autonomous mode still ran pooled and had no way to say how big it should
-  // be. `undefined` = "auto" = the server infers it from the ask.
-  const effort = effortFor(cls);
+  // Sent whether or not the fan-out is ticked: the fan-out is enabled by the
+  // model id the pooled class sends, so a turn that never entered autonomous
+  // mode still ran pooled and had no way to say how big it should be — and a
+  // DeepSeek reasoning model needs it to size its CoT. `undefined` = "auto" =
+  // the server (or the engine's rung default) infers it.
+  const effort = effortFor();
+  const maxTokens = budgetFor(cls, model, undefined, effort);
   const workers = autonomous ? parseInt(els.autonomousWorkers.value, 10) || undefined : undefined;
   // Reuse the open thread's session id (minted once, on its first message)
   // instead of a fresh one per send — a new id every turn is what made both
@@ -2683,22 +2720,8 @@ async function init() {
     renderStatus(null);
   }
 
-  const savedMax = localStorage.getItem(MAX_TOKENS_KEY);
-  if (savedMax) els.maxTokens.value = savedMax;
-
-  els.maxTokens.addEventListener('change', () => {
-    localStorage.setItem(MAX_TOKENS_KEY, els.maxTokens.value);
-  });
-
-  // Adaptive max tokens is opt-in per machine, remembered across restarts.
-  const savedAdaptive = localStorage.getItem(MAX_TOKENS_ADAPTIVE_KEY);
-  if (savedAdaptive === 'on') els.maxTokensAdaptive.checked = true;
-  els.maxTokensAdaptive.addEventListener('change', () => {
-    localStorage.setItem(MAX_TOKENS_ADAPTIVE_KEY, els.maxTokensAdaptive.checked ? 'on' : 'off');
-    const cls = els.classSelect.value;
-    const modelId = CUSTOM_CLASSES.has(cls) ? els.modelInput.value.trim() : els.modelSelect.value;
-    applyMaxTokensClamp(modelId);
-  });
+  // There is no max-tokens control to restore: it asked the user to state an
+  // answer's length before the answer existed, so it is gone (see budget.js).
 
   // Work-autonomously is opt-in per machine, remembered across restarts;
   // only ever sent when the active class is AEGIS Cloud (see AUTONOMOUS_CLASS).
@@ -2709,19 +2732,26 @@ async function init() {
     updateAutonomousControlsVisibility();
   });
 
-  // Budget control for the pooled class: which rung of the server's effort
-  // ladder sizes the call, or "auto" to let the server infer it from the ask
-  // (aegis1 services/pool_brain.py parse_brain_request). Opt-in per machine,
-  // remembered across restarts; a stored value from a build whose list was
-  // short (low/medium/high, no "auto") falls through to the markup's default
-  // rather than assigning an option that no longer exists.
-  const savedEffort = localStorage.getItem(AUTONOMOUS_EFFORT_KEY);
-  if (savedEffort && Array.from(els.autonomousEffort.options).some((o) => o.value === savedEffort)) {
-    els.autonomousEffort.value = savedEffort;
+  // The one budget control: which rung sizes the call, or "auto" to let the
+  // server infer it from the ask (aegis1 services/pool_brain.py
+  // parse_brain_request). Applies to EVERY class now — with the max-tokens
+  // dropdown gone there is nothing else that sizes a call — so it is no longer
+  // stored under the autonomous-mode namespace; an install predating the rename
+  // is read from the old key once, and a stored rung this build's list no
+  // longer offers falls through to the markup's default rather than assigning
+  // an option that does not exist.
+  const savedEffort = localStorage.getItem(EFFORT_KEY) || localStorage.getItem(LEGACY_EFFORT_KEY);
+  if (savedEffort && Array.from(els.effortSelect.options).some((o) => o.value === savedEffort)) {
+    els.effortSelect.value = savedEffort;
   }
-  els.autonomousEffort.addEventListener('change', () => {
-    localStorage.setItem(AUTONOMOUS_EFFORT_KEY, els.autonomousEffort.value);
+  els.effortSelect.addEventListener('change', () => {
+    localStorage.setItem(EFFORT_KEY, els.effortSelect.value);
+    updateBudgetControls(els.classSelect.value);
   });
+  // A typed model id changes what the rung buys (a DeepSeek reasoning id is
+  // sized by it, a plain OpenAI-compatible one sends no cap at all), so the
+  // note has to follow the keystrokes rather than wait for a class change.
+  els.modelInput.addEventListener('input', () => updateBudgetControls(els.classSelect.value));
   // Worker count for the fan-out. Left empty by default on purpose: an empty
   // field is what tells the server to size the fan-out from the ask
   // (parse_brain_request's auto path) instead of the old client-side default of
@@ -2752,10 +2782,13 @@ async function init() {
   });
 
   els.modelSelect.addEventListener('change', () => {
-    const ceiling = applyMaxTokensClamp(els.modelSelect.value);
+    // Display-only (see budget.js): the model's own advertised output limit,
+    // which is never the number this app puts on a request.
+    const ceiling = maxTokensCeiling(modelMeta.get(els.modelSelect.value));
     const base = els.modelHint.textContent.replace(/ · max output: [\d,]+$/, '');
     els.modelHint.textContent =
       ceiling < FLAT_CEILING ? `${base} · max output: ${ceiling.toLocaleString()}` : base;
+    updateBudgetControls(els.classSelect.value);
   });
 
   els.modelPreset.addEventListener('change', () => {

@@ -3,7 +3,7 @@
 /**
  * Pure decisions behind a live streaming turn: whether the transcript is
  * allowed to follow the stream, and whether a rejection means the user asked
- * to stop. Kept out of app.js — like max-tokens.js — so both rules are
+ * to stop. Kept out of app.js — like budget.js — so both rules are
  * unit-testable from plain Node without a DOM or window.aegis. app.js only
  * calls into this.
  *

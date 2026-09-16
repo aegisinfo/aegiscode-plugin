@@ -341,7 +341,7 @@ async function openaiCompatible({
   messages,
   system,
   prompt,
-  maxTokens = 4096,
+  maxTokens,
   temperature,
   tools,
   toolChoice,
@@ -356,9 +356,20 @@ async function openaiCompatible({
   const body = {
     model: modelId,
     messages: openAIMessages(messages, system, prompt),
-    max_tokens: maxTokens || 4096,
     stream: true,
   };
+  // `max_tokens` travels only when the caller actually stated one. Nothing is
+  // invented here — not even as a signature default (this parameter used to
+  // read `maxTokens = 4096`, so the field appeared even when engine.js passed
+  // undefined on purpose). The output length of a reasoning model is not
+  // predictable from the request: DeepSeek bills hidden chain-of-thought
+  // against the same budget, so a client-chosen 4096 never bounded the answer,
+  // it bounded the thinking and truncated turns that would otherwise have
+  // finished. engine.js's reasoningBudget() supplies a value when the /effort
+  // rung is the only lever the provider exposes; for everything else the
+  // provider's own default is the number it was tuned for, and omitting the
+  // key is how you ask for it.
+  if (Number(maxTokens) > 0) body.max_tokens = Number(maxTokens);
   if (temperature != null) body.temperature = temperature;
   // Only advertise tools when the caller passes a non-empty list — an empty
   // `tools: []` is a 400 on some gateways.
@@ -485,7 +496,7 @@ async function anthropicMessages({
   messages,
   system,
   prompt,
-  maxTokens = 4096,
+  maxTokens,
   temperature,
   tools,
   toolChoice,
@@ -505,10 +516,24 @@ async function anthropicMessages({
 
   const body = {
     model: modelId,
-    max_tokens: maxTokens || 4096,
     stream: true,
     messages: buildAnthropicMessages(messages, prompt),
   };
+  // State the field only when the caller actually gave a number — the same rule
+  // the OpenAI-compatible transport below follows, and for the same reason.
+  //
+  // There is no client-side floor or ceiling constant here, deliberately. The
+  // Messages API does require `max_tokens`, but a number this side can only
+  // guess at is exactly what used to truncate reasoning turns: the budget is
+  // spent on hidden chain-of-thought before the first visible token, so the
+  // request "completed" having answered nothing. The size of a call belongs to
+  // whoever owns the model — engine.js's reasoningBudget() (the /effort rung,
+  // which is what the caller is passing here) or the platform itself, which
+  // sizes the pooled class from `effort` server-side and reads a body
+  // max_tokens as a ceiling OVER that ladder. So an unstated budget goes out
+  // unstated and the platform's value applies; this transport does not
+  // substitute one of its own.
+  if (Number(maxTokens) > 0) body.max_tokens = Number(maxTokens);
   if (system) body.system = system;
   if (temperature != null) body.temperature = temperature;
   // Anthropic wants {name, description, input_schema} — an OpenAI-shaped list

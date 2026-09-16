@@ -21,7 +21,7 @@
  * no third-party dependency. app.js only calls into this.
  *
  * Loaded as a classic script (index.html) *before* app.js, and requireable
- * from Node like max-tokens.js/stream-policy.js.
+ * from Node like budget.js/stream-policy.js.
  */
 
 // The decisions stay in stream-policy.js — one definition of "at the tail" and

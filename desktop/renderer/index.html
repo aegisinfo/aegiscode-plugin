@@ -95,41 +95,46 @@
           hidden
         />
 
-        <label for="max-tokens" id="max-tokens-label">Max tokens</label>
-        <div class="max-tokens-row" id="max-tokens-row">
-          <select id="max-tokens">
-            <option value="1024">1k</option>
-            <option value="4096" selected>4k</option>
-            <option value="16384">16k</option>
-            <option value="64000">64k</option>
-            <option value="300000">300k</option>
-          </select>
-          <label
-            class="flow-toggle"
-            for="max-tokens-adaptive"
-            title="Automatically use the highest output ceiling the selected model supports, up to 300k tokens, instead of the fixed choice above."
-          >
-            <input type="checkbox" id="max-tokens-adaptive" />
-            <span>adaptive</span>
-          </label>
-        </div>
+        <!-- The one budget control, for every class and every model.
 
-        <!-- The pooled AEGIS Cloud class sizes a request's token budget
-             server-side from this ladder (effort -> low/medium/high ->
-             16384/32768/65536 total across the fan-out), so the max-tokens row
-             above is hidden for that class instead of being shown and silently
-             overridden: the server treats a body max_tokens as a ceiling, and
-             an effort rung as the budget. Shown for Ollama and custom
-             endpoints, where a per-call ceiling is the only control there is. -->
-        <div class="max-tokens-row" id="effort-row" hidden>
-          <label for="autonomous-effort">Effort</label>
-          <select id="autonomous-effort">
+             It replaced a "Max tokens" dropdown (1k/4k/16k/64k/300k plus an
+             "adaptive" checkbox) that asked the user to state, up front, how
+             many tokens an answer would need. That cannot be known from the
+             prompt — it is a guess at the length of text nobody has written
+             yet — and the guess was wrong in both directions:
+
+               - the pooled AEGIS Cloud class sizes each call server-side from
+                 effort (aegis1 services/pool_brain.py pass_budgets:
+                 low/medium/high -> 16384/32768/65536 tokens total across the
+                 worker fan-out), and it reads a body max_tokens as a ceiling
+                 OVER that ladder, so the number on screen was never the
+                 budget the call ran on;
+               - a DeepSeek reasoning model (deepseek-flash, i.e. "Flash 4.1")
+                 bills hidden chain-of-thought against the same budget as its
+                 answer, so the dropdown's 4k default was spent before the
+                 first visible token and the turn came back empty — no error,
+                 no tool call, just a turn that "completed" with nothing.
+
+             So the budget is derived from this rung instead. The engine maps
+             low/medium/high to 8192/16384/32768 (EFFORT_TOKEN_BUDGET in
+             desktop/lib/local/engine.js, mirroring aegiscodex-dev's
+             src/backend.js), "auto" leaves the choice to the server, and no
+             max_tokens is stated by this app at all. The row is always on
+             screen: with the dropdown gone there is nothing to swap it for. -->
+        <div class="budget-row" id="effort-row">
+          <label for="effort-select" title="Sizes the call's token budget. Output length cannot be predicted from the prompt, so the budget comes from this rung instead of a stated number.">Effort</label>
+          <select id="effort-select">
             <option value="low">low</option>
             <option value="medium">medium</option>
             <option value="high">high</option>
             <option value="auto" selected>auto</option>
           </select>
         </div>
+
+        <!-- What the rung above means for the model selected right now, in
+             tokens. Written only by updateBudgetControls (app.js), so it cannot
+             disagree with the request that follows it. -->
+        <p class="hint budget-hint" id="budget-hint"></p>
 
         <label
           class="flow-toggle"
@@ -375,7 +380,7 @@
     </div>
   </div>
 
-  <script src="max-tokens.js"></script>
+  <script src="budget.js"></script>
   <script src="usage.js"></script>
   <script src="stream-policy.js"></script>
   <script src="transcript-view.js"></script>

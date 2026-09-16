@@ -92,21 +92,29 @@ const CLASSES = [
 /**
  * Mirrors aegiscodex-dev's src/backend.js DEEPSEEK_REASONING_MODEL_RE +
  * EFFORT_TOKEN_BUDGET verbatim. DeepSeek's reasoning models (deepseek-flash,
- * deepseek-v4-pro, the deprecated deepseek-reasoner, and the legacy
- * v4-flash/v4.1-flash aliases some configs still carry) spend part of
- * max_tokens on hidden chain-of-thought before ever emitting visible
- * content — DeepSeek counts reasoning tokens against the same budget as
- * content. At the renderer's 4k default (index.html's max-tokens select),
- * any non-trivial question can burn the whole budget reasoning and finish
- * with empty content: no error, no tool calls, just a turn that "completes"
- * with nothing to show for it (the empty-response bug). A user pointing the
- * Custom OpenAI-compatible class straight at DeepSeek's API hits exactly
- * this, so the request floors to the same effort budget aegiscodex-dev uses
- * for its own direct DeepSeek calls instead of shipping whatever the
- * dropdown happens to have selected.
+ * i.e. "Flash 4.1", deepseek-v4-pro, the deprecated deepseek-reasoner, and the
+ * legacy v4-flash/v4.1-flash aliases some configs still carry) spend part of
+ * the budget on hidden chain-of-thought before ever emitting visible content —
+ * DeepSeek counts reasoning tokens against the same budget as content. Under
+ * the renderer's removed 4k dropdown default, any non-trivial question could
+ * burn the whole budget reasoning and finish with empty content: no error, no
+ * tool calls, just a turn that "completes" with nothing to show for it (the
+ * empty-response bug). A user pointing the Custom OpenAI-compatible class
+ * straight at DeepSeek's API hits exactly this, so the request is sized by the
+ * same effort budget aegiscodex-dev uses for its own direct DeepSeek calls.
+ *
+ * desktop/renderer/budget.js carries the renderer's copy of these two
+ * constants plus budgetFor() below; test/budget.test.mjs requires both and
+ * asserts they agree, so the mirror cannot drift silently.
  */
 const DEEPSEEK_REASONING_MODEL_RE = /^deepseek-(v4(\.\d+)?-(flash|pro)|flash|pro|reasoner)$/;
 const EFFORT_TOKEN_BUDGET = { low: 8192, medium: 16384, high: 32768 };
+
+/** The one class whose wire format REQUIRES a stated `max_tokens`: Anthropic's
+ *  Messages API 400s without it, so that field is derived from the effort rung
+ *  rather than invented by the transport (which is what a blanket
+ *  `max_tokens: maxTokens || 4096` did — see providers.anthropicMessages). */
+const REQUIRES_STATED_BUDGET = new Set(['anthropic']);
 
 /**
  * Idle-stream budget for a pooled brain call ("work autonomously"). The
@@ -131,38 +139,38 @@ const EFFORT_TOKEN_BUDGET = { low: 8192, medium: 16384, high: 32768 };
 const AUTONOMOUS_IDLE_TIMEOUT_MS = 15 * 60_000;
 
 /**
- * The budget a DeepSeek reasoning model runs on, resolved from EXACTLY ONE
- * authority per call.
+ * The budget a request travels with, resolved from EXACTLY ONE authority per
+ * call — the engine-side half of the rule desktop/renderer/budget.js mirrors
+ * and test/budget.test.mjs compares the two halves of, so neither can drift.
  *
- * A caller-stated number IS the budget, and is returned verbatim. For the
- * non-pooled classes the renderer's max-tokens dropdown is the only budget
- * control on offer — updateBudgetControls hides the effort row for them — so
- * silently raising that number to an effort rung is precisely what made the
- * figure beside the dropdown untrustworthy. The old form was
- * `Math.max(stated, EFFORT_TOKEN_BUDGET[eff])`, which could only ever raise a
- * deliberate cap: a caller asking for 1024 ran on 32768, and the number the
- * UI displayed was never the number the call used.
+ *   1. a caller-stated number IS the budget and is returned verbatim. It is a
+ *      deliberate liability ceiling (aegis1 pass_budgets honours it downward:
+ *      total = min(ladder, max_tokens x passes)) and no rung may raise it — the
+ *      old `Math.max(stated, EFFORT_TOKEN_BUDGET[eff])` form did exactly that,
+ *      so a caller asking for 1024 silently ran on 32768.
+ *   2. with nothing stated, a model that reasons against its own output budget
+ *      (DeepSeek bills hidden chain-of-thought against the SAME budget as the
+ *      answer) or a class whose wire format REQUIRES the field (Anthropic's
+ *      Messages API) gets the Effort rung. This is why the renderer's
+ *      max-tokens dropdown was removed rather than fixed: at its 4k default a
+ *      reasoning model spent the entire budget thinking and finished empty —
+ *      no error, no tool call, just a "completed" turn with nothing in it.
+ *   3. otherwise `undefined` — no `max_tokens` goes on the wire and the
+ *      provider's own output limit governs. The transport used to fill this
+ *      gap with an invented 4096 default, which is the defect in (2).
  *
- * The effort rung is the DEFAULT, consulted only when no number was stated at
- * all (the pooled class, which the renderer sends `effort` for and which the
- * server sizes itself). This is the same rule doubledBudget() follows for its
- * truncation retry: a stated cap is never overridden, by a rung or an order of
- * magnitude.
- *
- * Truncated and empty turns are handled where they belong — the doubled-budget
- * retry plus emptyTurnError — rather than by inflating the caller's ceiling up
- * front. Escalating on a demonstrated empty turn is strictly cheaper than
- * pre-emptively granting the top rung to every reasoning call.
- *
- * Everything else (non-DeepSeek models, non-reasoning DeepSeek ids like
- * deepseek-chat) passes through untouched.
+ * Truncated and empty turns are still handled where they belong — the
+ * doubled-budget retry plus emptyTurnError — rather than by inflating the
+ * caller's ceiling up front.
  */
-function reasoningBudget(model, maxTokens, effort) {
-  if (!DEEPSEEK_REASONING_MODEL_RE.test(String(model || ''))) return maxTokens;
+function reasoningBudget(cls, model, maxTokens, effort) {
   const stated = Number(maxTokens);
   if (Number.isFinite(stated) && stated > 0) return stated;
-  const eff = effort === 'low' || effort === 'medium' ? effort : 'high';
-  return EFFORT_TOKEN_BUDGET[eff];
+  if (DEEPSEEK_REASONING_MODEL_RE.test(String(model || '')) || REQUIRES_STATED_BUDGET.has(cls)) {
+    const eff = effort === 'low' || effort === 'medium' ? effort : 'high';
+    return EFFORT_TOKEN_BUDGET[eff];
+  }
+  return undefined;
 }
 
 /** Relay model entries arrive as ids or objects; keep only real model ids. */
@@ -302,6 +310,33 @@ function doubledBudget(maxTokens) {
 }
 
 /**
+ * The cap the CALLER stated, or `undefined` meaning "none was stated".
+ *
+ * The two branches resolve one question — whose number is this? — and the
+ * first is the fix. An internal re-entry (runSubagent's nested chat()) passes
+ * `statedMaxTokens` explicitly, because the `maxTokens` it holds is the rung
+ * reasoningBudget() derived from `effort`: a number the server is about to
+ * derive for itself. Re-reading that value as the caller's own is what put a
+ * guessed 32768 on the wire as a *ceiling over* aegis1's ladder
+ * (pass_budgets: total = min(ladder, max_tokens x passes)) — so a
+ * high-effort subagent silently ran at 8192 and the ladder the UI advertised
+ * was not the budget the call used.
+ *
+ * A non-numeric or non-positive value means "nothing stated" — never a 0- or
+ * NaN-token ceiling.
+ */
+function statedCapOf(payload) {
+  const asCap = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  };
+  if (payload && Object.prototype.hasOwnProperty.call(payload, 'statedMaxTokens')) {
+    return asCap(payload.statedMaxTokens);
+  }
+  return asCap(payload && payload.maxTokens);
+}
+
+/**
  * The follow-up shown to a model that ended its turn with neither text nor a
  * tool call. Sent as a plain user message (never as a tool result — there is
  * no pending tool call to answer) so every provider accepts it verbatim.
@@ -327,9 +362,9 @@ const EMPTY_TURN_NUDGE =
 function emptyTurnError({ cls, model, maxTokens, finishReason }) {
   const err = new Error(
     `The model returned no answer after ${cls}/${model} was asked to summarise its results ` +
-      `(stop reason: ${finishReason || 'none'}, max_tokens: ${maxTokens}). The token budget ` +
-      'was most likely consumed before any visible text — raise the max-tokens setting, ' +
-      'or lower effort.'
+      `(stop reason: ${finishReason || 'none'}, max_tokens: ${maxTokens || 'unstated'}). The token budget ` +
+      'was most likely consumed before any visible text — raise the Effort rung, which is ' +
+      'what sizes this call, or ask for a smaller piece of work.'
   );
   err.status = 502;
   return err;
@@ -699,8 +734,9 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
         // derived number states one decision twice — and the copies had already
         // drifted: 974adc5 doubled aegis1's ladder while this side stood still,
         // leaving the client capping below the budget it displayed. The cap was
-        // never the one the renderer showed either (updateBudgetControls hides
-        // the max-tokens dropdown for the pooled class). Omitting the field is
+        // never the one the renderer showed either (the Max tokens dropdown
+        // that used to claim a figure for the pooled class is gone — see
+        // desktop/renderer/budget.js). Omitting the field is
         // what tells aegis1 "no cap stated — let effort decide", the same
         // contract aegiscodex-dev sends.
         //
@@ -844,7 +880,7 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
   async function chat(payload, onDelta) {
     const cls = payload && payload.class;
     const model = payload && payload.model;
-    const maxTokens = reasoningBudget(model, payload && payload.maxTokens, payload && payload.effort);
+    const maxTokens = reasoningBudget(cls, model, payload && payload.maxTokens, payload && payload.effort);
     // The caller's OWN number, kept apart from `maxTokens` above. That one
     // collapses two different facts into a single value — "the caller stated
     // 4096" and "effort implies 32768" — and the pooled path must treat them
@@ -853,7 +889,10 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
     // an effort-derived one is the server's own arithmetic stated twice, and
     // sending it is how the two copies came to disagree. So the pooled call
     // forwards only what the caller actually asked for.
-    const statedMaxTokens = Number(payload && payload.maxTokens) > 0 ? Number(payload.maxTokens) : undefined;
+    // ...and it is read through statedCapOf(), so a nested chat() that states
+    // the key overrides its own derived `maxTokens` instead of being mistaken
+    // for a caller who asked for that number (see statedCapOf).
+    const statedMaxTokens = statedCapOf(payload);
     // "Work autonomously" — routes this call through aegis1's pool_brain
     // worker fan-out (services/pool_brain.py: N reasoning workers + a
     // synthesis pass) instead of a single provider call. UI-gated to the
@@ -1170,7 +1209,8 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
         for (const call of calls) {
           const result = call.name === T.SUBAGENT_TOOL
             ? await runSubagent(call.args, {
-                cls, model, maxTokens, mode: payload && payload.mode, parentSignal: signal, depth, rootSessionId, rootOnDelta,
+                cls, model, statedMaxTokens, effort: payload && payload.effort,
+                mode: payload && payload.mode, parentSignal: signal, depth, rootSessionId, rootOnDelta,
               })
             : await gatedExecuteTool(call, { toolCtx, rootSessionId, rootOnDelta, signal });
           // A subagent's spend rides back on its tool result (see runSubagent).
@@ -1200,7 +1240,7 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
    */
   async function runSubagent(
     { description, subagent_type, prompt: subPrompt } = {},
-    { cls, model, maxTokens, mode, parentSignal, depth, rootSessionId, rootOnDelta } = {}
+    { cls, model, statedMaxTokens, effort, mode, parentSignal, depth, rootSessionId, rootOnDelta } = {}
   ) {
     const task = String(subPrompt || description || '').trim();
     if (!task) return { ok: false, error: 'task requires a prompt' };
@@ -1224,8 +1264,17 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
       // silently hanging behind this call's no-op onDelta below.
       const res = await chat(
         {
-          class: cls, model, maxTokens, mode, system, prompt: task, sessionId: subSessionId, depth: (depth || 0) + 1,
+          class: cls, model, mode, system, prompt: task, sessionId: subSessionId, depth: (depth || 0) + 1,
           rootSessionId, rootOnDelta,
+          // The parent's budget AUTHORITY is forwarded, not the number it
+          // implies. `maxTokens` is deliberately absent: it is the rung this
+          // turn derived from `effort`, and a re-entry that hands it back gets
+          // read as the caller's own cap (statedCapOf). The rung itself rides
+          // along as `effort`, which is what aegis1 sizes the fan-out and its
+          // ladder from — so a subagent now runs at the effort the user chose
+          // instead of at a number that only meant anything for this model id.
+          statedMaxTokens,
+          effort,
         },
         () => {}
       );
@@ -1264,4 +1313,4 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
   };
 }
 
-module.exports = { CLASSES, createLocalEngine, extractToolCalls, parseArgs };
+module.exports = { CLASSES, createLocalEngine, extractToolCalls, parseArgs, reasoningBudget };

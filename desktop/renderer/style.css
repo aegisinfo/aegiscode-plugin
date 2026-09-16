@@ -1207,15 +1207,19 @@ body.memory-open {
 
 
 
-.max-tokens-row {
+.budget-row {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.max-tokens-row select {
+.budget-row select {
   flex: 1;
   min-width: 0;
+}
+
+.budget-hint {
+  margin-top: 4px;
 }
 
 #autonomous-toggle-wrap {
@@ -1230,13 +1234,11 @@ body.memory-open {
   display: none;
 }
 
-/* Same trap, one row up: `.max-tokens-row` is display: flex, so the `hidden`
-   attribute did nothing on `#max-tokens-row`/`#effort-row` — which is how the
-   budget-control swap (effort for the pooled class, a token ceiling for the
-   others) would have shown BOTH controls at once, the exact state it exists to
-   prevent. `display: none` is also what lets a `<label>` be hidden, since
-   labels are inline by default and carry no author display rule. */
-.max-tokens-row[hidden],
+/* A `<label>` is inline by default and carries no author display rule, so the
+   UA stylesheet's `[hidden] { display: none }` wins for it unaided — this
+   override exists only for labels a later rule gives a display value to.
+   (The row itself no longer needs it: with the max-tokens control gone there
+   is nothing left to swap #effort-row for.) */
 label[hidden] {
   display: none;
 }

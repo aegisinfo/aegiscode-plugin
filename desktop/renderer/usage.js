@@ -3,7 +3,7 @@
 /**
  * Pure token-usage → display-number mapping.
  *
- * Standalone from app.js (same reason as max-tokens.js/stream-policy.js): it is
+ * Standalone from app.js (same reason as budget.js/stream-policy.js): it is
  * requireable from a plain Node test without window.aegis. app.js only calls
  * into it.
  *
