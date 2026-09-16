@@ -175,9 +175,19 @@ function createApp(options = {}) {
     tokens: 0,
     inputTokens: 0,
     outputTokens: 0,
-    cost: 0, // € spent, from ledger rows observed this session
+    cost: 0, // € spent, from the ledger rows that landed AFTER the baseline
     balance: null,
-    lastLedgerAt: null,
+    // How many times each ledger-row identity is already accounted for.
+    // A COUNT, not a Set — see ledgerRowKey for why identity is content-based
+    // and refreshSpend for why the multiplicity matters.
+    seenLedgerRows: new Map(),
+    // Whether the account's existing ledger has been snapshotted as history.
+    // The balance endpoint returns the ACCOUNT's ledger, so the rows visible on
+    // the first refresh are everything the customer ever spent. Until this is
+    // true, no row may be folded into `cost`: session.cost is rendered as
+    // "This session" and would otherwise print the account's lifetime spend
+    // under it. See refreshSpend.
+    ledgerBaselined: false,
     startedAt: Date.now(),
   };
 
@@ -186,26 +196,131 @@ function createApp(options = {}) {
 
   // --- helpers --------------------------------------------------------------
 
+  /**
+   * How much one ledger row is worth to the customer, in EUR (always >= 0).
+   *
+   * `amount_eur` is signed from the user's side (negative = spent) and is what
+   * /api/token-bank/balance actually returns. `charged_micros` is the raw
+   * column with the OPPOSITE sign, kept only as a fallback for a server build
+   * that drops amount_eur — which is why it is negated here.
+   *
+   * Returns null for a row that is not a charge at all, or that carries no
+   * usable number. Anything non-finite is null rather than NaN: a NaN that
+   * reaches a tally poisons it for the rest of the session, and a NaN written
+   * into history.jsonl is invisible until /cost renders it.
+   */
+  function ledgerRowEur(row) {
+    if (!row || typeof row !== 'object') return null;
+    // A top-up is money IN, not a charge. Folding one into the spend tally
+    // would report a customer who just added €20 as having spent €20.
+    if (row.kind !== 'usage') return null;
+    const raw = row.amount_eur != null ? Number(row.amount_eur) : -Number(row.charged_micros || 0) / 1e6;
+    if (!Number.isFinite(raw)) return null;
+    // The magnitude is the charge either way; the server's sign convention for
+    // a spend row is not something this client should depend on.
+    return Math.abs(raw);
+  }
+
+  /**
+   * The identity of a ledger row, used to decide "is this new?".
+   *
+   * Deliberately NOT `created_at`. That column is stamped to the second, so two
+   * turns inside the same second collide: the second row compared equal to the
+   * first, was skipped as "already counted", and — because chatflow persists the
+   * turn with whatever this returned — the exchange was written to history.jsonl
+   * with NO charge attached. /cost then fell back to the local rate table for
+   * that turn and reported a figure that was not the bill. Every column the
+   * endpoint returns that can distinguish two rows is folded in here.
+   *
+   * The endpoint returns no unique row id (see mcp/tools.js, which reads the
+   * same columns), so this is content-based and two genuinely identical charges
+   * — same model, same token counts, same second — hash the same. That is why
+   * callers count occurrences rather than merely testing membership: a Set
+   * would treat the second identical charge as already-counted and silently
+   * under-bill it, which is the original defect wearing a different hat.
+   */
+  function ledgerRowKey(row) {
+    return [
+      row.created_at || '',
+      row.kind || '',
+      row.amount_eur != null ? row.amount_eur : '',
+      row.charged_micros != null ? row.charged_micros : '',
+      row.id != null ? row.id : '',
+      row.note != null ? row.note : '',
+    ].join('|');
+  }
+
   /** Refresh the balance and fold any *new* usage row into the session tally.
-   *  Best-effort: an accounting refresh must never break a turn.
+   *
+   *  The first successful refresh of a session is a BASELINE: it observes the
+   *  account's whole ledger and folds nothing. Each entry point therefore calls
+   *  this once at session start, so the baseline can never swallow a real
+   *  turn's charge. Best-effort: an accounting refresh must never break a turn.
+   *
    *  @returns {Promise<{balance:number, lastCost:number|null}|null>} */
   async function refreshSpend() {
     try {
       const data = await client.tokenBankBalance();
-      session.balance = Number(data.balance_eur || 0);
+      const balance = Number(data.balance_eur);
+      if (Number.isFinite(balance)) session.balance = balance;
       let lastCost = null;
-      const row = (data.ledger || [])[0];
-      if (row && row.kind === 'usage' && row.created_at && row.created_at !== session.lastLedgerAt) {
-        session.lastLedgerAt = row.created_at;
-        // amount_eur is signed from the user's side (negative = spent); the
-        // ledger fallback inverts the raw micros column, which has the
-        // opposite sign.
-        const eur = Math.abs(
-          Number(row.amount_eur != null ? row.amount_eur : -Number(row.charged_micros || 0) / 1e6)
-        );
-        session.cost += eur;
-        lastCost = eur;
+      const ledger = Array.isArray(data.ledger) ? data.ledger : [];
+
+      // Fold every row that is new since the last refresh, not just the head of
+      // the list. A single refresh can legitimately see more than one unseen
+      // charge — a refresh skipped while the balance endpoint was down, a long
+      // tool turn that dispatched two billed provider calls, or the first
+      // refresh after /billing already consumed the head — and taking only
+      // ledger[0] silently dropped the rest from the session tally.
+      //
+      // Count occurrences within the pass BEFORE folding, so two identical rows
+      // are billed twice. Testing membership one row at a time cannot tell the
+      // first occurrence from the second and under-charges by one.
+      const seenHere = new Map(); // key -> { n, row }
+      for (const row of ledger) {
+        const key = ledgerRowKey(row);
+        const hit = seenHere.get(key);
+        if (hit) hit.n += 1;
+        else seenHere.set(key, { n: 1, row });
       }
+
+      for (const [key, { n, row }] of seenHere) {
+        const already = session.seenLedgerRows.get(key) || 0;
+        session.seenLedgerRows.set(key, n);
+
+        // This endpoint returns the ACCOUNT's ledger, so on the opening refresh
+        // it holds everything the customer has ever spent. Those rows are
+        // history — mark them seen and fold nothing, so `cost` starts at zero.
+        //
+        // Reaching this loop at all means the endpoint answered, so this pass
+        // really did observe the full ledger and it is safe to call it the
+        // baseline. That is deliberately self-healing: if the session-start
+        // call failed (offline, no balance rights) the NEXT successful refresh
+        // becomes the baseline, and the worst case is one turn under-reported.
+        // The reverse — folding an unobserved ledger — would report the
+        // customer's lifetime spend as "This session", a number they already
+        // paid and are not being charged again.
+        if (!session.ledgerBaselined) continue;
+
+        // Only the occurrences beyond those already accounted for are new.
+        const fresh = n - already;
+        if (fresh <= 0) continue;
+
+        const eur = ledgerRowEur(row);
+        if (eur != null && eur > 0) {
+          session.cost += eur * fresh;
+          // The charge to attribute to this turn. The endpoint returns the
+          // ledger NEWEST-FIRST (mcp/tools.js takes `.slice(0, 5)` as "Recent
+          // activity" and renders those as the latest rows), and the folds above
+          // run in that order, so the first charge seen here is the newest —
+          // i.e. the row this turn just produced. Taking the first rather than
+          // the largest matters when one pass sees several: the max would
+          // report an older, pricier call as this turn's cost.
+          if (lastCost == null) lastCost = eur;
+        }
+      }
+      session.ledgerBaselined = true;
+
       return { balance: session.balance, lastCost };
     } catch {
       return null; // no balance rights / offline: keep showing tokens
@@ -620,9 +735,22 @@ function createApp(options = {}) {
     if (res.text) transcript.push({ role: 'assistant', text: res.text });
 
     const tokens = recordTurn(res);
-    persistTurn(prompt, res, res.interrupted ? 'stopped' : res.error ? 'error' : 'done');
 
-    const spend = await refreshSpend();
+    // Ask the ledger what this call settled at BEFORE persisting it. The order
+    // is the whole point: the charge is the server's number (pool margin and
+    // prompt-cache discount included) and only the ledger knows it. Persisting
+    // first wrote the exchange with no charge attached, so /cost recomputed it
+    // from a local rate table that knows about neither — and the figure the
+    // customer read did not match the bill they paid. Same ordering as the
+    // chatflow session loop.
+    let settledCost = null;
+    try {
+      const spend = await refreshSpend();
+      settledCost = spend ? spend.lastCost : null;
+    } catch {
+      /* accounting must never break a turn */
+    }
+    persistTurn(prompt, res, res.interrupted ? 'stopped' : res.error ? 'error' : 'done', settledCost);
 
     printTurn({
       role: 'assistant',
@@ -639,7 +767,7 @@ function createApp(options = {}) {
               },
         // What this call settled at, from the ledger row it produced — the
         // number that has to agree with the token count beside it.
-        eur: spend && spend.lastCost != null ? spend.lastCost : null,
+        eur: settledCost,
         ms: res.ms,
         calls: 1,
       },
@@ -1011,6 +1139,11 @@ function createApp(options = {}) {
       err.write(`aegiscode: no AEGIS account key. ${credentials.HOW_TO_SET}, or set $${credentials.KEY_ENV}.\n`);
       return 2;
     }
+    // Snapshot the account's existing ledger BEFORE the billed call. Without
+    // this the refresh after the turn would treat every historical row as new,
+    // and the reported charge would be whatever the account spent last rather
+    // than what this call cost.
+    await refreshSpend();
     const res = await ask(prompt);
     await refreshSpend();
     const tokens = usageTokens(res.usage);
@@ -1183,7 +1316,15 @@ function createApp(options = {}) {
       refreshSpend: () => refreshSpend(),
       updateConfig: (patch) => updateConfig(patch),
       showThemePicker: () => showThemePicker(),
-      persistTurn: (prompt, res, status) => persistTurn(prompt, res, status),
+      // `costEur` MUST be forwarded. chatflow's session loop passes the settled
+      // charge as its fourth argument, and this binding used to accept only
+      // three — so the argument was dropped, persistTurn fell back to
+      // costEur = null, and every interactive turn was written to
+      // history.jsonl with no charge attached. /cost then recomputed each of
+      // them from the local rate table (no pool margin, no prompt-cache
+      // discount) and reported a number the customer never paid. The parameter
+      // is the whole reason the ledger is consulted before persisting.
+      persistTurn: (prompt, res, status, costEur) => persistTurn(prompt, res, status, costEur),
       visibleCommands: () => visibleCommands(),
       tokensFor: (usage) => usageTokens(usage),
       recordTurn: (res) => recordTurn(res),
@@ -1340,6 +1481,10 @@ function createApp(options = {}) {
           await resumeSession({ id: last.id });
         }
       }
+      // Snapshot the account's ledger before the loop's first billed turn, so
+      // the session tally cannot absorb the customer's existing spend and the
+      // first turn's charge is not mistaken for pre-existing history.
+      await refreshSpend();
       await chatflow.runSession(makeHost());
       return 0;
     }
