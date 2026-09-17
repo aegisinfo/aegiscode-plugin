@@ -158,6 +158,7 @@ const MEASURE = (label) => `
   var text = liveText();
   var hook = window.__aegisSmoke;
   var t = (hook && typeof hook.isScrolledUp === 'function') ? hook.isScrolledUp() : null;
+  var meterEl = document.getElementById('session-meter');
   return {
     label: ${JSON.stringify(label)},
     scrollTop: m.scrollTop,
@@ -166,7 +167,11 @@ const MEASURE = (label) => `
     textLen: text.length,
     liveTurn: Boolean(liveRow()),
     scrolledUpFlag: t,
-    msgs: document.querySelectorAll('#messages .msg').length
+    msgs: document.querySelectorAll('#messages .msg').length,
+    // Read live, while this turn is still streaming — the exact moment the
+    // meter used to sit frozen on the previous turn's total (or hidden, on a
+    // session's first turn) until the reply finished.
+    sessionMeter: meterEl ? { text: meterEl.textContent, hidden: Boolean(meterEl.hidden) } : { missing: true }
   };
 `;
 
@@ -344,6 +349,29 @@ async function main() {
     'scrolled-up-flag-set',
     held.scrolledUpFlag === true,
     `transcript.isScrolledUp()=${held.scrolledUpFlag} (the real scroll listener must have recorded the scroll)`
+  );
+
+  // ── the meter must move WHILE the AI is still working, not just after ────
+  // Both `before` and `held` are captured mid-stream (the turn is still
+  // running: Escape hasn't fired yet). This is this session's first turn, so
+  // before this fix the meter stayed hidden the entire time a reply streamed
+  // in and only appeared the instant the turn finished.
+  const meterBefore = before.sessionMeter || {};
+  const meterHeld = held.sessionMeter || {};
+  check(
+    'meter-visible-mid-stream',
+    !meterBefore.missing && meterBefore.hidden === false,
+    `meter=${JSON.stringify(meterBefore)} — must be on screen while the reply is still streaming, not just after it finishes`
+  );
+  check(
+    'meter-counted-mid-stream',
+    /\d[\d,]* tok/.test(String(meterBefore.text || '')),
+    `meter text=${JSON.stringify(meterBefore.text)} — must show a real estimate while streaming, not stay blank`
+  );
+  check(
+    'meter-grows-mid-stream',
+    String(meterHeld.text || '') !== String(meterBefore.text || ''),
+    `meter text unchanged (${JSON.stringify(meterBefore.text)}) while ${held.textLen - before.textLen} more chars streamed in`
   );
 
   // ── 3. Escape stops the turn ─────────────────────────────────────────────

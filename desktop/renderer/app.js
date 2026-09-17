@@ -274,12 +274,31 @@ function foldRoll(sessionId, usage, opts = {}) {
  * Paint the topbar meter. Hidden while a session has accounted for nothing —
  * an unused thread must not display a `0 tok` it never measured — and shown
  * the moment a turn is folded in.
+ *
+ * `live`, when given, previews the in-flight turn on top of the session's
+ * already-folded total — text estimated the same way `foldRoll` estimates a
+ * turn the wire never reported on — WITHOUT folding it: the preview roll
+ * returned by `rollTurn` here is thrown away every frame and `rollsBySession`
+ * is never written to, so the real `foldRoll` at completion still starts from
+ * the untouched persisted total and cannot double-count this turn. (`turns`/
+ * `calls` are left at their default +1 rather than forced to 0 — `fmtRoll`
+ * treats a roll with both at 0 as "nothing counted yet" and blanks the line,
+ * which hid the preview entirely.) Before this, the meter held the previous
+ * turn's total frozen for the whole reply and only jumped at the end, which
+ * read as "the counter is dead while the AI works".
  */
-function renderRollMeter(sessionId) {
+function renderRollMeter(sessionId, live) {
   const el = els.sessionMeter;
   if (!el) return;
-  const roll = rollsBySession.get(sessionId || '');
-  const line = roll && currentSessionId === sessionId ? fmtRoll(roll) : '';
+  if (currentSessionId !== sessionId) { el.hidden = true; return; }
+  let roll = rollsBySession.get(sessionId || '');
+  if (live) {
+    roll = rollTurn(roll || emptyRoll(), undefined, {
+      prompt: live.prompt,
+      reply: live.reply,
+    });
+  }
+  const line = roll ? fmtRoll(roll) : '';
   el.textContent = line;
   el.hidden = !line;
   if (line) el.title = 'This session, counted the way the CLI counts it — every turn rolled into one running total';
@@ -3146,6 +3165,10 @@ async function send() {
     }
     const bodyEl = pendingEl.querySelector('.body');
     if (bodyEl && bodyEl.textContent !== streamedText) bodyEl.textContent = streamedText;
+    // Live estimate so the topbar meter keeps moving while the reply streams
+    // in, instead of sitting frozen on the previous turn's total until this
+    // one resolves — see renderRollMeter's `live` param.
+    renderRollMeter(sessionId, { prompt, reply: streamedText });
     stickToBottom();
   });
 
