@@ -34,6 +34,7 @@ const {
 const { WELCOME_TITLE, WELCOME_BACK, TAGLINE, STAR, stencilGlyph, welcomeArtParts } = require('./art.js');
 const { w, pad, padStart, wrapBlock, clip, span } = require('./screen.js');
 const { fmtTokens, fmtEur, fmtElapsed } = require('./format.js');
+const { renderDiffBlock } = require('./diffview.js');
 
 // Guarded: a concurrent workstream owns ./markdown.js.
 let markdown = null;
@@ -264,7 +265,17 @@ function renderTurn(ctx, turn, width = 80) {
         : typeof turn.args === 'string'
           ? turn.args
           : JSON.stringify(turn.args);
-    if (args) lines.push(`  ${t.gray}${GLYPH.hook}  $ ${clip(args, Math.max(0, width - 6))}${RESET}`);
+    // An editFile/writeFile turn carries a diff preview (app.js builds it from
+    // the tool call's `run` frame). Paint the colored block instead of the gray
+    // `$ {args}` row, so an edit shows *what* changed, not just that something
+    // did. The summary row is unconditional; the body follows when the block is
+    // open, which the click handler toggles. The `$ args` row stays the fallback
+    // for every non-edit tool and for a turn with no preview.
+    if (turn.diff) {
+      lines.push(...renderDiffBlock(turn.diff, ctx, width, { open: !!turn.diffOpen }));
+    } else if (args) {
+      lines.push(`  ${t.gray}${GLYPH.hook}  $ ${clip(args, Math.max(0, width - 6))}${RESET}`);
+    }
   } else if (role === 'error') {
     lines.push(`${t.red}${ERR} ${text}${RESET}`);
   } else {

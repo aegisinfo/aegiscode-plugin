@@ -49,6 +49,8 @@ const { renderMarkdown } = require('./markdown.js');
 const overlays = require('./overlays.js');
 const fuzzy = require('./fuzzy.js');
 const { fmtTokens, fmtEur, fmtElapsed } = require('./format.js');
+const { editPreview } = require('./diff.js');
+const { renderDiffBlock, defaultOpen } = require('./diffview.js');
 
 /** The rotating placeholder shown on an empty input line. */
 const SUGGESTIONS = [
@@ -438,6 +440,18 @@ function rowLines(msg, cols, ctx, now = Date.now()) {
     } else {
       out.push([span(t.gray, `${label}${where}`)]);
     }
+    // An editFile/writeFile row carries a diff preview (built from the tool's
+    // `run` frame, before the executor reads/writes). Paint the colored block —
+    // summary always, body when open — instead of the gray `$ {args}` row, so
+    // the transcript shows *what* changed. renderDiffBlock emits ANSI strings,
+    // so each becomes one pre-styled span whose visible width padLine still
+    // measures and pads correctly.
+    if (msg.diff) {
+      for (const l of renderDiffBlock(msg.diff, ctx, cols, { open: !!msg.diffOpen })) {
+        out.push([span('', l)]);
+      }
+      return out;
+    }
     const argsStr =
       typeof msg.args === 'string'
         ? msg.args
@@ -560,21 +574,34 @@ function transcriptLines(rows, view, ctx, now = Date.now(), cache = null) {
   const { cols, rows: termRows } = view;
   const avail = Math.max(1, termRows - 6);
   const out = [];
+  // Which transcript row produced each line, in lockstep with `out`. The frame
+  // builder needs it to map a clicked screen row back to the row it toggles.
+  const owners = [];
   for (const msg of rows) {
     const key = cache || null;
     const isGrower = msg.role === 'assistant' && msg.streaming;
     if (key && !isGrower) {
       const hit = key.get(msg);
-      if (hit && hit.text === msg.text && hit.cols === cols) {
-        for (const l of hit.segment) out.push(l);
+      // diffOpen is part of the cache key: a toggled edit block must re-render.
+      if (hit && hit.text === msg.text && hit.cols === cols && hit.diffOpen === msg.diffOpen) {
+        for (const l of hit.segment) {
+          out.push(l);
+          owners.push(msg);
+        }
         continue;
       }
       const segment = rowLines(msg, cols, ctx, now);
-      key.set(msg, { text: msg.text, cols, segment });
-      for (const l of segment) out.push(l);
+      key.set(msg, { text: msg.text, cols, diffOpen: msg.diffOpen, segment });
+      for (const l of segment) {
+        out.push(l);
+        owners.push(msg);
+      }
       continue;
     }
-    for (const l of rowLines(msg, cols, ctx, now)) out.push(l);
+    for (const l of rowLines(msg, cols, ctx, now)) {
+      out.push(l);
+      owners.push(msg);
+    }
   }
 
   let scroll = view.scroll || 0;
@@ -596,7 +623,7 @@ function transcriptLines(rows, view, ctx, now = Date.now(), cache = null) {
     end = total;
   }
   const start = Math.max(0, end - avail);
-  return { lines: out.slice(start, end), scroll, anchorEnd };
+  return { lines: out.slice(start, end), owners: owners.slice(start, end), scroll, anchorEnd };
 }
 
 // ── the input line ──────────────────────────────────────────────────────────
@@ -738,6 +765,10 @@ async function runSession(host) {
   let suggestionIdx = 0;
   let scroll = 0;
   let anchorEnd = null;
+  // Screen row (1-based, as the mouse reports it) → the transcript row painted
+  // there. Rebuilt on every frame so it follows scrolling; a click reads it to
+  // find which edit block to toggle.
+  const clickHits = new Map();
   let insertMode = false;
   let hintUntil = 0;
   let hintText = '';
@@ -767,6 +798,10 @@ async function runSession(host) {
     const view = transcriptLines(transcript, { cols, rows, scroll, anchorEnd }, ctx, Date.now(), lineCache);
     scroll = view.scroll;
     anchorEnd = view.anchorEnd;
+    // The header is frame line 0 (screen row 1), so the transcript window starts
+    // at screen row 2; each painted line carries its source row in view.owners.
+    clickHits.clear();
+    for (let i = 0; i < view.lines.length; i++) clickHits.set(2 + i, view.owners[i]);
     for (const l of view.lines) lines.push(l);
     // Exactly `avail` transcript rows, so the frame is exactly `rows` lines:
     // header(1) + transcript(avail) + spinner/effort + rule + input + rule +
@@ -1223,6 +1258,18 @@ async function runSession(host) {
     if (key.name === KEY.PAGE_UP) d = +5;
     else if (key.name === KEY.PAGE_DOWN) d = -5;
     else if (key.name === 'wheel') d = key.dir === 'up' ? +3 : -3;
+    else if (key.name === 'click') {
+      // A click on an edit row toggles its diff block. Not a scroll, but the
+      // same "act on the live frame, then repaint" shape — and routing it
+      // through here means it works both at the idle prompt and mid-turn,
+      // since drainWhileWorking feeds this same function.
+      const msg = clickHits.get(key.row);
+      if (msg && msg.diff) {
+        msg.diffOpen = !msg.diffOpen;
+        scheduleRender();
+      }
+      return true; // consumed: a click is never replayed as typed-ahead input
+    }
     else if (key.name === 'char' && ctx.vim && !insertMode && !editor.buf) {
       if (key.ch === 'j') d = +1;
       else if (key.ch === 'k') d = -1;
@@ -1652,6 +1699,12 @@ async function runSession(host) {
       // Keybinding parity: Ctrl+O opens the permissions panel (main.js:1644),
       // which /permissions already renders in this CLI.
       await dispatch('/permissions');
+      return;
+    }
+    if (key.name === 'click') {
+      // Consumed here: it either toggles an edit row's diff block or does
+      // nothing, but must never fall through to the input editor.
+      applyLiveScroll(key);
       return;
     }
     if (key.name === KEY.PAGE_UP || key.name === KEY.PAGE_DOWN || key.name === 'wheel') {

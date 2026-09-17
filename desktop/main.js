@@ -830,6 +830,62 @@ function createEngine(aegis, { app, safeStorage, dir: dirOverride, sessionsDir: 
   return { engine, sessionsDir, settingsDir, settings };
 }
 
+/** Largest pre-edit read the diff bridge will hand the renderer (bytes). */
+const PREVIEW_READ_MAX_BYTES = 512 * 1024;
+
+/**
+ * The contained, capped read behind the renderer's diff preview — the only
+ * filesystem capability the renderer has, and the narrowest form of it.
+ *
+ * The renderer supplies a file plus the cwd of the session it is displaying.
+ * Every path is resolved with `realpath` *before* the containment test, so a
+ * symlink planted inside the workspace cannot point the read outside it, and
+ * containment is judged with `path.relative` rather than a `startsWith` prefix
+ * (which would let `/home/neo-evil` pass a naive `/home/neo` check). Anything
+ * refused — relative cwd, escape, missing file, directory, non-regular file —
+ * returns null, which degrades the preview to a create-style diff instead of
+ * throwing onto the render path.
+ *
+ * @returns {{text: string, truncated: boolean}|null}
+ */
+function readTextFileForPreview(payload) {
+  try {
+    const file = payload && typeof payload.file === 'string' ? payload.file : '';
+    const cwd = payload && typeof payload.cwd === 'string' ? payload.cwd : '';
+    if (!file || !cwd || !path.isAbsolute(cwd)) return null;
+
+    // realpath both sides: resolving the root too keeps this correct on hosts
+    // where the workspace itself is reached through a symlink (/tmp, /var).
+    const root = fs.realpathSync(cwd);
+    const abs = fs.realpathSync(path.resolve(root, file));
+    const rel = path.relative(root, abs);
+    if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return null;
+
+    const st = fs.statSync(abs);
+    if (!st.isFile()) return null;
+
+    if (st.size <= PREVIEW_READ_MAX_BYTES) {
+      return { text: fs.readFileSync(abs, 'utf8'), truncated: false };
+    }
+    // Oversized: read only the head of the file and cut back to the last
+    // newline, so a byte-boundary truncation cannot leave a half-decoded
+    // multi-byte sequence at the end of the preview.
+    const fd = fs.openSync(abs, 'r');
+    try {
+      const buf = Buffer.alloc(PREVIEW_READ_MAX_BYTES);
+      const n = fs.readSync(fd, buf, 0, PREVIEW_READ_MAX_BYTES, 0);
+      let text = buf.toString('utf8', 0, n);
+      const nl = text.lastIndexOf('\n');
+      if (nl > 0) text = text.slice(0, nl + 1);
+      return { text, truncated: true };
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Pure mapping: model:<name> -> LocalEngine call (unit-testable in Node).
  */
@@ -1213,6 +1269,17 @@ function registerModelIpc(ipcMain, engine, sessionsDir, aegis, onReplyFinished, 
     }
     ipcMain.handle(`${MODEL_PREFIX}${name}`, (_event, payload) => handler(payload));
   }
+
+  // Diff-preview pre-edit read (preload.js `readTextFile`). Registered with
+  // `on` + `event.returnValue`, NOT `handle`: the bridge is `sendSync` because
+  // editPreview consumes its reader synchronously and cannot await an invoke
+  // promise, and `sendSync` is answered only by an `ipcMain.on` listener.
+  // Putting it in modelDispatch above would register a `handle` that sendSync
+  // never reaches. Fires on every edit tool's run frame, so the refusal path
+  // is the common case (a `writeFile` creating a new file) and must stay cheap.
+  ipcMain.on(`${MODEL_PREFIX}readTextFile`, (event, payload) => {
+    event.returnValue = readTextFileForPreview(payload);
+  });
 
   for (const [name, handler] of Object.entries(syncDispatch)) {
     if (name === 'status') {
@@ -2646,6 +2713,8 @@ module.exports = {
   taggedChunk,
   maskKey,
   createModelDispatch,
+  readTextFileForPreview,
+  PREVIEW_READ_MAX_BYTES,
   createSyncDispatch,
   registerModelIpc,
   createHeartbeatRetry,

@@ -25,6 +25,8 @@ const { createTools, createClient, usageTokens, buildSystemPrompt } = require('.
 const { createEngine } = require('./engine.js');
 const { GLYPH, VERBS, themeOf, RESET, THEME_TABLE } = require('./theme.js');
 const { LiveRegion, termWidth, w } = require('./screen.js');
+const { editPreview } = require('./diff.js');
+const { defaultOpen } = require('./diffview.js');
 const { parseLine, COMMANDS, visibleCommands } = require('./commands.js');
 const {
   updateConfig,
@@ -558,6 +560,22 @@ function createApp(options = {}) {
     // Presentation hooks. With no presenter these reproduce the linear
     // behaviour exactly (live-region spinner, tool rows written to scrollback).
     const p = presenter || {};
+    // The engine opens a tool with a `phase: 'run'` frame BEFORE the executor
+    // runs, so a writeFile preview built here still reads the pre-edit file.
+    // Cached per tool id so the later `done` frame reuses the same preview
+    // instead of re-reading a file the tool has already overwritten (which
+    // would diff clean and show nothing).
+    const diffCache = new Map();
+    const previewFor = (tool) => {
+      const key =
+        tool && tool.id !== undefined
+          ? `id:${tool.id}`
+          : `${tool && tool.name}:${JSON.stringify(tool && tool.args)}`;
+      if (!diffCache.has(key)) {
+        diffCache.set(key, editPreview(tool && tool.name, tool && tool.args, { cwd: process.cwd() }));
+      }
+      return diffCache.get(key);
+    };
     const present = {
       text: (d) => {
         if (p.text) return p.text(d);
@@ -571,10 +589,11 @@ function createApp(options = {}) {
       tool: (tool) => {
         if (p.tool) return p.tool(tool);
         if (live) live.clear();
+        const diff = previewFor(tool);
         emit(
           render.renderTurn(
             ctx(),
-            { role: 'tool', label: tool.name, args: tool.args, ok: tool.ok },
+            { role: 'tool', label: tool.name, args: tool.args, ok: tool.ok, diff, diffOpen: defaultOpen(diff) },
             width()
           )
         );
@@ -935,9 +954,17 @@ function createApp(options = {}) {
       case 'error': emit(render.renderNotice(ctx(), 'error', row.text)); return;
       case 'user': emit(render.renderTurn(ctx(), { role: 'user', text: row.text, label: row.label }, W)); return;
       case 'assistant': emit(render.renderTurn(ctx(), { role: 'assistant', text: row.text }, W)); return;
-      case 'tool':
-        emit(render.renderTurn(ctx(), { role: 'tool', label: row.label || row.name, args: row.args, ok: row.ok }, W));
+      case 'tool': {
+        // A chatflow row carries the preview it built from the run frame
+        // (chatflow.js); a row pushed straight from a command handler has none,
+        // so build one here rather than re-showing the gray `$ {args}` row.
+        if (row.diff === undefined) {
+          row.diff = editPreview(row.name || row.label, row.args, { cwd: process.cwd() });
+          row.diffOpen = defaultOpen(row.diff);
+        }
+        emit(render.renderTurn(ctx(), { role: 'tool', label: row.label || row.name, args: row.args, ok: row.ok, diff: row.diff, diffOpen: !!row.diffOpen }, W));
         return;
+      }
       default: emit(render.renderNotice(ctx(), 'info', row.text == null ? '' : String(row.text))); return;
     }
   }

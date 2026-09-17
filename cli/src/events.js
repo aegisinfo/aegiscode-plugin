@@ -168,10 +168,13 @@ function feed(c) {
     seq += c;
     if (/[A-Za-z~]/.test(c)) {
       clearTimeout(escTimer);
-      const mouseDir = parseSgrMouse(seq);
-      if (mouseDir) {
+      const mouse = parseSgrMouse(seq);
+      if (mouse) {
         seq = '';
-        dispatch({ name: 'wheel', dir: mouseDir });
+        // Wheel decodes to a direction string; a left press to a {name,col,row}
+        // event. Both are returned by parseSgrMouse so the caller stays a
+        // one-line dispatch.
+        dispatch(typeof mouse === 'string' ? { name: 'wheel', dir: mouse } : mouse);
         return;
       }
       const k = decodeEscSequence(seq);
@@ -185,19 +188,27 @@ function feed(c) {
 }
 
 /**
- * SGR mouse button code → wheel direction. 64 = up, 65 = down; modifier bits
- * are masked off so Shift+wheel still scrolls. Anything else (clicks, drags)
- * returns null, and the caller's CSI decoder ignores it — so stray mouse bytes
- * can neither type into the editor nor abort a turn.
+ * SGR mouse event → decoded value. Wheel codes 64/65 decode to 'up'/'down'
+ * (modifier bits masked off so Shift+wheel still scrolls). A left button PRESS
+ * decodes to `{name:'click', col, row}` with 1-based coordinates from the
+ * payload. Everything else — a release (`m`), a drag, another button, or a
+ * horizontal wheel — returns null, and the caller's CSI decoder ignores it, so
+ * stray mouse bytes can neither type into the editor nor abort a turn.
  */
 function parseSgrMouse(seq) {
-  if (!seq.startsWith('\x1b[<')) return null;
-  const body = seq.slice(3).replace(/[Mm]$/, '');
-  const code = parseInt(body.split(';')[0], 10);
+  const m = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/.exec(seq);
+  if (!m) return null;
+  const code = parseInt(m[1], 10);
   if (!Number.isFinite(code)) return null;
   const base = code & ~0b111100;
   if (base === 64) return 'up';
   if (base === 65) return 'down';
+  // Left press only: button bits 0-1 clear, wheel bits (0b1100000) clear, no
+  // motion bit, and the `M` (press) terminator — a release or drag toggles
+  // nothing.
+  if (m[4] === 'M' && (code & 3) === 0 && (code & 0b1100000) === 0 && (code & 0b100000) === 0) {
+    return { name: 'click', col: parseInt(m[2], 10), row: parseInt(m[3], 10) };
+  }
   return null;
 }
 

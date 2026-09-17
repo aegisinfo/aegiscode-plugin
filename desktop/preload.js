@@ -102,6 +102,26 @@ const api = {
   billingCheckout: () => invoke('billingCheckout'),
   tokenBankTopup: (amountEur) => invoke('tokenBankTopup', { amountEur }),
   listModels: () => invoke('listModels'),
+  // Pre-edit file read for the diff preview (renderer/deriveDiff). A Write's
+  // preview needs the file's contents as they were *before* the executor
+  // overwrites them, and editPreview consumes a reader synchronously — so this
+  // one method is sentSync, not invoke. It is the narrowest possible widening
+  // of the bridge: main constrains the path to inside `cwd` and caps the read
+  // (main.js readTextFileForPreview), so the renderer can only ever reach files
+  // the session it is displaying is already allowed to edit. Returns
+  // `{ text, truncated }` or null; a bridge failure reports null rather than
+  // throwing onto the render path, which degrades the diff to a create-style
+  // "all additions" block.
+  readTextFile: (file, cwd) => {
+    try {
+      return ipcRenderer.sendSync(MODEL_PREFIX + 'readTextFile', {
+        file,
+        cwd,
+      });
+    } catch {
+      return null;
+    }
+  },
   // Streaming chat (D2.1): pass an onDelta callback to receive SSE chunks as
   // they arrive (pushed from main over aegis:chatDelta). The invoke promise
   // resolves once with the normalised final result. Without a callback the

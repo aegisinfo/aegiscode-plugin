@@ -1,7 +1,7 @@
 {
   "name": "aegiscode",
   "productName": "AEGIS Code",
-  "version": "6.6.1",
+  "version": "6.7.0",
   "description": "aegiscode — the command-line version of AEGIS Desktop. The shared tool surface in your shell, over the same thin transport and tool registry as the MCP plugin and the desktop app. Ships transport + UI only; no brain.",
   "author": {
     "name": "AEGIS Code",

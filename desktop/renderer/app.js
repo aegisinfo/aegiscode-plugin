@@ -1940,7 +1940,7 @@ async function spawnPath(card, spec) {
       // tool executes. This line is retrospective by design (see
       // toolActivityLabel), so acting on the run frame too would print every
       // tool twice — once when it starts, once when it finishes.
-      if (chunk.tool.phase === 'run') return;
+      if (chunk.tool.phase === 'run') { captureDiffPreview(chunk.tool); return; }
       appendToolActivity(card, chunk.tool, 'flow-tools', '.flow-body');
       return;
     }
@@ -2117,6 +2117,54 @@ function setBusy(busy, { cancellable } = {}) {
 const TOOL_LABEL_MAX = 72;
 
 /**
+ * Host tool names whose calls render as a collapsible diff block instead of a
+ * bare line. The engine's own spellings (`Edit`/`Write`/`MultiEdit`) are
+ * included so a frame from a newer engine renders the same rather than falling
+ * back to a plain row.
+ */
+const EDIT_TOOL_NAMES = new Set(['editFile', 'writeFile', 'Edit', 'Write', 'MultiEdit']);
+
+/**
+ * Diff previews captured on a tool's `phase: 'run'` frame, keyed by tool id.
+ * The run frame fires strictly before the executor writes, which is the only
+ * moment a `writeFile`'s pre-edit contents can still be read — so the preview
+ * is built there and replayed when the matching `done` frame arrives.
+ */
+const toolPreviews = new Map();
+
+/**
+ * The pre-edit read a `writeFile`/`Write` preview needs. The renderer runs
+ * sandboxed (main.js sets contextIsolation + sandbox, so there is no
+ * `node:fs`), so the read goes over the preload bridge's synchronous
+ * `readTextFile`. Main confines the path to the session cwd it is handed, so
+ * `cwd` must travel with the call — without it main has nothing to contain
+ * against and refuses, which degrades the write to a create-style diff (all
+ * additions). `editFile` carries its own old_string and needs no read, so it
+ * always renders a full diff regardless.
+ */
+function hostReadFile(file, cwd) {
+  try {
+    const bridge = typeof window !== 'undefined' ? window.aegis : null;
+    if (bridge && typeof bridge.readTextFile === 'function') {
+      return bridge.readTextFile(file, cwd);
+    }
+  } catch {
+    // A bridge that throws must not break the render path.
+  }
+  return undefined;
+}
+
+/** Build and stash the diff preview for an edit tool when its run frame arrives. */
+function captureDiffPreview(tool) {
+  if (!tool || !EDIT_TOOL_NAMES.has(tool.name) || tool.id == null) return;
+  // editPreview calls readFile(file) with no cwd, so bind the frame's cwd here.
+  const cwd = tool.cwd;
+  const readFile = (file) => hostReadFile(file, cwd);
+  const preview = editPreview(tool.name, tool.args, { cwd, readFile });
+  if (preview) toolPreviews.set(tool.id, preview);
+}
+
+/**
  * One display line for a completed tool call (`onDelta`'s `{ tool: {name,
  * args, ok} }` chunk — see desktop/lib/local/engine.js). Fires after the tool
  * already ran, so this is a retrospective log line, not a live spinner.
@@ -2141,7 +2189,12 @@ function toolActivityLabel(tool) {
   return `→ ${name}${shown ? ` ${shown}` : ''} ${mark}`;
 }
 
-/** Append one tool-activity line to `row`, creating the container on first use. */
+/**
+ * Append one tool-activity line to `row`, creating the container on first use.
+ * An edit tool whose preview was captured on its run frame renders as a
+ * collapsible diff block in place of the bare line; every other tool keeps the
+ * plain `→ name path ✓` row.
+ */
 function appendToolActivity(row, tool, containerClass, beforeSelector) {
   if (!row) return;
   let toolsEl = row.querySelector(`.${containerClass}`);
@@ -2151,6 +2204,15 @@ function appendToolActivity(row, tool, containerClass, beforeSelector) {
     const before = beforeSelector ? row.querySelector(beforeSelector) : null;
     if (before) row.insertBefore(toolsEl, before);
     else row.appendChild(toolsEl);
+  }
+  const preview = tool && tool.id != null ? toolPreviews.get(tool.id) : null;
+  if (preview) {
+    toolPreviews.delete(tool.id); // one-shot: a stale id must not replay on a retry
+    const block = renderDiffBlock(preview, document);
+    if (block) {
+      toolsEl.appendChild(block);
+      return toolsEl;
+    }
   }
   const line = document.createElement('div');
   line.textContent = toolActivityLabel(tool);
@@ -2971,7 +3033,7 @@ async function send() {
       // row. Ignored here, and ignored *before* `toolLog.push` — a run frame
       // counted as a completed tool would inflate the turn summary's tool
       // count for a call that hasn't run yet.
-      if (chunk.tool.phase === 'run') return;
+      if (chunk.tool.phase === 'run') { captureDiffPreview(chunk.tool); return; }
       toolLog.push(chunk.tool);
       const row = ensurePendingRow();
       row.classList.remove('pending');

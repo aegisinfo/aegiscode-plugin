@@ -138,6 +138,61 @@ const VERBS = [
  *  after one that used tools. */
 const DONE_VERBS = ['Churned', 'Worked'];
 
+/**
+ * Diff palette for edit blocks in the transcript — Monokai Extended, taken
+ * verbatim from the theme picker's preview (also `renderDiffPreview` in
+ * `aegiscodex-dev/src/markdown.js`) so the two can never drift apart: dim
+ * red/green backgrounds per row, the bright variant for the token that
+ * actually changed inside the row, and the monokai syntax colors for the code
+ * itself.
+ *
+ * A SEPARATE export, not keys added to `C`/`LIGHT`: `test/cli-conformance.test.mjs`
+ * pins `Object.keys(C)` to exactly the eleven DEV_DARK role names, so a diff
+ * entry folded into the palette would fail the conformance guard. This is the
+ * same reason `DIFF` is its own object in the engine.
+ */
+const DIFF = {
+  delFg: RGB(220, 90, 90),
+  delBg: BG(61, 1, 0),
+  delHiFg: RGB(248, 248, 242),
+  delHiBg: BG(92, 2, 0),
+  addFg: RGB(80, 200, 80),
+  addBg: BG(2, 40, 0),
+  addHiFg: RGB(255, 255, 255),
+  addHiBg: BG(4, 71, 0),
+  codeFg: RGB(248, 248, 242),
+  gutter: RGB(120, 120, 120),
+  kw: RGB(102, 217, 239),
+  fn: RGB(166, 226, 46),
+  str: RGB(230, 219, 116),
+  num: RGB(174, 129, 255),
+  comment: RGB(117, 113, 94),
+};
+
+/**
+ * The light-theme diff palette. Monokai's dark backgrounds on a light terminal
+ * are unreadable, so the row backgrounds invert to a pale tint and the code
+ * keeps its hue mapping from the dark set — the same relationship `LIGHT`
+ * already has to `C`.
+ */
+const DIFF_LIGHT = {
+  delFg: RGB(160, 40, 40),
+  delBg: BG(255, 235, 233),
+  delHiFg: RGB(90, 0, 0),
+  delHiBg: BG(255, 205, 200),
+  addFg: RGB(30, 130, 40),
+  addBg: BG(232, 250, 232),
+  addHiFg: RGB(0, 80, 0),
+  addHiBg: BG(195, 240, 195),
+  codeFg: RGB(40, 40, 40),
+  gutter: RGB(150, 150, 150),
+  kw: RGB(0, 120, 160),
+  fn: RGB(80, 140, 0),
+  str: RGB(150, 110, 0),
+  num: RGB(120, 60, 200),
+  comment: RGB(140, 140, 130),
+};
+
 const THEMES = { dark: C, light: LIGHT };
 
 /**
@@ -206,6 +261,20 @@ function themeOf(ctx) {
   return ctx && ctx.light ? LIGHT : C;
 }
 
+/**
+ * The diff palette for a context — the exact companion of `themeOf`, so a
+ * caller never has to ask "which palette did the rows use?" separately from
+ * "which diff colors go with it?". `themeIndex` 3–6 are the four picker rows
+ * whose brightness is named by their own `light` flag; anything else falls
+ * back to the ctx's `light` flag, exactly as `themeOf` does.
+ */
+function diffOf(ctx) {
+  const light = ctx && typeof ctx.themeIndex === 'number' && ctx.themeIndex >= 3 && ctx.themeIndex <= 6
+    ? !!THEME_TABLE[ctx.themeIndex].light
+    : !!(ctx && ctx.light);
+  return light ? DIFF_LIGHT : DIFF;
+}
+
 module.exports = {
   RGB,
   BG,
@@ -221,6 +290,9 @@ module.exports = {
   RESET_BG,
   C,
   LIGHT,
+  DIFF,
+  DIFF_LIGHT,
+  diffOf,
   CB_DARK,
   CB_LIGHT,
   ANSI_DARK,
