@@ -481,6 +481,129 @@ for (const name of ['compact', 'recap']) {
   );
 }
 
+// ── /terminal: the mid-session capability switch ──────────────────────────────
+//
+// The handler is reachable from the palette and its no-arg path is covered by
+// the smoke test above, but that path only *reports*. The branches that mutate
+// session state — and the pin semantics that decide whether a live resize keeps
+// working — were unexercised, which is how the handler shipped calling a
+// `panels.buildTerminalCaps` that did not exist. `caps.js` is a process-wide
+// singleton, so every mutation here is restored in the `finally`.
+{
+  const cap = require(join(root, 'cli', 'src', 'caps.js'));
+  const cmd = findCommand('terminal');
+  assert(cmd, '/terminal is registered');
+  assert(cmd.aliases.includes('tty'), '/terminal has the `tty` alias the palette advertises');
+
+  // The report is rendered as `[span, span]` lines; flatten to plain text so the
+  // assertion reads like the panel a user sees rather than a span graph.
+  const textOf = (row) => String((row && row.text) || (row && row.t) || row || '')
+    .replace(/\x1b\[[0-9;]*m/g, '');
+
+  const drive = async (args) => {
+    const pushed = [];
+    const stub = {
+      ctx: {}, transcript: [],
+      push: (r) => pushed.push(r),
+      note: (t) => pushed.push({ role: 'note', text: t }),
+      panel: (lines) => pushed.push({ role: 'panel', lines }),
+      render: () => {},
+    };
+    const ret = await cmd.handler(stub, args);
+    const panelRow = pushed.find((r) => r.role === 'panel');
+    const panelText = panelRow ? panelRow.lines.flat().map(textOf).join('\n') : '';
+    const notes = pushed.filter((r) => r.role === 'note').map((r) => r.text).join('\n');
+    return { ret, pushed, panelText, notes };
+  };
+
+  const before = { ...cap.caps() };
+  try {
+    // 1. Status reports without mutating. This is the path the smoke test takes,
+    //    pinned here so the report itself is asserted, not just "did not throw".
+    {
+      const { ret, panelText } = await drive({ mode: 'status' });
+      eq(ret, true, '/terminal status returns true');
+      assert(/Terminal capabilities/.test(panelText), '/terminal status renders the capability panel');
+      assert(/mark|Mark/.test(panelText) && /star|Star/.test(panelText),
+        '/terminal status lists the mark and star axes (found no such row)');
+      assert(/\/terminal ascii/.test(panelText), '/terminal status names its own override syntax');
+      assert(/--ascii/.test(panelText), '/terminal status points at the launch flags');
+      eq(cap.caps().pinned, false, '/terminal status does not pin the frame');
+      eq(cap.caps().glyphs, before.glyphs, '/terminal status leaves the mark unchanged');
+    }
+
+    // 2. `ascii` downgrades every glyph axis together — the mark, the edges face
+    //    and the star — because stencilling only one of them is the exact
+    //    PowerShell/zsh divergence this layer exists to remove.
+    {
+      await drive({ mode: 'ascii' });
+      const c = cap.caps();
+      eq(c.glyphs, 'ascii', '/terminal ascii sets the glyph class to ascii');
+      eq(c.face, 'edges', '/terminal ascii stencils the block-edges face');
+      eq(c.star, 'narrow', '/terminal ascii narrows the star');
+      eq(c.pinned, false, '/terminal ascii must NOT pin the frame — a live resize still wins');
+    }
+
+    // 3. `unicode` is the inverse, and must restore all three axes.
+    {
+      await drive({ mode: 'unicode' });
+      const c = cap.caps();
+      eq(c.glyphs, 'unicode', '/terminal unicode restores the native mark');
+      eq(c.face, 'native', '/terminal unicode restores the native face');
+      eq(c.star, 'native', '/terminal unicode restores the native star');
+    }
+
+    // 4. The star is independently switchable — it is the one rune Windows fonts
+    //    lack, so it needs an escape hatch that does not also stencil the art.
+    {
+      await drive({ mode: 'star', mode2: 'narrow' });
+      const c = cap.caps();
+      eq(c.star, 'narrow', '/terminal star narrow narrows only the star');
+      eq(c.glyphs, 'unicode', '/terminal star narrow leaves the mark alone');
+      const bad = await drive({ mode: 'star', mode2: 'wide' });
+      assert(/Usage/.test(bad.notes), '/terminal star rejects an unknown width with usage, not a throw');
+    }
+
+    // 5. `width` is the one branch that deliberately pins: an explicit column
+    //    count must survive a resize, or the pinned width would be undone by the
+    //    very SIGWINCH it exists to ignore.
+    {
+      await drive({ mode: 'width', mode2: '100' });
+      const c = cap.caps();
+      eq(c.cols, 100, '/terminal width 100 applies the column count');
+      eq(c.pinned, true, '/terminal width pins the frame so a resize cannot undo it');
+      const { panelText } = await drive({ mode: 'status' });
+      assert(/pinned/i.test(panelText), '/terminal status warns that the width is pinned');
+      const bad = await drive({ mode: 'width', mode2: 'abc' });
+      assert(/Usage/.test(bad.notes), '/terminal width rejects a non-number with usage, not NaN');
+      eq(cap.caps().cols, 100, '/terminal width abc leaves the pinned width untouched');
+    }
+
+    // 6. `auto` means "re-probe", not "restore the launch flags" — so it must
+    //    clear the pin and return every axis to what the environment resolves.
+    {
+      await drive({ mode: 'auto' });
+      const c = cap.caps();
+      eq(c.pinned, false, '/terminal auto clears the width pin');
+      eq(c.glyphs, before.glyphs, '/terminal auto re-probes the mark from the environment');
+      eq(c.depth, before.depth, '/terminal auto re-probes the colour depth');
+    }
+
+    // 7. An unknown subcommand explains itself instead of silently doing nothing.
+    {
+      const { ret, notes } = await drive({ mode: 'nonsense' });
+      eq(ret, true, '/terminal with an unknown subcommand still returns true (no dispatch fallthrough)');
+      assert(/Usage: \/terminal/.test(notes), '/terminal names its usage on an unknown subcommand');
+    }
+
+    console.log('  /terminal: 7 branches driven, axes + pin semantics held');
+  } finally {
+    // caps.js is a singleton shared with every later test in this process.
+    cap.resetCaps();
+    eq(cap.caps().pinned, false, 'the /terminal test restores the unpinned default');
+  }
+}
+
 console.log('CLI commands test passed');
 console.log(`  commands: ${COMMANDS.length} entries (${all.length} listed, ${vis.length} visible with this env)`);
 console.log(`  categories: ${CATEGORIES.length} · effort levels: ${EFFORT_LEVELS.join('/')}`);
