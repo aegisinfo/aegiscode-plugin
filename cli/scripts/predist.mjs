@@ -51,6 +51,12 @@ const FILES = [
   // reuses it as-is, scoped to the 'aegis' class only (see src/engine.js) —
   // one tool loop implementation, not a second one drifting alongside it.
   'desktop/lib/local/engine.js',
+  // engine.js requires this at load time to hold a turn cut off at its tool
+  // horizon: the interruption is filed against the session and the next turn
+  // resumes it instead of starting cold. Staging engine.js without it ships a
+  // CLI that throws `Cannot find module './session-rounds.js'` before it can
+  // answer anything — the same failure class as the 6.5.6 tarball below.
+  'desktop/lib/local/session-rounds.js',
   'desktop/lib/local/tools.js',
   'desktop/lib/local/shell.js',
   'desktop/lib/local/agents.js',

@@ -383,7 +383,14 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
    *  settings store's own accessor; then the safe default — ON, i.e. the gate
    *  stays up, so a store that predates the toggle can never silently
    *  disable it. */
+  // Session-scoped round accounting (lib/local/session-rounds.js): the
+  // tool-round cap is held against the *session* rather than the single turn,
+  // so a turn that reaches its horizon is resumed by the next turn in the same
+  // conversation instead of being cut off with the work lost. Module-level
+  // state, so it survives `send()` and even a fresh engine instance.
+  const sessionRounds = require('./session-rounds.js');
   const confirmModeEnabled = () => {
+
     if (typeof getConfirmMode === 'function') return getConfirmMode() !== false;
     if (settings && typeof settings.getConfirmMode === 'function') {
       const value = settings.getConfirmMode();
@@ -1020,12 +1027,47 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
       // The numbers match aegiscodex-dev's (src/autonomous.js) so both clients
       // behave the same: 24 rounds for a chat turn, 40 for an autonomous one.
       // Env-overridable for a deliberately long job.
-      const maxRounds = (() => {
-        const name = autonomous ? 'AEGIS_AUTONOMOUS_MAX_ROUNDS' : 'AEGIS_CHAT_MAX_ROUNDS';
-        const raw = Number.parseInt(process.env[name] || '', 10);
-        if (Number.isFinite(raw) && raw > 0) return raw;
-        return autonomous ? 40 : 24;
+      // A stated horizon (env) still wins outright — an explicit number is the
+      // user overriding the engine, not something the ledger may pad.
+      const roundEnvName = autonomous ? 'AEGIS_AUTONOMOUS_MAX_ROUNDS' : 'AEGIS_CHAT_MAX_ROUNDS';
+      const statedRounds = (() => {
+        const raw = Number.parseInt(process.env[roundEnvName] || '', 10);
+        return Number.isFinite(raw) && raw > 0 ? raw : 0;
       })();
+      const baseRounds = statedRounds || (autonomous ? 40 : 24);
+
+      // Did the previous turn in this session die at its horizon? If so, this
+      // turn is a continuation of it: same job, unfinished, and the model has
+      // to be told — a cold restart is what made the old cap lose work.
+      let roundSessionKey = sessionRounds.keyFor(payload, history);
+      let resumed = sessionRounds.take(roundSessionKey);
+      if (!resumed) {
+        // The caller minted a fresh key this turn (no stated session id and a
+        // rebuilt history array). Adopt the held work rather than dropping it,
+        // but only within the ledger's recency window.
+        const adopted = sessionRounds.adopt();
+        if (adopted) {
+          resumed = adopted.entry;
+          roundSessionKey = adopted.key;
+        }
+      }
+      if (resumed) {
+        const preamble = sessionRounds.resumePreamble(resumed);
+        // Round 1's ask travels as `prompt`; a follow-up dispatch (and every
+        // turn that skips the shorthand) has to receive it through history.
+        if (prompt) prompt = `${preamble}\n\n${prompt}`;
+        else history.push({ role: 'user', content: preamble });
+        if (rootOnDelta) {
+          rootOnDelta({
+            delta:
+              `\n\n[resuming work this session left unfinished at ${resumed.rounds} tool rounds` +
+              `${resumed.interruptions > 1 ? ` (cut off ${resumed.interruptions}×)` : ''}…]\n`,
+          });
+        }
+      }
+      // A resumed turn gets a small bonus on top of the base horizon so
+      // re-orientation does not consume the new budget before any work lands.
+      const maxRounds = statedRounds || baseRounds + (resumed ? sessionRounds.bonus(baseRounds) : 0);
       let round = 0;
 
       // Token accounting for the whole TURN, not just its last round. An
@@ -1084,13 +1126,26 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
           const note =
             `[stopped at ${maxRounds} tool rounds` +
             `${turnUsage.total_tokens ? `, ${turnUsage.total_tokens.toLocaleString()} tokens` : ''}` +
-            `. Ask again to continue, or raise ` +
-            `${autonomous ? 'AEGIS_AUTONOMOUS_MAX_ROUNDS' : 'AEGIS_CHAT_MAX_ROUNDS'}.]`;
+            `. This session holds the work: your next message here resumes it automatically` +
+            ` (with a continuation preamble), or raise ${roundEnvName} for a longer single turn.]`;
+          // File the interruption before returning, so the horizon is a pause
+          // in the session rather than the end of the job. `chain` carries the
+          // count forward across resumes.
+          const held = sessionRounds.record(roundSessionKey, {
+            rounds: round,
+            tokens: turnUsage.total_tokens || 0,
+            note,
+            chain: resumed ? resumed.interruptions : 0,
+          });
           if (rootOnDelta) rootOnDelta({ delta: `\n\n${note}` });
           return withTurnUsage({
             model: base.model,
             choices: [{ message: { content: note }, finish_reason: 'length' }],
             stoppedOnRounds: true,
+            heldForSession: true,
+            heldRounds: held.rounds,
+            sessionInterruptions: held.interruptions,
+            resumedFrom: roundSessionKey,
           });
         }
         round += 1;
