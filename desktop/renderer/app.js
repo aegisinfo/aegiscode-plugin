@@ -106,6 +106,7 @@ const ELEMENT_IDS = {
   sessionsHint: 'sessions-hint',
   syncNow: 'sync-now',
   syncStatus: 'sync-status',
+  sessionMeter: 'session-meter',
   newChat: 'new-chat',
   memorySearchForm: 'memory-search-form',
   memoryQuery: 'memory-query',
@@ -229,6 +230,83 @@ let currentSessionId = null;
 let threadMessages = [];
 let classOptions = [];
 let modelMeta = new Map(); // model id -> raw model object from listModels() (P2 §6.3 ceiling)
+
+// ------------------------------------------------------- rolling token meter
+//
+// Tokens are accounted the way the CLI accounts them: as a RUNNING SESSION
+// TOTAL, folded turn by turn, not as a per-turn number that resets at the next
+// call. The CLI's `recordTurn` (cli/src/app.js) folds every finished turn into
+// one `session` object and prints that total in the status bar and in `ctrl+t`;
+// this surface printed each turn's count and nothing else, so the only way to
+// answer "what has this session spent" was to add the rows up by eye across the
+// scrollback. That is the accounting difference between two surfaces running
+// the same engine on the same prompt.
+//
+// Keyed by sessionId rather than held in one global, because the window holds
+// several sessions across its life: switching threads must not carry one
+// thread's spend into another's meter, and resuming a thread must not start its
+// total at zero. `rollMessages` rebuilds a resumed session's total from the
+// ledger rows the shared store already keeps.
+const rollsBySession = new Map();
+
+/** The rolling tallies for a session — empty, never undefined, when unseen. */
+function rollFor(sessionId) {
+  const id = sessionId || '';
+  if (!rollsBySession.has(id)) rollsBySession.set(id, emptyRoll());
+  return rollsBySession.get(id);
+}
+
+/**
+ * Fold one finished dispatch into its session's rolling total and refresh the
+ * meter. Returns the turn's own accounting so the caller can still print the
+ * per-turn figure beside the session total (the CLI shows both: the meta row's
+ * `1.5k tok` and the status bar's rolling total).
+ */
+function foldRoll(sessionId, usage, opts = {}) {
+  const id = sessionId || '';
+  const next = rollTurn(rollFor(id), usage, opts);
+  rollsBySession.set(id, next);
+  renderRollMeter(id);
+  return next;
+}
+
+/**
+ * Paint the topbar meter. Hidden while a session has accounted for nothing —
+ * an unused thread must not display a `0 tok` it never measured — and shown
+ * the moment a turn is folded in.
+ */
+function renderRollMeter(sessionId) {
+  const el = els.sessionMeter;
+  if (!el) return;
+  const roll = rollsBySession.get(sessionId || '');
+  const line = roll && currentSessionId === sessionId ? fmtRoll(roll) : '';
+  el.textContent = line;
+  el.hidden = !line;
+  if (line) el.title = 'This session, counted the way the CLI counts it — every turn rolled into one running total';
+}
+
+/**
+ * The ledger fields one finished turn must carry into the session store, so
+ * the rolling total can be REBUILT when the thread is reopened.
+ *
+ * Without this the rolling meter was a one-window illusion: the store kept
+ * `{role, content}` only, so `rollMessages` found no `tokens` on any row this
+ * window had written and a reopened thread came back as a stack of
+ * unaccounted turns while the CLI — whose `recordExchange` does write `tokens`
+ * and `costUsd` into the very same file — came back with its full total. That
+ * asymmetry is the accounting difference, not the rendering of it.
+ *
+ * Nothing is written for a turn that reported no usage: a fabricated
+ * `{input: 0, output: 0}` row would read as a measured zero forever after,
+ * which is the one lie the token meter was built to avoid.
+ */
+function ledgerFields(usage, model, turn) {
+  const fields = {};
+  if (turn && turn.tokens != null) fields.tokens = usageBuckets(usage);
+  if (turn && turn.cost != null && turn.real) fields.costUsd = turn.cost;
+  if (model) fields.model = model;
+  return fields;
+}
 
 // ---------------------------------------------------------- discovery lane
 //
@@ -2011,6 +2089,21 @@ async function spawnPath(card, spec) {
     });
     if (flow.tokens != null) bits.push(`${flow.tokens} tokens`);
     if (flow.cost != null) bits.push(fmtCost(flow.cost, flow.real));
+    // …and roll it into the session, which is the half that was missing. The
+    // card shows this ONE dispatch; a session total that skipped it would be
+    // the lane's calls — the extra ones this feature's cost story is made of —
+    // being the only calls on screen that never get counted. `turns: 0`
+    // because a discovery path is not a turn the user asked for: it
+    // contributes tokens and calls, and leaves the turn count to real
+    // exchanges.
+    const roll = foldRoll(spec.parentSessionId, data && data.usage, {
+      model: spec.model,
+      costUsd: data && typeof data.costUsd === 'number' ? data.costUsd : undefined,
+      calls: data && data.calls,
+      turns: 0,
+    });
+    const rollLine = fmtRoll(roll);
+    if (rollLine) bits.push(`session: ${rollLine}`);
     meta.textContent = bits.join(' · ');
   } catch (err) {
     const message = err && err.message ? err.message : String(err);
@@ -2861,6 +2954,15 @@ function openSession(id) {
       // its on-screen transcript — continuing it as sessionId reuses the same
       // id and threadMessages carries the prior turns into the next send().
       currentSessionId = s.id;
+      // A resumed thread resumes its spend too. The shared store's ledger rows
+      // carry `tokens`/`costUsd` (client/session-store.js recordExchange writes
+      // exactly the shape rollMessages reads), so the rolling total is rebuilt
+      // from what was really recorded rather than restarting at zero — the
+      // CLI's aggregateSessionUsage, which sums history.jsonl for the same
+      // reason. A row this window wrote before ledgerFields existed carries no
+      // `tokens` and folds as unaccounted, which is stated rather than guessed.
+      rollsBySession.set(s.id, rollMessages(msgs));
+      renderRollMeter(s.id);
       threadMessages = msgs
         .filter((m) => m.role === 'user' || m.role === 'assistant')
         .map((m) => ({ role: m.role, content: m.content || m.text || '' }));
@@ -2915,6 +3017,12 @@ function newChat() {
   currentSessionId = null;
   threadMessages = [];
   flowCount = 0;
+  // A fresh thread opens with an empty meter. The outgoing session's roll is
+  // left in the map (reopening it rebuilds from the store anyway), but the
+  // topbar must not keep showing the thread the user just left — `sessionId`
+  // nulls out here and the new id is minted on the first send, so nothing is
+  // hidden that will not reappear with this thread's own number.
+  renderRollMeter(null);
 }
 
 /**
@@ -3098,10 +3206,30 @@ async function send() {
     });
     if (turn.tokens != null) bits.push(`tokens: ${turn.tokens}`);
     if (turn.cost != null) bits.push(fmtCost(turn.cost, turn.real));
+    // …AND the running session total beside it, which is the number the CLI
+    // prints. The per-turn figure answers "what did that call cost"; only the
+    // rolling one answers "what has this conversation cost", and it was the
+    // missing half. Folded here rather than only on the meter so a turn that
+    // reported no usage still counts as a turn (rollTurn counts before it
+    // tests the count) instead of vanishing from the session.
+    const roll = foldRoll(sessionId, data && data.usage, {
+      model,
+      costUsd: data && typeof data.costUsd === 'number' ? data.costUsd : undefined,
+      calls: data && data.calls,
+    });
+    const rollLine = fmtRoll(roll);
+    if (rollLine) bits.push(`session: ${rollLine}`);
     addMessage('assistant', text, bits.join(' · ') || undefined, sessionId, toolLog);
 
     try {
-      await sync.append(sessionId, { role: 'assistant', content: text });
+      await sync.append(sessionId, {
+        role: 'assistant',
+        content: text,
+        // The turn's ledger fields, so this window's spend survives the window
+        // — see ledgerFields. This is what makes the rolling meter the same
+        // quantity after a reopen as it was before one.
+        ...ledgerFields(data && data.usage, model, turn),
+      });
       await sync.save({ id: sessionId, title: prompt.slice(0, 60) });
     } catch {
       /* persistence is non-fatal */

@@ -22,6 +22,11 @@
       <span class="dot" id="conn-dot"></span>
       <span id="conn-text">connecting…</span>
     </div>
+    <!-- The rolling session token total, counted the way the CLI counts it:
+         every finished turn folded into one running number rather than a
+         per-turn count that resets. Hidden until a turn has been accounted
+         for, so an untouched thread never shows a `0 tok` it never measured. -->
+    <div class="session-meter" id="session-meter" hidden></div>
     <div class="spacer"></div>
     <button type="button" id="new-chat" class="ghost-btn">New chat</button>
   </header>

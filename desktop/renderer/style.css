@@ -114,6 +114,28 @@ body {
   box-shadow: 0 0 6px var(--teal);
 }
 
+/* The rolling session token total — the CLI's status-bar figure, in the
+   topbar. Muted and monospaced so it reads as a meter rather than a heading,
+   and it never wraps: a number that reflows the topbar every turn is worse
+   than no number at all. Hidden via the `hidden` attribute, so the rule below
+   has to win against the flex display the base class would otherwise get. */
+.session-meter {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40ch;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.session-meter[hidden] {
+  display: none;
+}
+
 .spacer {
   flex: 1;
 }

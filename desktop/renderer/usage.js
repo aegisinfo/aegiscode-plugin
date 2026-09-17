@@ -46,14 +46,22 @@
  * reported none (an unknown count must render as nothing, never as `0`).
  *
  * @param {{total_tokens?: number, prompt_tokens?: number, completion_tokens?: number,
- *          input_tokens?: number, output_tokens?: number}|null|undefined} usage
+ *          input_tokens?: number, output_tokens?: number,
+ *          input?: number, output?: number}|null|undefined} usage
  * @returns {number|null}
  */
 function usageTokens(usage) {
   if (!usage || typeof usage !== 'object') return null;
   if (typeof usage.total_tokens === 'number') return usage.total_tokens;
-  const input = usage.input_tokens ?? usage.prompt_tokens;
-  const output = usage.output_tokens ?? usage.completion_tokens;
+  // Three spellings of the same quantity: OpenAI's, Anthropic's, and this
+  // file's own bucket shape — which is also the shape a LEDGER row carries
+  // (cli/src/history.js writes `{input, output, cacheRead, cacheWrite}` into
+  // sessions.json, and the CLI's demo path writes `{input, output}`). Reading
+  // only the two wire spellings left every stored row uncountable, so a
+  // resumed session's rolling total started at zero even though its ledger
+  // said otherwise.
+  const input = usage.input_tokens ?? usage.prompt_tokens ?? usage.input;
+  const output = usage.output_tokens ?? usage.completion_tokens ?? usage.output;
   if (typeof input !== 'number' && typeof output !== 'number') return null;
   return (input || 0) + (output || 0);
 }
@@ -183,6 +191,182 @@ function turnAccounting(usage, model, opts = {}) {
 }
 
 /**
+ * ── The rolling session tallies, on the CLI's rule ─────────────────────────
+ *
+ * The two surfaces did not merely print different numbers — they counted
+ * differently. The CLI never shows a turn's tokens in isolation: `recordTurn`
+ * (cli/src/app.js) folds each finished turn's usage into one `session` object
+ * — `tokens`, `inputTokens`, `outputTokens`, `calls` — and what the user reads
+ * back is that RUNNING TOTAL. The status bar prints `state.tokens`
+ * (renderStatus), and `ctrl+t` prints the tallies in one line
+ * (`tokenSummary`: `12,400 tok (10,100 in / 2,300 out) · 4 calls · €0.03`).
+ *
+ * The desktop counted per turn only. Every meta row was a fresh count that
+ * reset at the next call, so "what has this session spent" was answerable only
+ * by adding the rows up by eye across a scrollback — which is most of why the
+ * desktop looked like it accounted differently from the CLI on identical
+ * engine code and an identical prompt.
+ *
+ * Three properties of the CLI's fold are load-bearing and are reproduced here
+ * exactly, because dropping any one of them reintroduces a specific lie:
+ *
+ *   1. `turns` and `calls` are incremented BEFORE the "did usage come back?"
+ *      gate (recordTurn counts first, then tests `tokens != null`). A turn
+ *      that reported nothing still happened; a tally that skipped it would
+ *      report the session as shorter and cheaper than it was.
+ *   2. `tokens`, `input` and `output` accumulate — never reset. A rolling
+ *      total that resets per turn is the per-turn count it replaced.
+ *   3. A `null` count contributes nothing and is counted in `unknown`, so
+ *      `tokens: 0` is only ever read as a real zero. Nothing is ever added as
+ *      a fabricated 0 to make the arithmetic look complete.
+ *
+ * The money split is the CLI's too: a settled charge (the pool's ledger
+ * figure) rolls into `cost`, and a locally priced turn rolls into `estimate`.
+ * They are kept apart rather than summed so a `~`-estimate can never be read
+ * as part of the bill — the distinction `fmtCost` marks on a single turn, held
+ * across the session.
+ */
+
+/** A session with nothing accounted for yet. */
+function emptyRoll() {
+  return {
+    turns: 0,
+    calls: 0,
+    tokens: 0,
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    /** Dispatches that reported no usage at all — the honest gap in `tokens`. */
+    unknown: 0,
+    /** Settled charges (server-settled `costUsd`), rolled. */
+    cost: 0,
+    /** Locally priced turns, rolled. Never mixed into `cost`. */
+    estimate: 0,
+  };
+}
+
+/**
+ * Fold one completed dispatch into a session's rolling tallies. Pure: it
+ * returns a NEW roll and never mutates the one it was handed, so a half-applied
+ * fold cannot exist.
+ *
+ * @param {object} [roll]      the roll so far (emptyRoll() when omitted)
+ * @param {object} [usage]     the response's `usage` object
+ * @param {{model?: string, costUsd?: number, calls?: number, turns?: number}} [opts]
+ *        `calls` defaults to 1; a pooled turn may report how many provider
+ *        calls it actually made. `turns: 0` folds a dispatch that is not a
+ *        turn of its own — the discovery-lane card, which bills like any other
+ *        call but is not something the user asked for.
+ * @returns {object} the new roll
+ */
+function rollTurn(roll, usage, opts = {}) {
+  const next = Object.assign(emptyRoll(), roll || {});
+  next.turns += opts.turns === undefined ? 1 : Number(opts.turns) || 0;
+  next.calls += opts.calls === undefined ? 1 : Number(opts.calls) || 0;
+  const turn = turnAccounting(usage, opts.model, { costUsd: opts.costUsd });
+  if (turn.tokens == null) {
+    next.unknown += 1;
+    return next;
+  }
+  const b = usageBuckets(usage);
+  next.tokens += turn.tokens;
+  next.input += b.input;
+  next.output += b.output;
+  next.cacheRead += b.cacheRead;
+  next.cacheWrite += b.cacheWrite;
+  if (turn.real) next.cost += turn.cost;
+  else if (turn.cost != null) next.estimate += turn.cost;
+  return next;
+}
+
+/**
+ * Rebuild a session's rolling total from stored exchanges — the desktop's
+ * counterpart of the CLI's `aggregateSessionUsage`, which sums history.jsonl so
+ * a resumed session (and a compacted one) still reports everything it spent.
+ *
+ * Reads the shapes the shared store writes: an assistant message carrying
+ * `tokens: {input, output, cacheRead, cacheWrite}` and, when the pool settled
+ * the turn, `costUsd` (cli/src/history.js → session-store.recordExchange).
+ * Messages the desktop itself appended carry no `tokens` and fold as `unknown`
+ * — a resumed thread states what is known and does not invent the rest.
+ *
+ * @param {Array<{role?: string, tokens?: object, costUsd?: number, model?: string}>} [messages]
+ * @returns {object} the roll
+ */
+function rollMessages(messages) {
+  let roll = emptyRoll();
+  for (const m of Array.isArray(messages) ? messages : []) {
+    if (!m || m.role !== 'assistant') continue;
+    roll = rollTurn(roll, m.tokens, {
+      model: m.model,
+      costUsd: typeof m.costUsd === 'number' ? m.costUsd : undefined,
+      calls: m.calls,
+    });
+  }
+  return roll;
+}
+
+/**
+ * The CLI's rendering of a session tally — `cli/src/format.js fmtTokens`, which
+ * is the one `tokenSummary` actually imports (`cli/src/app.js:50`). NOT the
+ * `1.5k`/`12.3k` form in `cli/src/tokens.js`: that one belongs to the /cost
+ * panels, and using it here would print `12.4k` on the very total the CLI
+ * prints as `12,400` — a rendering difference stacked on top of the accounting
+ * difference this change exists to remove.
+ *
+ * Comma-grouped integer. Anything not finite and positive renders `0`, which is
+ * the CLI's rule and keeps a stray NaN from reaching the topbar.
+ */
+function fmtTokens(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return '0';
+  return Math.round(v)
+    .toString()
+    .replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+/**
+ * The rolling session total as one line — the desktop's counterpart of the
+ * CLI's `tokenSummary`. Empty string when nothing has been accounted for, so
+ * an untouched session adds no noise to a turn's meta line.
+ *
+ * @param {object} [roll]
+ * @returns {string} e.g. `12,400 tok (10,100 in / 2,300 out) · 4 calls · $0.0310`
+ */
+function fmtRoll(roll) {
+  const r = roll || emptyRoll();
+  if (!r.turns && !r.calls) return '';
+  // The first two fields are `tokenSummary` (cli/src/app.js:1413) verbatim,
+  // separator and all: `12,400 tok (10,100 in / 2,300 out) · 4 calls`. There the
+  // parenthetical is unconditional and the call count is singular at one; both
+  // are kept, because a line that is only *sometimes* shaped like the CLI's is a
+  // lookalike rather than the same quantity. The call count is also the number
+  // that reveals a fan-out, which is why it is not hidden at 1.
+  const bits = [
+    `${fmtTokens(r.tokens)} tok (${fmtTokens(r.input)} in / ${fmtTokens(r.output)} out)`,
+    `${r.calls} call${r.calls === 1 ? '' : 's'}`,
+  ];
+  // Money is where this line departs from `tokenSummary`, deliberately: that
+  // one sums a single `session.cost` in EUR via fmtEur, while this surface keeps
+  // a settled charge and a local estimate apart so a `~`-estimate can never be
+  // read as part of the bill. Desktop's pre-existing fmtCost renders both, and
+  // its `$` convention is left exactly as it was.
+  if (r.cost > 0 || r.estimate > 0) {
+    const money = [];
+    if (r.cost > 0) money.push(fmtCost(r.cost, true));
+    if (r.estimate > 0) money.push(fmtCost(r.estimate, false));
+    bits.push(money.join(' + '));
+  }
+  // No counterpart in `tokenSummary`, which folds a usage-less turn silently and
+  // so reports a total short of the truth without saying so. Named here instead:
+  // the count appears only when something went unreported, and it never changes
+  // a number — it only says the number is not the whole story.
+  if (r.unknown) bits.push(`${r.unknown} unrpt`);
+  return bits.join(' · ');
+}
+
+/**
  * A cost for display. Estimates are marked with `~` so an estimate is never
  * mistaken for a settled charge.
  *
@@ -203,6 +387,11 @@ if (typeof module !== 'undefined' && module.exports) {
     usageBuckets,
     usageCost,
     turnAccounting,
+    emptyRoll,
+    rollTurn,
+    rollMessages,
+    fmtTokens,
+    fmtRoll,
     fmtCost,
   };
 }
