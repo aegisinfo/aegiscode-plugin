@@ -137,7 +137,7 @@ function adopt({ now = Date.now(), maxAgeMs = 10 * 60 * 1000 } = {}) {
  * Stored as a defensive copy — the caller's `history` array keeps being
  * mutated by the turn that is returning it.
  */
-function record(key, { rounds, tokens, note, chain, messages } = {}, now = Date.now()) {
+function record(key, { rounds, tokens, note, chain, messages, added } = {}, now = Date.now()) {
   prune(now);
   const prior = entries.get(key);
   const entry = {
@@ -147,6 +147,12 @@ function record(key, { rounds, tokens, note, chain, messages } = {}, now = Date.
     at: now,
     interruptions: (Number.isFinite(chain) ? chain : prior && prior.interruptions) || 0,
     messages: Array.isArray(messages) ? messages.slice() : [],
+    // And what the interrupted turn added on TOP of what its caller already
+    // had. A resuming caller who brings its own conversation (an interactive
+    // chat) must get this half, not `messages` — pushing the full transcript
+    // into a history that already holds its first half duplicates the user's
+    // own turns back to the model.
+    added: Array.isArray(added) ? added.slice() : [],
   };
   entry.interruptions += 1;
   entries.delete(key);

@@ -945,6 +945,11 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
 
     const system = (payload && payload.system) || buildSystemPrompt(envFor(payload));
     const history = Array.isArray(payload && payload.messages) ? payload.messages.filter(Boolean).slice() : [];
+    // Index into `history` of everything THIS turn added as opposed to what the
+    // caller brought with it. Reset after the resume rehydration below, so a
+    // restored transcript is never re-recorded as if this turn had produced it
+    // (which would double it on every interruption in a chain).
+    let historyStart = history.length;
     let prompt = (payload && payload.prompt) || '';
 
     // Lazily start ONE shell session for this turn; the exec tool shares it so
@@ -1053,21 +1058,25 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
       }
       if (resumed) {
         const preamble = sessionRounds.resumePreamble(resumed);
-        // The preamble alone only tells the model HOW MUCH it did (rounds,
-        // tokens) — not WHAT. A caller that supplies no conversation of its
-        // own (a queue task's fresh dispatch: autonomous.js never sends
-        // `messages`) would otherwise resume with an empty `history` and no
-        // actual memory of the tool calls/results/files it already
-        // touched, making "continue, don't restart" an instruction the model
-        // has no material to follow — the queue's "start over" bug's other
-        // half, and the one the fixed queue status alone didn't close.
-        // Restore the interrupted turn's own transcript (stashed by the
-        // round-cap-stop branch below) when there is nothing of the
-        // caller's own to interleave it with; an interactive multi-turn
-        // chat's real prior conversation is left alone rather than guessing
-        // where the transcript belongs inside it.
-        if (Array.isArray(resumed.messages) && resumed.messages.length && history.length === 0) {
-          history.push(...resumed.messages);
+        // Restore the interrupted turn's transcript, because the preamble alone
+        // says HOW MUCH was done, not WHAT. The two callers need different
+        // halves of it, so `session-rounds` files both (see `record`):
+        //
+        //   · a caller who brings no conversation of its own — the queue
+        //     worker's fresh dispatch; autonomous.js never sends `messages` —
+        //     has nothing, so it gets the FULL transcript;
+        //   · an interactive chat already carries the prior turns (and the
+        //     "stopped at N rounds" note), so it gets only what THIS turn added
+        //     that the caller never saw: the tool calls and their results. Full
+        //     restore here would duplicate the caller's own text.
+        //
+        // The old `history.length === 0` guard did the first and not the second,
+        // so the resume it was written for a queue task never reached the
+        // interactive sessions this feature is actually used from.
+        if (history.length === 0) {
+          if (Array.isArray(resumed.messages) && resumed.messages.length) history.push(...resumed.messages);
+        } else if (Array.isArray(resumed.added) && resumed.added.length) {
+          history.push(...resumed.added);
         }
         // Round 1's ask travels as `prompt`; a follow-up dispatch (and every
         // turn that skips the shorthand) has to receive it through history.
@@ -1133,6 +1142,11 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
         prompt = '';
       };
 
+      // From here on, everything pushed into `history` is this turn's own work:
+      // the restored transcript above (if any) belongs to the turn it came from,
+      // and re-recording it would double the ledger on every interruption.
+      historyStart = history.length;
+
       for (;;) {
         // Stop and SAY so. A turn that reaches its horizon has usually done
         // real work; ending silently would paint an empty answer over it,
@@ -1157,6 +1171,9 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
             // a resume can restore real memory of the work, not just a count
             // of it (see the `resumed.messages` rehydration above).
             messages: history,
+            // …and only what this turn itself added, for the caller that
+            // already has the rest of `history` in its own conversation.
+            added: history.slice(historyStart),
           });
           if (rootOnDelta) rootOnDelta({ delta: `\n\n${note}` });
           return withTurnUsage({

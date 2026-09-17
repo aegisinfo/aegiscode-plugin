@@ -149,6 +149,11 @@ const api = {
   // call. Both resolve `{ enabled }`.
   getConfirmMode: () => invoke('getConfirmMode'),
   setConfirmMode: (enabled) => invoke('setConfirmMode', { enabled: Boolean(enabled) }),
+  // Persisting memory (the desktop counterpart of the CLI's `memoryPersist`):
+  // whether a finished turn is pushed to cloud memory automatically. Default
+  // ON; `source` distinguishes a stored preference from that default.
+  getMemoryPersist: () => invoke('memoryPersist.get'),
+  setMemoryPersist: (enabled) => invoke('memoryPersist.set', { enabled: Boolean(enabled) }),
 
   // Auto-update (electron-updater over GitHub Releases — see main.js
   // createUpdateManager). check/download resolve the same status shape the
@@ -276,6 +281,12 @@ const sync = {
   push: () => invokeSync('push'),
   pull: () => invokeSync('pull'),
   status: () => invokeSync('status'),
+  // The automatic post-turn push ("persisting memory"). Gate-checked in main
+  // against the `__memoryPersist` preference, so calling this on every turn is
+  // cheap when persistence is off — it returns `{ skipped: true }` without
+  // opening a request. `memoryPersistState()` reports the gate itself.
+  auto: () => invokeSync('auto'),
+  memoryPersistState: () => invokeSync('memoryPersistState'),
 };
 
 // Quick launcher surface: loaded by BOTH renderer/index.html (the settings

@@ -54,12 +54,21 @@ const DEFAULT_QUICK_LAUNCHER_SHORTCUT = 'CmdOrCtrl+Shift+Space';
  *  top-level namespace — never inside a provider's `cfg[provider]` object. */
 const CONFIRM_MODE_NAMESPACE = '__confirmMode';
 
+/** Reserved namespace for the persisting-memory preference: `{ enabled }` —
+ *  app-level, not a provider. This is the desktop's counterpart to the CLI's
+ *  `memoryPersist` config key, and the gate `lib/sync/persist-gate.js` reads
+ *  before any automatic cloud push. Default is ON (an absent namespace means
+ *  persistence is on, which is the shipped decision); an explicit `false` is
+ *  what turns it off. Nothing secret lives here, so no encryption. */
+const MEMORY_PERSIST_NAMESPACE = '__memoryPersist';
+
 /** Namespaces the provider-config surface must never see or mutate. */
 const RESERVED_NAMESPACES = Object.freeze([
   AEGIS_KEY_NAMESPACE,
   LEGACY_AEGIS_NAMESPACE,
   QUICK_LAUNCHER_NAMESPACE,
   CONFIRM_MODE_NAMESPACE,
+  MEMORY_PERSIST_NAMESPACE,
 ]);
 
 /** True for the AEGIS-key namespace(s) — provider CRUD must refuse these. */
@@ -282,6 +291,36 @@ function createSettingsStore({ dir, safeStorage } = {}) {
     return getConfirmMode();
   }
 
+  // --- Persisting memory: reserved namespace, plain preference -------------
+  // The desktop's half of "persisting memory for every account": whether a
+  // finished turn is pushed to cloud memory automatically. ON when unset —
+  // an install that never touched the toggle behaves like cli/, whose
+  // `memoryPersist` also defaults to on. `memoryPersistState()` reports the
+  // SOURCE as well as the value so "off" and "never set" stay distinguishable;
+  // lib/sync/persist-gate.js reads the same namespace straight off disk, and
+  // the two must agree on the default.
+
+  function getMemoryPersist() {
+    const cfg = load()[MEMORY_PERSIST_NAMESPACE] || {};
+    return cfg.enabled === undefined ? true : Boolean(cfg.enabled);
+  }
+
+  /** `{ enabled, source }` — mirrors cli/src/cloudsync.js memoryPersistState(). */
+  function memoryPersistState() {
+    const cfg = load()[MEMORY_PERSIST_NAMESPACE] || {};
+    return {
+      enabled: getMemoryPersist(),
+      source: cfg.enabled === undefined ? 'default' : 'config',
+    };
+  }
+
+  function setMemoryPersist(enabled) {
+    const data = load();
+    data[MEMORY_PERSIST_NAMESPACE] = { enabled: Boolean(enabled) };
+    save(data);
+    return memoryPersistState();
+  }
+
   return {
     file,
     get,
@@ -299,6 +338,9 @@ function createSettingsStore({ dir, safeStorage } = {}) {
     setQuickLauncherConfig,
     getConfirmMode,
     setConfirmMode,
+    getMemoryPersist,
+    memoryPersistState,
+    setMemoryPersist,
   };
 }
 
@@ -308,6 +350,7 @@ module.exports = {
   LEGACY_AEGIS_NAMESPACE,
   QUICK_LAUNCHER_NAMESPACE,
   CONFIRM_MODE_NAMESPACE,
+  MEMORY_PERSIST_NAMESPACE,
   DEFAULT_QUICK_LAUNCHER_SHORTCUT,
   RESERVED_NAMESPACES,
   isReservedNamespace,

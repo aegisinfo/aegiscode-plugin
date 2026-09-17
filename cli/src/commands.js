@@ -292,7 +292,11 @@ function memoryStatusLines(c) {
         ? '  (default)'
         : '';
   const rows = [
-    [span(C.white + BOLD, 'Persisting memory'), span(BOLD_OFF, '')],
+    // Both names, one gate. The commit that flipped the default renamed the
+    // panel to say what is being stored, but `/sync`, `/cloud sync` and the
+    // docs all still call it cloud sync — a panel that only answers to its new
+    // name makes the setting unfindable to anyone who learned the old one.
+    [span(C.white + BOLD, 'Persisting memory'), span(C.gray, ' · Cloud sync'), span(BOLD_OFF, '')],
     [span(C.gray, '─'.repeat(34))],
     [
       span(C.white, `  ${gate.enabled ? 'on' : 'off'}`),
@@ -1574,7 +1578,13 @@ const COMMANDS = [
         [span(C.gray, '')],
         [span(C.white + BOLD, '  Sync'), span(BOLD_OFF, '')],
         [span(C.gray, `  ${st.pending} pending  ·  ${st.synced} in sync  ·  ${st.importedRemote} pulled from cloud`)],
-        [span(C.gray, '  /cloud memory on | off   ·   /sync now')],
+        // Both names, because both work: `/cloud memory` is the new one that
+        // says what is being flipped, and `/cloud sync` is what every user who
+        // has ever turned this off typed (it dispatched here before the flip
+        // renamed the panel, and still does — see the `sub === 'sync'` branch).
+        // Advertising only the new name hides a working control behind a
+        // rename, which is how a setting becomes a rumour.
+        [span(C.gray, '  /cloud memory on | off   ·   /cloud sync on | off   ·   /sync now')],
       ]);
       c.render();
       return true;

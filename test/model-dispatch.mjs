@@ -74,9 +74,11 @@ const MODEL_NAMES = [
   'cancel',
   'respondApproval',
   'clearApprovals',
+  'memoryPersist.get',
+  'memoryPersist.set',
 ];
 
-const SYNC_NAMES = ['listSessions', 'open', 'save', 'append', 'delete', 'push', 'pull', 'status'];
+const SYNC_NAMES = ['listSessions', 'open', 'save', 'append', 'delete', 'push', 'pull', 'status', 'auto', 'memoryPersistState'];
 
 try {
   // 1. model: dispatch maps exactly the whitelist.
@@ -171,6 +173,24 @@ try {
   assert(sessionsStore.getSession(dir, 's-remote').title === 'from another machine', 'pulled session rehydrated locally');
   const cloudStatus = await cloudSyncDispatch.status();
   assert(cloudStatus.cloud === true && cloudStatus.pending === 0, 'status reflects cloud:true and no pending after sync');
+
+  // 2c. The auto-push gate (persisting memory) must read the SAME directory
+  //     Electron's settings store writes to. In a real install `sessionsDir`
+  //     (aegisHome) and `settingsDir` (app.getPath('userData')) are two
+  //     different paths — the regression this pins had the gate wired to
+  //     `sessionsDir`, so turning persistence off in Settings never reached
+  //     the thing enforcing it.
+  const settingsStoreLib = require('../desktop/lib/settings.js');
+  const otherDir = mkdtempSync(join(tmpdir(), 'aegis-model-settings-'));
+  settingsStoreLib.createSettingsStore({ dir: otherDir }).setMemoryPersist(false);
+  const gatedDispatch = createSyncDispatch(sessionsStore, dir, stubAegis, otherDir);
+  const gateState = await gatedDispatch.memoryPersistState();
+  assert(
+    gateState.enabled === false,
+    `auto-push gate must read settingsDir, not sessionsDir (got enabled:${gateState.enabled})`
+  );
+  const gatedRun = await gatedDispatch.auto();
+  assert(gatedRun.skipped === true, 'auto() must skip the push once settingsDir reports persistence off');
 
   // 3. registerModelIpc wires model:<name> and sync:<name> channels, and
   //    model:chat forwards deltas over CHAT_DELTA_CHANNEL.

@@ -2695,6 +2695,41 @@ async function refreshSyncStatus() {
 /** Explicit "Sync now" — push pending sessions, then pull remote ones.
  *  Offline-first: sync.push()/sync.pull() resolve `{ ok:false, reason }`
  *  rather than throwing, so this only hits the catch on an unexpected error. */
+/**
+ * Persisting memory after a turn: ask main to push what just finished.
+ *
+ * Deliberately unawaited — the answer is already on screen and in the local
+ * session store, so cloud memory is strictly extra and the composer must come
+ * back the moment the answer lands, not after a round trip. The decision to
+ * push at all is main's (lib/sync/persist-gate.js reads the `__memoryPersist`
+ * preference off disk and returns `{ skipped: true }` when it is off); this is
+ * a request, not a gate, which is why no preference is read here.
+ *
+ * It cannot throw — createAutoPush resolves on every failure — but the
+ * `.catch` stays: an unhandled rejection in the renderer is how a background
+ * convenience turns into a fatal.
+ */
+function autoPersistTurn() {
+  if (typeof sync.auto !== 'function') return;
+  sync
+    .auto()
+    .then((result) => {
+      // Same notice as syncNow(): the cap is the one sync outcome the user
+      // must see rather than have silently absorbed.
+      if (result && result.upgrade) {
+        capNotice(
+          els.sessionsHint,
+          result.upgrade,
+          'queued memory is waiting on the free-plan cap',
+          'Upgrade to sync it →'
+        );
+      }
+    })
+    .catch(() => {
+      /* persistence is non-fatal */
+    });
+}
+
 async function syncNow() {
   els.syncNow.disabled = true;
   els.sessionsHint.textContent = 'syncing…';
@@ -2985,6 +3020,9 @@ async function send() {
       /* persistence is non-fatal */
     }
 
+    // Persisting memory: the finished turn goes to the cloud on its own now.
+    autoPersistTurn();
+
     // The AI's second path: not awaited — the lane streams beside the thread
     // while the composer goes straight back to the user (chat flow D2.2).
     if (exploreEnabled() && text !== '(empty response)') {
@@ -3005,6 +3043,10 @@ async function send() {
       } catch {
         /* persistence is non-fatal */
       }
+      // A stopped turn is persisted too, and on purpose: this is the case a
+      // round-horizon stop produces (the model was cut off mid-work), and the
+      // partial transcript is exactly what the next turn needs restored.
+      autoPersistTurn();
     } else {
       addMessage(
         'assistant',

@@ -306,8 +306,28 @@ const tmpHome = (n) => fs.mkdtempSync(path.join(os.tmpdir(), `aegiscode-sync-${n
     });
     const { app, text } = captureApp(client);
 
-    // Off by default: silence is not consent for spending synced-token quota.
-    eq(app.cloudSyncEnabled(), false, 'cloud sync is off out of the box');
+    // The gate flipped: persisting memory is ON out of the box. It used to be
+    // opt-in on the reasoning that "silence is not consent for spending
+    // synced-token quota" — but silence was also the only way to learn the
+    // feature existed, and the copy promises cross-session memory with any
+    // account. The ceiling is metered on WRITES only, so being over it pauses
+    // new writes and leaves everything already stored readable; that is a state
+    // to surface, not a reason to default everyone to forgetting.
+    //
+    // What the old assertion was protecting is still protected, by the two
+    // tests below it: an explicit choice is honoured, and the quota is visible.
+    const gate = app.cloudSyncState();
+    eq(app.cloudSyncEnabled(), true, 'persisting memory is on out of the box');
+    eq(gate.source, 'default', 'and the panel can say it is the default, not a stored setting');
+    eq(config.loadConfig().memoryPersist, undefined, 'a default is not written to config.json — it is still a default');
+
+    // An explicit pre-flip `cloudSync: false` survives the flip: nobody who
+    // turned this off gets quietly opted back in.
+    config.updateConfig({ memoryPersist: undefined, cloudSync: false });
+    const legacyOff = app.cloudSyncState();
+    eq(legacyOff.enabled, false, 'an explicit cloudSync: false is still an opt-out');
+    eq(legacyOff.source, 'legacy', 'and it is reported as the old key, not as the default');
+    config.updateConfig({ memoryPersist: true, cloudSync: undefined });
 
     await app.handleLine('/sync');
     const synced = text();
@@ -322,7 +342,22 @@ const tmpHome = (n) => fs.mkdtempSync(path.join(os.tmpdir(), `aegiscode-sync-${n
 
     await app.handleLine('/sync on');
     eq(app.cloudSyncEnabled(), true, '/sync on persists the setting');
-    eq(config.loadConfig().cloudSync, true, 'and it is in config.json, so it survives a restart');
+    // "Survives a restart" is the claim being tested, so test it against the
+    // key that is actually read at startup — and against a reload, not the
+    // in-memory object the running app already holds.
+    const persisted = config.loadConfig();
+    eq(persisted.memoryPersist, true, 'and it is in config.json, so it survives a restart');
+    eq(
+      persisted.cloudSync,
+      undefined,
+      'the pre-flip key is retired in the same write, so the two can never disagree'
+    );
+    eq(config.memoryPersistState(persisted).enabled, true, 'a reload resolves it as on');
+    eq(
+      config.memoryPersistState(persisted).source,
+      'config',
+      'and from the stored key, not from the default'
+    );
 
     // With auto-sync on, a turn pushes in the background — the setting has to
     // mean something, not just relabel the status line.

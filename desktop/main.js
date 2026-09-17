@@ -66,6 +66,7 @@ const ollama = require('./lib/local/ollama.js');
 const providers = require('./lib/local/providers.js');
 const sessionStore = require('./lib/sync/sessions.js');
 const memoryQueue = require('./lib/sync/memory-queue.js');
+const persistGate = require('./lib/sync/persist-gate.js');
 const windowState = require('./lib/window-state.js');
 const deepLink = require('./lib/deep-link.js');
 const quickLauncherLib = require('./lib/quick-launcher.js');
@@ -849,6 +850,14 @@ function createModelDispatch(engine) {
       }),
     'settings.remove': (payload) =>
       engine.settings.remove(payload && payload.provider),
+    // Persisting memory ("sync finished turns to cloud memory automatically").
+    // Reserved namespace, so it is invisible to the provider CRUD above — but
+    // unlike a provider it IS reachable deliberately, through these two. The
+    // gate that enforces it lives in lib/sync/persist-gate.js and reads the
+    // same file, so a `false` written here stops the next automatic push.
+    'memoryPersist.get': () => engine.settings.memoryPersistState(),
+    'memoryPersist.set': (payload) =>
+      engine.settings.setMemoryPersist(Boolean(payload && payload.enabled)),
     cancel: (payload) => engine.cancel(payload && payload.sessionId),
     // Tool-call approval gate (desktop/lib/local/engine.js gatedExecuteTool):
     // the renderer's approval card answers a pending exec/writeFile/editFile
@@ -869,7 +878,7 @@ function createModelDispatch(engine) {
  * resolve `{ ok: false, reason }` without ever throwing, and every local
  * flow (save/append/list) keeps working untouched.
  */
-function createSyncDispatch(sessions, dir, aegis) {
+function createSyncDispatch(sessions, dir, aegis, settingsDir) {
   let lastSyncAt = null;
 
   function hasCloud() {
@@ -1013,7 +1022,20 @@ function createSyncDispatch(sessions, dir, aegis) {
     }
   }
 
+  // The automatic post-turn push (persisting memory for every account). Gated
+  // by the `__memoryPersist` preference in settings.json, which the Settings
+  // pane writes through the memoryPersist:* IPC below; the gate is read from
+  // disk in the main process so the renderer cannot push past it. This must
+  // read `settingsDir` (Electron's userData path), NOT `dir` — `dir` here is
+  // the shared aegisHome() sessions/credentials directory, a different path
+  // from userData in a real install, and the settings store is created with
+  // `settingsDir`. Falling back to `dir` only covers callers (tests) that
+  // never pass `settingsDir` and use one directory for everything.
+  const autoPush = persistGate.createAutoPush({ push, dir: settingsDir || dir });
+
   return {
+    auto: () => autoPush.auto(),
+    memoryPersistState: () => autoPush.gate(),
     listSessions: () => ({ sessions: sessions.listSessions(dir) }),
     open: (payload) => sessions.getSession(dir, payload && payload.sessionId),
     save: (payload) => sessions.upsertSession(dir, payload || {}),
@@ -1135,11 +1157,16 @@ function createHeartbeatRetry(push, opts = {}) {
  * `onReplyFinished`, like the identical param on registerIpc, is
  * bootstrap()-only — it fires the native "reply ready" notification when the
  * window is unfocused/hidden and is never set in the headless test path.
- * `heartbeatOpts` ({ now, baseMs, maxMs }) is for tests only.
+ * `heartbeatOpts` ({ now, baseMs, maxMs }) is for tests only. `settingsDir`
+ * is Electron's userData path — where settings.json (and so the
+ * `__memoryPersist` preference the auto-push gate reads) actually lives;
+ * `sessionsDir` is the separate shared aegisHome() directory and must not be
+ * used for that gate. Falls back to `sessionsDir` for callers that don't pass
+ * it, i.e. tests that use one directory for everything.
  */
-function registerModelIpc(ipcMain, engine, sessionsDir, aegis, onReplyFinished, heartbeatOpts) {
+function registerModelIpc(ipcMain, engine, sessionsDir, aegis, onReplyFinished, heartbeatOpts, settingsDir) {
   const modelDispatch = createModelDispatch(engine);
-  const syncDispatch = createSyncDispatch(sessionStore, sessionsDir, aegis);
+  const syncDispatch = createSyncDispatch(sessionStore, sessionsDir, aegis, settingsDir);
 
   const heartbeat = createHeartbeatRetry(() => syncDispatch.push(), heartbeatOpts);
 
@@ -2181,7 +2208,7 @@ function bootstrap() {
   // One settings store backs both the provider settings surface and the AEGIS
   // API key entry. It lives only in the main process and encrypts keys at rest
   // via Electron safeStorage (best-effort base64 when unavailable).
-  const { engine, sessionsDir, settings } = createEngine(aegis, {
+  const { engine, sessionsDir, settingsDir, settings } = createEngine(aegis, {
     app,
     safeStorage,
     dir: dataDir,
@@ -2233,7 +2260,15 @@ function bootstrap() {
     (url) => shell.openExternal(url),
     notifyReplyIfUnfocused
   );
-  registerModelIpc(ipcMain, engine, sessionsDir, aegis, notifyReplyIfUnfocused);
+  registerModelIpc(
+    ipcMain,
+    engine,
+    sessionsDir,
+    aegis,
+    notifyReplyIfUnfocused,
+    undefined,
+    settingsDir
+  );
 
   // Tool-call approval toggle (Settings → "Confirm before running tools"):
   // aegis:getConfirmMode / aegis:setConfirmMode. Registered here because this
