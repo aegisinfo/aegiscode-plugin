@@ -66,6 +66,56 @@ function usageTokens(usage) {
   return (input || 0) + (output || 0);
 }
 
+/**
+ * Rough token count for text the wire never measured — a direct port of the
+ * CLI's own estimator (`aegiscodex-dev/src/tokens.js estimateTokens`), and the
+ * reason its session total is MONOTONIC.
+ *
+ * This is the whole difference being fixed. The CLI's `appendHistory`
+ * (aegiscodex-dev/src/history.js) writes a `tokens` object for EVERY finished
+ * exchange: `{input, output, cacheRead, cacheWrite, real: true}` when the wire
+ * reported usage, and `{input: estimateTokens(prompt), output:
+ * estimateTokens(reply), real: false}` when it did not. `real` is a FLAG, not a
+ * gate — `aggregateSessionUsage` adds `t.input || 0` for every row regardless,
+ * so a turn without usage still moves the total and only marks it as partly
+ * estimated.
+ *
+ * The desktop rolled only reported usage and dropped everything else, so its
+ * total was flat across any turn the pool did not report on — the meter looked
+ * dead while the conversation was being billed. ~4 characters per token, the
+ * CLI's heuristic, kept identical so the two surfaces estimate the same turn
+ * the same way. Empty text is 0, never the `Math.max(1, …)` floor.
+ */
+function estimateTokens(text) {
+  if (!text) return 0;
+  return Math.max(1, Math.ceil([...String(text)].length / 4));
+}
+
+/**
+ * The bucket shape an exchange gets when the wire reported no usage: the CLI's
+ * `{input: estimateTokens(prompt), output: estimateTokens(reply)}`.
+ *
+ * `null` when there is no text at all to estimate from, so a dispatch that
+ * genuinely reported nothing (no usage, no prompt, no reply) still lands in
+ * `unknown` instead of being handed a fabricated zero.
+ *
+ * @param {string} [prompt]
+ * @param {string} [reply]
+ * @returns {{input: number, output: number, cacheRead: number, cacheWrite: number}|null}
+ */
+function estimatedBuckets(prompt, reply) {
+  const hasPrompt = typeof prompt === 'string' && prompt.length > 0;
+  const hasReply = typeof reply === 'string' && reply.length > 0;
+  if (!hasPrompt && !hasReply) return null;
+  return {
+    input: estimateTokens(prompt),
+    output: estimateTokens(reply),
+    cacheRead: 0,
+    cacheWrite: 0,
+    real: false,
+  };
+}
+
 // Per-million-token USD rates. Cache-read/write matter for long sessions.
 //
 // These are the PROVIDER's rates, for the fallback path where a turn has no
@@ -239,6 +289,12 @@ function emptyRoll() {
     cacheWrite: 0,
     /** Dispatches that reported no usage at all — the honest gap in `tokens`. */
     unknown: 0,
+    /**
+     * Exchanges folded from TEXT rather than reported usage, on the CLI's
+     * `real: false` rule. They are counted in `tokens` — that is the point —
+     * and named here so an estimated figure is never read as a measured one.
+     */
+    estimated: 0,
     /** Settled charges (server-settled `costUsd`), rolled. */
     cost: 0,
     /** Locally priced turns, rolled. Never mixed into `cost`. */
@@ -253,11 +309,14 @@ function emptyRoll() {
  *
  * @param {object} [roll]      the roll so far (emptyRoll() when omitted)
  * @param {object} [usage]     the response's `usage` object
- * @param {{model?: string, costUsd?: number, calls?: number, turns?: number}} [opts]
+ * @param {{model?: string, costUsd?: number, calls?: number, turns?: number,
+ *          prompt?: string, reply?: string, estimated?: boolean}} [opts]
  *        `calls` defaults to 1; a pooled turn may report how many provider
  *        calls it actually made. `turns: 0` folds a dispatch that is not a
  *        turn of its own — the discovery-lane card, which bills like any other
- *        call but is not something the user asked for.
+ *        call but is not something the user asked for. `prompt`/`reply` are the
+ *        turn's text, used ONLY when the wire reported no usage, so the turn is
+ *        estimated rather than dropped (the CLI's `appendHistory` rule).
  * @returns {object} the new roll
  */
 function rollTurn(roll, usage, opts = {}) {
@@ -265,8 +324,31 @@ function rollTurn(roll, usage, opts = {}) {
   next.turns += opts.turns === undefined ? 1 : Number(opts.turns) || 0;
   next.calls += opts.calls === undefined ? 1 : Number(opts.calls) || 0;
   const turn = turnAccounting(usage, opts.model, { costUsd: opts.costUsd });
+  // A row folded from text rather than from the wire: either this turn's own
+  // fallback below, or a stored ledger row carrying `real: false` — the shape
+  // the CLI's `appendHistory` writes for an exchange the provider did not
+  // report on.
+  const estimated = opts.estimated === true || (usage && usage.real === false);
   if (turn.tokens == null) {
-    next.unknown += 1;
+    // No reported usage. The CLI does not let such a turn vanish from the
+    // total: `appendHistory` estimates it from the text and marks it
+    // `real: false` (aegiscodex-dev/src/history.js), and
+    // `aggregateSessionUsage` then adds it like any other row. Folding the same
+    // estimate here is what makes the live roll and the rebuilt roll the same
+    // number, and what stops the total standing still on exactly the turns the
+    // pool declined to report on — the symptom this fallback exists to remove.
+    const est = estimatedBuckets(opts.prompt, opts.reply);
+    if (!est) {
+      // Nothing reported AND no text to estimate from. The single case that
+      // stays uncounted: `unknown` names the gap, where a fabricated zero would
+      // read as a measurement.
+      next.unknown += 1;
+      return next;
+    }
+    next.tokens += est.input + est.output;
+    next.input += est.input;
+    next.output += est.output;
+    next.estimated += 1;
     return next;
   }
   const b = usageBuckets(usage);
@@ -275,6 +357,14 @@ function rollTurn(roll, usage, opts = {}) {
   next.output += b.output;
   next.cacheRead += b.cacheRead;
   next.cacheWrite += b.cacheWrite;
+  if (estimated) {
+    // Money stays out of an estimated exchange, deliberately and in both
+    // directions: the CLI writes no `costUsd` for one, so pricing it here would
+    // make the live roll drift from the rebuilt one — and pricing tokens that
+    // were themselves guessed would stack one guess on another.
+    next.estimated += 1;
+    return next;
+  }
   if (turn.real) next.cost += turn.cost;
   else if (turn.cost != null) next.estimate += turn.cost;
   return next;
@@ -305,6 +395,55 @@ function rollMessages(messages) {
     });
   }
   return roll;
+}
+
+/**
+ * The ledger row one finished dispatch must carry into the shared session
+ * store, so the rolling total can be REBUILT when the thread is reopened —
+ * the desktop's counterpart of the CLI's `appendHistory`
+ * (aegiscodex-dev/src/history.js:36).
+ *
+ * One authority for the row, on purpose. The CLI writes a `tokens` object for
+ * EVERY exchange and skips none:
+ *
+ *   tokens: usage
+ *     ? { input, output, cacheRead, cacheWrite, real: true }
+ *     : { input: estimateTokens(prompt), output: estimateTokens(reply), real: false }
+ *
+ * …and `aggregateSessionUsage` then sums `t.input || 0` over every entry with
+ * `real` as a FLAG, not a gate. Mirroring that shape here is what makes the
+ * live roll and the rebuilt roll the same number: `rollTurn` is handed this
+ * exact object on reopen, so an estimated exchange adds the same buckets it
+ * added live and is counted under `estimated` in both.
+ *
+ * Returns `null` when there is neither reported usage nor text to estimate
+ * from — the one case that must stay unrecorded, because a fabricated
+ * `{input: 0, output: 0}` row would read as a measured zero forever after.
+ *
+ * @param {object} [usage]  the response's `usage` object
+ * @param {object} [turn]   its accounting (turnAccounting), when already done
+ * @param {{model?: string, costUsd?: number, calls?: number, prompt?: string,
+ *          reply?: string}} [opts]
+ * @returns {object|null} the row's ledger fields
+ */
+function ledgerRow(usage, turn, opts = {}) {
+  const t = turn || turnAccounting(usage, opts.model, { costUsd: opts.costUsd });
+  const calls = Number.isFinite(opts.calls) && opts.calls > 0 ? opts.calls : undefined;
+  if (t.tokens != null) {
+    const row = { tokens: usageBuckets(usage) };
+    // Only a SETTLED charge is persisted. The CLI writes `costUsd` for a real
+    // charge only, and the rebuild prices an unpriced row from the same rate
+    // table this window used — persisting a local guess would let a stale
+    // table outlive the change that wrote it.
+    if (t.real && t.cost != null) row.costUsd = t.cost;
+    if (calls !== undefined) row.calls = calls;
+    return row;
+  }
+  const est = estimatedBuckets(opts.prompt, opts.reply);
+  if (!est) return null;
+  const row = { tokens: est };
+  if (calls !== undefined) row.calls = calls;
+  return row;
 }
 
 /**
@@ -343,10 +482,19 @@ function fmtRoll(roll) {
   // are kept, because a line that is only *sometimes* shaped like the CLI's is a
   // lookalike rather than the same quantity. The call count is also the number
   // that reveals a fan-out, which is why it is not hidden at 1.
-  const bits = [
-    `${fmtTokens(r.tokens)} tok (${fmtTokens(r.input)} in / ${fmtTokens(r.output)} out)`,
-    `${r.calls} call${r.calls === 1 ? '' : 's'}`,
-  ];
+  const bits = [];
+  // The token half only when something was actually counted. `rollTurn` counts
+  // turns and calls BEFORE it looks at the token count, so a dispatch that
+  // reported nothing still reaches here — and printing its empty tally would
+  // put `0 tok (0 in / 0 out)` on the topbar, a figure the meter never took,
+  // which reads as a counter that does not move. The turn count is still
+  // stated, because that much is true.
+  if (r.tokens > 0) {
+    bits.push(
+      `${fmtTokens(r.tokens)} tok (${fmtTokens(r.input)} in / ${fmtTokens(r.output)} out)`
+    );
+  }
+  bits.push(`${r.calls} call${r.calls === 1 ? '' : 's'}`);
   // Money is where this line departs from `tokenSummary`, deliberately: that
   // one sums a single `session.cost` in EUR via fmtEur, while this surface keeps
   // a settled charge and a local estimate apart so a `~`-estimate can never be
@@ -363,6 +511,11 @@ function fmtRoll(roll) {
   // the count appears only when something went unreported, and it never changes
   // a number — it only says the number is not the whole story.
   if (r.unknown) bits.push(`${r.unknown} unrpt`);
+  // The other half of the same honesty: a total that includes estimated
+  // exchanges says so, because the CLI marks the same rows `real: false` and a
+  // reader is entitled to know which figure they are looking at. It changes no
+  // number — it says the number is partly inferred.
+  if (r.estimated) bits.push(`${r.estimated} est`);
   return bits.join(' · ');
 }
 
@@ -387,9 +540,12 @@ if (typeof module !== 'undefined' && module.exports) {
     usageBuckets,
     usageCost,
     turnAccounting,
+    estimateTokens,
+    estimatedBuckets,
     emptyRoll,
     rollTurn,
     rollMessages,
+    ledgerRow,
     fmtTokens,
     fmtRoll,
     fmtCost,

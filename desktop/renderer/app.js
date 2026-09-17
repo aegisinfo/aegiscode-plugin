@@ -296,14 +296,24 @@ function renderRollMeter(sessionId) {
  * and `costUsd` into the very same file — came back with its full total. That
  * asymmetry is the accounting difference, not the rendering of it.
  *
- * Nothing is written for a turn that reported no usage: a fabricated
+ * One authority writes the row: `ledgerRow` in usage.js, which mirrors the
+ * CLI's `appendHistory` shape exactly. A turn the wire did not report on is
+ * STILL written — as the CLI writes it, an estimate from the turn's own text
+ * marked `real: false` — because that is what keeps the live roll and the
+ * rebuilt roll the same number. Only a dispatch with neither reported usage
+ * nor any text to estimate from writes nothing: a fabricated
  * `{input: 0, output: 0}` row would read as a measured zero forever after,
  * which is the one lie the token meter was built to avoid.
  */
-function ledgerFields(usage, model, turn) {
-  const fields = {};
-  if (turn && turn.tokens != null) fields.tokens = usageBuckets(usage);
-  if (turn && turn.cost != null && turn.real) fields.costUsd = turn.cost;
+function ledgerFields(usage, model, turn, text) {
+  const row = ledgerRow(usage, turn, {
+    model,
+    costUsd: turn && turn.real && typeof turn.cost === 'number' ? turn.cost : undefined,
+    calls: text && text.calls,
+    prompt: text && text.prompt,
+    reply: text && text.reply,
+  });
+  const fields = row ? Object.assign({}, row) : {};
   if (model) fields.model = model;
   return fields;
 }
@@ -2101,6 +2111,11 @@ async function spawnPath(card, spec) {
       costUsd: data && typeof data.costUsd === 'number' ? data.costUsd : undefined,
       calls: data && data.calls,
       turns: 0,
+      // The dispatch's own prompt and stream, for the same reason as the turn
+      // site: a path that reports no usage is estimated from its own text and
+      // counted, instead of leaving the lane's calls out of the session total.
+      prompt: `Original request:\n${spec.prompt}\n\n${spec.path.hint}`,
+      reply: text,
     });
     const rollLine = fmtRoll(roll);
     if (rollLine) bits.push(`session: ${rollLine}`);
@@ -3205,6 +3220,14 @@ async function send() {
       costUsd: data && typeof data.costUsd === 'number' ? data.costUsd : undefined,
     });
     if (turn.tokens != null) bits.push(`tokens: ${turn.tokens}`);
+    // A turn the wire did not report on still gets a figure — the same text
+    // estimate that goes into the session total, marked `~` so an inferred
+    // count is never read as a reported one. Printing nothing here while the
+    // session total moved was the other half of "the counter looks dead".
+    else {
+      const est = estimatedBuckets(prompt, text);
+      if (est) bits.push(`~${est.input + est.output} tokens`);
+    }
     if (turn.cost != null) bits.push(fmtCost(turn.cost, turn.real));
     // …AND the running session total beside it, which is the number the CLI
     // prints. The per-turn figure answers "what did that call cost"; only the
@@ -3216,6 +3239,11 @@ async function send() {
       model,
       costUsd: data && typeof data.costUsd === 'number' ? data.costUsd : undefined,
       calls: data && data.calls,
+      // The turn's own text, used ONLY when the wire reported no usage — so
+      // such a turn is estimated and counted rather than dropped. This is the
+      // CLI's `appendHistory` rule and the reason the total moves every turn.
+      prompt,
+      reply: text,
     });
     const rollLine = fmtRoll(roll);
     if (rollLine) bits.push(`session: ${rollLine}`);
@@ -3228,7 +3256,11 @@ async function send() {
         // The turn's ledger fields, so this window's spend survives the window
         // — see ledgerFields. This is what makes the rolling meter the same
         // quantity after a reopen as it was before one.
-        ...ledgerFields(data && data.usage, model, turn),
+        ...ledgerFields(data && data.usage, model, turn, {
+          prompt,
+          reply: text,
+          calls: data && data.calls,
+        }),
       });
       await sync.save({ id: sessionId, title: prompt.slice(0, 60) });
     } catch {
@@ -3252,9 +3284,31 @@ async function send() {
     if (isCancellation(err, { userStopped })) {
       const text = streamedText || reasoningText || '(stopped before any output)';
       threadMessages.push({ role: 'assistant', content: text });
-      addMessage('assistant', text, 'stopped by you', sessionId, toolLog);
+      // A stopped turn is a real exchange and the CLI records one: its
+      // `appendHistory` writes a `status: 'stopped'` entry for every stopped
+      // turn, and `aggregateSessionUsage` sums it like any other. The desktop
+      // wrote `{role, content}` and folded nothing, so an Escape mid-answer
+      // left the session total standing still on a turn the provider had
+      // already billed. Folded here like any other turn; with no wire usage
+      // on this path the figure is the text estimate, marked `est` — and
+      // never a fabricated zero.
+      const turn = turnAccounting(undefined, model, {});
+      const roll = foldRoll(sessionId, undefined, { model, prompt, reply: text });
+      const stopBits = ['stopped by you'];
+      if (turn.tokens != null) stopBits.push(`tokens: ${turn.tokens}`);
+      else {
+        const est = estimatedBuckets(prompt, text);
+        if (est) stopBits.push(`~${est.input + est.output} tokens`);
+      }
+      const stopRollLine = fmtRoll(roll);
+      if (stopRollLine) stopBits.push(`session: ${stopRollLine}`);
+      addMessage('assistant', text, stopBits.join(' · '), sessionId, toolLog);
       try {
-        await sync.append(sessionId, { role: 'assistant', content: text });
+        await sync.append(sessionId, {
+          role: 'assistant',
+          content: text,
+          ...ledgerFields(undefined, model, turn, { prompt, reply: text }),
+        });
       } catch {
         /* persistence is non-fatal */
       }
