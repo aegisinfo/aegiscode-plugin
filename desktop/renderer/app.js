@@ -1977,6 +1977,15 @@ async function spawnPath(card, spec) {
         // text nor a tool call would trigger the empty-turn recovery — an
         // extra dispatch this lane has no gathered context to justify.
         tools: false,
+        // `singlePass` is what makes that promise true on the pooled class.
+        // The engine derives the pooled brain flag as
+        // `singlePass ? false : autonomous ? true : undefined`, and this lane
+        // set neither: on a `nexus-brain*` id the flag was `undefined`, so the
+        // model id's own default decided — which is the fan-out. A card that
+        // was meant to be one cheap 1024-token pass could therefore bill a
+        // workers + synthesis dispatch, twice per turn. Explicit `false` =
+        // one provider call, always.
+        singlePass: true,
         sessionId: id,
       },
       onDelta
@@ -3206,9 +3215,17 @@ async function init() {
   });
   updateAutonomousControlsVisibility();
 
-  // The discovery lane is opt-in per machine, remembered across restarts.
+  // The discovery lane is opt-in, remembered across restarts.
+  //
+  // This used to read `savedExplore === 'off'` against a checkbox that shipped
+  // `checked` in index.html, i.e. the opposite of the comment above it: a fresh
+  // install (no `aegis.explore` key, and nothing had ever written one) landed
+  // with the lane ON and billed two extra model calls after every single turn —
+  // ~3× the tokens of a plain reply, silently, because the lane is
+  // fire-and-forget and never looks slow. Only an explicit 'on' turns it on
+  // now; every other state, including "never asked", means off.
   const savedExplore = localStorage.getItem(EXPLORE_KEY);
-  if (savedExplore === 'off') els.exploreToggle.checked = false;
+  els.exploreToggle.checked = savedExplore === 'on';
   els.exploreToggle.addEventListener('change', () => {
     localStorage.setItem(EXPLORE_KEY, els.exploreToggle.checked ? 'on' : 'off');
     if (!els.exploreToggle.checked) abortBranches();

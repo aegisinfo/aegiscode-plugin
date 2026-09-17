@@ -353,9 +353,12 @@
           <label
             class="flow-toggle"
             for="explore-toggle"
-            title="After every answer, send the AI down two extra paths — an alternative angle and an unexpected discovery — shown as a horizontal discovery lane."
+            title="Optional, off by default. After every answer, send the AI down two extra paths — an alternative angle and an unexpected discovery — shown as a horizontal discovery lane. This costs two extra model calls per turn (roughly 3× the tokens of a plain reply)."
           >
-            <input type="checkbox" id="explore-toggle" checked />
+            <!-- Unchecked in the markup on purpose: the lane bills two extra
+                 model calls per turn, so it is opt-in. app.js only ticks this
+                 when the user has explicitly saved 'on' (aegis.explore). -->
+            <input type="checkbox" id="explore-toggle" />
             <span>discovery lane</span>
           </label>
           <button type="submit" id="send">Send</button>
