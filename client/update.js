@@ -47,8 +47,46 @@ function isNewer(latest, current) {
   return false;
 }
 
-/** Fetch the registry's `latest` dist-tag. Resolves null on any failure. */
-function fetchLatest({ pkg = PKG, timeoutMs = TIMEOUT_MS } = {}) {
+/**
+ * Why a check produced no version. Every one of these used to collapse into a
+ * bare `null`, which is enough for the CLI ("no notice") but NOT enough for a
+ * host that shows the user a sentence about it: the desktop rendered all six
+ * as "registry unreachable", so a 2.5s timeout on a slow VPN was reported as
+ * fact about the registry — a false accusation, and unactionable.
+ */
+const REASONS = Object.freeze({
+  TIMEOUT: 'timeout',
+  NETWORK: 'network',
+  NOT_FOUND: 'not-found',
+  FORBIDDEN: 'forbidden',
+  HTTP: 'http',
+  MALFORMED: 'malformed',
+  TOO_LARGE: 'too-large',
+});
+
+/**
+ * Does this failure mean "the network let us down" (worth retrying silently, and
+ * NOT worth telling the user about) rather than "the registry answered, and the
+ * answer was no" (a real condition the user may need to act on)?
+ *
+ * `status` is the HTTP status when there was one, so 5xx/429 count as transient
+ * while 404/403 do not.
+ */
+function isTransientReason(reason, status = null) {
+  if (reason === REASONS.TIMEOUT || reason === REASONS.NETWORK) return true;
+  if (reason === REASONS.HTTP) return !status || status >= 500 || status === 429;
+  return false;
+}
+
+/**
+ * Fetch the registry's `latest` dist-tag, saying WHY when it fails.
+ *
+ * Resolves `{ ok, latest, reason, status }` and never rejects: `ok` is the
+ * version question, `reason` (one of REASONS) is the diagnosis. Use this when
+ * you intend to tell someone what happened; use `fetchLatest` when you only
+ * care whether there is a notice.
+ */
+function fetchLatestDetailed({ pkg = PKG, timeoutMs = TIMEOUT_MS } = {}) {
   return new Promise((resolve) => {
     let settled = false;
     const done = (v) => {
@@ -57,6 +95,9 @@ function fetchLatest({ pkg = PKG, timeoutMs = TIMEOUT_MS } = {}) {
         resolve(v);
       }
     };
+    const fail = (reason, status = null) =>
+      done({ ok: false, latest: null, reason, status });
+    const succeed = (latest) => done({ ok: true, latest, reason: null, status: 200 });
     try {
       // The abbreviated metadata document: a few KB instead of the full
       // packument, which for a package with this many releases is megabytes.
@@ -64,9 +105,12 @@ function fetchLatest({ pkg = PKG, timeoutMs = TIMEOUT_MS } = {}) {
         `${REGISTRY}/${pkg}`,
         { headers: { accept: 'application/vnd.npm.install-v1+json' }, timeout: timeoutMs },
         (res) => {
-          if (res.statusCode !== 200) {
+          const status = res.statusCode;
+          if (status !== 200) {
             res.resume();
-            return done(null);
+            if (status === 404) return fail(REASONS.NOT_FOUND, status);
+            if (status === 401 || status === 403) return fail(REASONS.FORBIDDEN, status);
+            return fail(REASONS.HTTP, status);
           }
           let body = '';
           res.setEncoding('utf8');
@@ -74,28 +118,39 @@ function fetchLatest({ pkg = PKG, timeoutMs = TIMEOUT_MS } = {}) {
             body += c;
             if (body.length > 2_000_000) {
               req.destroy();
-              done(null);
+              fail(REASONS.TOO_LARGE, status);
             }
           });
           res.on('end', () => {
             try {
               const tags = JSON.parse(body)['dist-tags'];
-              done((tags && tags.latest) || null);
+              const latest = (tags && tags.latest) || null;
+              // A 200 that parses but names no `latest` is a malformed
+              // document, not a slow network — do not invite a retry for it.
+              if (!latest) return fail(REASONS.MALFORMED, status);
+              succeed(latest);
             } catch {
-              done(null);
+              fail(REASONS.MALFORMED, status);
             }
           });
         }
       );
       req.on('timeout', () => {
         req.destroy();
-        done(null);
+        fail(REASONS.TIMEOUT);
       });
-      req.on('error', () => done(null));
+      // Every socket-level failure — DNS (ENOTFOUND), refused (ECONNREFUSED),
+      // TLS, proxy, reset mid-body — is the same story to a user: the network.
+      req.on('error', () => fail(REASONS.NETWORK));
     } catch {
-      done(null);
+      fail(REASONS.NETWORK);
     }
   });
+}
+
+/** Fetch the registry's `latest` dist-tag. Resolves null on any failure. */
+function fetchLatest(opts = {}) {
+  return fetchLatestDetailed(opts).then((r) => (r.ok ? r.latest : null));
 }
 
 /**
@@ -137,4 +192,14 @@ function updateLine({ current, latest, behind, pkg = PKG }) {
   return `Update available: ${current} → ${latest}   run: npm i -g ${pkg}@latest`;
 }
 
-module.exports = { isNewer, fetchLatest, updateNotice, updateLine, PKG, CHECK_INTERVAL_MS };
+module.exports = {
+  isNewer,
+  fetchLatest,
+  fetchLatestDetailed,
+  isTransientReason,
+  updateNotice,
+  updateLine,
+  PKG,
+  CHECK_INTERVAL_MS,
+  REASONS,
+};
