@@ -203,6 +203,30 @@ into the shared store once, so nothing is lost.) The **remember** button on any
 assistant reply pins that message to cross-machine memory — queued locally if
 you're offline.
 
+### Autonomous queue
+
+The desktop app and the CLI share one unattended work queue
+(`~/.aegiscode/queue.jsonl`): append tasks, drain them later, one at a time,
+with tool approval disabled and commits scoped to the files that task itself
+wrote.
+
+```bash
+aegiscode autonomous add "fix the flaky retry test" --cwd ~/repo --commit
+aegiscode autonomous list
+aegiscode autonomous proceed --max 3      # drain up to three
+aegiscode autonomous reconcile --auto     # queue the next unfinished PLAN.md phase, then drain
+```
+
+It runs **Aegis Cloud only** — `nexus-brain`, the pooled class — and a task that
+names any other model is refused where you can still see it: at `add` time, or
+pre-flight in the worker, rather than as an opaque error minutes into a drain. A
+single pass at `medium` effort is the default; the pooled fan-out (`workers` + 1
+provider calls at `high`) is opt-in via `AEGIS_AUTONOMOUS_FANOUT=1`. And a turn
+that reaches the tool-round cap no longer loses its work — the interruption is
+filed against the session and your next message resumes it under a continuation
+preamble with a padded horizon (in memory only, claimed once). Full detail:
+[`desktop/README.md`](desktop/README.md#autonomous-queue).
+
 ### Install
 
 ```bash
@@ -316,10 +340,12 @@ HTTPS.
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Run the tests with plain Node — no
-Electron required:
+Electron required, and no dependencies to install at the repo root (there is no
+root `package.json`):
 
 ```bash
-npm test          # or: node test/local-engine.test.mjs
+node --test test/*.test.mjs     # the whole suite
+node --test test/local-engine.test.mjs   # one file
 ```
 
 Licensed under MIT — see [LICENSE](LICENSE). Security notes in

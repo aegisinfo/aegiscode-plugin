@@ -45,6 +45,88 @@ queue that flushes on each "Sync now" or heartbeat retry. The **remember**
 button on any assistant reply pins that message to cross-machine memory —
 queued locally if you're offline.
 
+## Autonomous queue
+
+The unattended work queue, shared with the CLI: tasks are appended to
+`~/.aegiscode/queue.jsonl` and drained later, one at a time, with tool approval
+**disabled** — there is nobody there to click an approval card. The desktop
+sidebar's queue card and `aegiscode autonomous` are two views of the same file.
+
+```bash
+aegiscode autonomous add "fix the flaky retry test" --cwd ~/repo --commit
+aegiscode autonomous list
+aegiscode autonomous run                 # drain one task, then stop
+aegiscode autonomous proceed --max 3     # drain up to three
+aegiscode autonomous reconcile --auto    # queue the next unfinished PLAN.md phase, then drain it
+aegiscode autonomous retry <id>          # put a finished task back
+aegiscode autonomous clear --all         # empty the queue
+```
+
+A task's text is stored verbatim — `add "fix --json in the parser"` is a task,
+not a flag. Drains commit only the paths that task's own tool layer wrote, so a
+drain never sweeps a peer's in-flight edits into your commit.
+
+### Aegis Cloud only
+
+A queued task runs on the pooled brain — **`nexus-brain`** (alias
+`aegis-brain`) — for the same reason the Claude Code plugin is cloud-only: the
+queue hands work to a loop with no human in it, and the pooled class is the one
+the server can route, budget, and bill on its own. A task that *states* another
+model id is refused where you can still see it, instead of failing minutes into
+a drain as an opaque server error:
+
+| Where the model was stated | What happens |
+|---|---|
+| `autonomous add --model <id>` | refused, with the reason, at add time — nothing is queued |
+| A hand-edited `queue.jsonl` | refused pre-flight by the worker (`ms: 0`), before any turn is billed |
+| `AEGIS_MODEL=<id>` in the environment | **ignored for queue runs**, and reported as a note — that variable is shared with the interactive surfaces, which *do* run direct providers |
+| nothing stated | `nexus-brain` |
+
+### What a queued task costs
+
+The queue has two shapes, and the cheap one is the default:
+
+| | Single pass (default) | Fan-out (opt in) |
+|---|---|---|
+| Provider calls | 1 | `workers` + 1 (investigation passes, then synthesis) |
+| Effort rung | `medium` | `high` |
+| How to ask for it | nothing — it is the default | `AEGIS_AUTONOMOUS_FANOUT=1` |
+
+An earlier version sent **every** queued task as a fan-out at the priciest rung:
+one queued line could become several reasoning calls plus a synthesis, all at
+`high`. Making the fan-out opt-in, and letting effort follow the shape of the
+task rather than always topping out, removes the worker multiplication and
+roughly halves the budget on a one-line task. `--effort` (or
+`AEGIS_AUTONOMOUS_EFFORT`) still wins outright, and `--workers N` is only sent
+when you are actually fanning out.
+
+> **Known gap:** there is no `--fanout` flag yet — the opt-in is the environment
+> variable or `singlePass: false` in the task record. `--single-pass` still
+> parses, but it now agrees with the default instead of overriding it.
+
+### A turn that runs out of rounds keeps its work
+
+The tool loop runs against a round horizon: 24 rounds for an interactive turn
+(`AEGIS_CHAT_MAX_ROUNDS`), 40 for a queued one
+(`AEGIS_AUTONOMOUS_MAX_ROUNDS`). A model that reached it mid-turn used to lose
+everything it had assembled, because the cap was *turn* state.
+
+The horizon is now **session state**, held in `lib/local/session-rounds.js`. When
+a turn stops at the cap the interruption is filed against the session, and the
+next message in that conversation is prefixed with a continuation preamble —
+*cut off after N tool rounds; continue, do not restart* — along with
+`max(4, ⌈horizon/4⌉)` extra rounds so re-orientation does not eat the new
+horizon. The resume is announced in the transcript, so it is visible rather
+than silent.
+
+- In-memory and **process-local** (30-minute TTL, 64 entries) — it never leaves
+  the process and never touches disk.
+- Claiming an entry **consumes** it: one resume per interruption, so a chain of
+  interruptions is a chain of deliberate asks, never an automatic loop.
+- A **stated** horizon always wins; the ledger only pads its own default.
+- A caller that mints a fresh session key every turn adopts the most recent held
+  entry (bounded to 10 minutes) instead of losing the work.
+
 ## Keyboard shortcuts
 
 ### In the main window
@@ -124,6 +206,9 @@ main.js              Electron main process — window + IPC shell only
 preload.js           Context-isolated IPC bridge exposed to the renderer
 renderer/            UI (vanilla JS, no framework)
 lib/local/           Model classes, providers, agentic tool loop, prompt
+lib/local/queue.js   The shared work queue (~/.aegiscode/queue.jsonl)
+lib/local/autonomous.js  The unattended worker — directive, digest, commits
+lib/local/session-rounds.js  Session-scoped tool-round ledger (in-memory)
 lib/sync/            Local session/memory persistence + sync queue
 vendor/aegis.js      The AEGIS transport client (thin — no engine logic)
 bin/aegis.js         `aegis` CLI entry point for the global npm install
