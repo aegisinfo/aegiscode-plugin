@@ -29,10 +29,22 @@
  * Quota note, because it is the difference between a working sync and a
  * surprise: the server charges a push for the *growth* of a session
  * (`_session_token_delta` in aegis1's conversation_sync), refuses with 402 once
- * the plan's synced-token ceiling would be exceeded, and always serves pulls.
- * So sync is opt-in (config `cloudSync`, default off) rather than automatic on
- * every turn, and a 402 is reported as the quota error it is instead of being
- * swallowed into "sync failed".
+ * the plan's synced-token ceiling would be exceeded (FREE_SYNC_TOKENS = 1 MB,
+ * PRO_SYNC_TOKENS = 10 MB), and always serves pulls. So a 402 is reported as the
+ * quota error it is instead of being swallowed into "sync failed".
+ *
+ * This used to be the reason sync was opt-IN (config `cloudSync`, default off):
+ * automatic writes against a metered ceiling felt like spending someone else's
+ * money. It is now default ON (config `memoryPersist` — see config.js for the
+ * migration), because the ceiling is not a hard stop: aegis1's
+ * `_memory_sync_access()` enforces the limit on WRITES only, so an over-quota
+ * account still reads back everything it stored. What was missing was not
+ * caution, it was honesty: a free account passes ~1 MB of transcript in weeks,
+ * and the old failure mode was a silent stop with no visible state. So this
+ * module now records the quota it is told about (`status().quota`) and
+ * classifies the refusal as "writes paused, reads fine" rather than as a
+ * generic failure — `/cloud memory` (and the first-run notice) say exactly
+ * that, and `/cloud memory off` is the explicit opt-out.
  */
 
 const fs = require('node:fs');
@@ -70,10 +82,40 @@ function loadState() {
         // whole transcript, so every pull duplicated every earlier exchange and
         // /cost doubled with each sync.
         importedRemoteCount: parsed.importedRemoteCount || {},
+        // The last quota the server told us about — `{ used, limit, at, over }`.
+        // Persisted because it is the only way the NEXT run can say "you are at
+        // the ceiling, only new writes are paused" before it has re-attempted a
+        // push: without it, a restarted session looks identical to a fresh one
+        // and the over-quota state is invisible until the next refused write.
+        quota: parsed.quota && typeof parsed.quota === 'object' ? parsed.quota : null,
       };
     }
   } catch {}
-  return { sessions: {}, lastPushAt: null, lastPullAt: null, importedRemoteAt: {}, importedRemoteCount: {} };
+  return {
+    sessions: {},
+    lastPushAt: null,
+    lastPullAt: null,
+    importedRemoteAt: {},
+    importedRemoteCount: {},
+    quota: null,
+  };
+}
+
+/**
+ * Remember a quota reading from either half of a response — the numbers ride on
+ * a successful push (`token_limit` / `tokens_used`) as well as on the 402 body,
+ * and both are worth keeping.
+ *
+ * `over` is derived here, once, so every surface (status panel, first-run
+ * notice, auto-sync refusal) agrees about what "at the ceiling" means instead
+ * of each comparing used >= limit on its own.
+ */
+function recordQuota(state, used, limit) {
+  const u = Number(used);
+  const l = Number(limit);
+  if (!state || !Number.isFinite(u) || !Number.isFinite(l) || l <= 0) return null;
+  state.quota = { used: u, limit: l, over: u >= l, at: Date.now() };
+  return state.quota;
 }
 
 function saveState(state) {
@@ -217,7 +259,23 @@ function describeError(err) {
   const status = err && (err.status || (err.response && err.response.status));
   const message = (err && err.message) || String(err);
   if (status === 402) {
-    return { kind: 'quota', status, message, hint: 'the plan’s synced-token ceiling is reached — /cloud sync off, or free space in the account dashboard' };
+    // The 402 body carries the quota (`tokensUsed` / `tokenLimit`, from aegis1
+    // `_token_quota_fields`); the legacy session-named keys are read only as a
+    // fallback for a server that predates the rename.
+    const data = (err && err.data) || {};
+    const used = data.tokensUsed != null ? data.tokensUsed : data.sessionsUsed;
+    const limit = data.tokenLimit != null ? data.tokenLimit : data.freeSessionLimit;
+    return {
+      kind: 'quota',
+      status,
+      message,
+      used: used != null ? Number(used) : null,
+      limit: limit != null ? Number(limit) : null,
+      // The refusal is about WRITES only — say what still works and how to stop
+      // trying, instead of implying the account lost its memory.
+      hint:
+        'the plan’s synced-token ceiling is reached — everything already stored stays readable, only NEW writes pause: /cloud memory shows the quota, /cloud memory off stops syncing',
+    };
   }
   if (status === 401) {
     return { kind: 'auth', status, message, hint: 'the memory token was refused — run /key <api_key> to re-exchange it' };
@@ -263,11 +321,22 @@ async function push(client, o = {}) {
         title: transcript.title,
         quota: res && res.token_limit ? { used: res.tokens_used, limit: res.token_limit } : null,
       });
+      // A successful push is also a quota reading — the response reports the
+      // running total, which is how the status panel can show "43k of 1M" on a
+      // healthy account instead of only ever saying something when it breaks.
+      if (res && res.token_limit != null) recordQuota(state, res.tokens_used, res.token_limit);
       if (typeof o.onProgress === 'function') o.onProgress({ phase: 'push', id: session.id });
     } catch (err) {
       const info = describeError(err);
       markFailed(state, session.id, info.message);
       failed.push({ id: session.id, ...info });
+      // Record the ceiling state even when the body carried no numbers: the
+      // point of the honesty fix is that the stopped state is visible, and a
+      // server that refuses without reporting a limit must not produce a status
+      // panel that looks healthy.
+      if (info.kind === 'quota' && !recordQuota(state, info.used, info.limit)) {
+        state.quota = { used: null, limit: null, over: true, at: Date.now() };
+      }
       if (info.kind === 'quota' || info.kind === 'auth') break; // every later one fails the same way
     }
   }
@@ -367,6 +436,8 @@ function status() {
   const errors = sessions
     .filter((s) => state.sessions[s.id] && state.sessions[s.id].lastError)
     .map((s) => ({ id: s.id, error: state.sessions[s.id].lastError }));
+  const quota = state.quota || null;
+  const overQuota = Boolean(quota && quota.over);
   return {
     local: sessions.length,
     pending: pending.length,
@@ -375,6 +446,14 @@ function status() {
     lastPullAt: state.lastPullAt,
     importedRemote: Object.keys(state.importedRemoteAt || {}).length,
     errors,
+    // The ceiling, as last reported by the server, plus whether new writes are
+    // currently stopped by it. `paused` is the combination the panels print:
+    // there is local work waiting AND the last thing the server said was "no
+    // room". Both halves matter — a full account with nothing pending is not
+    // stuck, it is caught up.
+    quota,
+    overQuota,
+    paused: overQuota && pending.length > 0,
     path: syncStatePath(),
     historyPath: historyPath(),
   };
@@ -394,6 +473,7 @@ module.exports = {
   markFailed,
   entriesFromRemote,
   describeError,
+  recordQuota,
   push,
   pull,
   syncNow,

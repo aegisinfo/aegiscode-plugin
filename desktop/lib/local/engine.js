@@ -1053,6 +1053,22 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
       }
       if (resumed) {
         const preamble = sessionRounds.resumePreamble(resumed);
+        // The preamble alone only tells the model HOW MUCH it did (rounds,
+        // tokens) — not WHAT. A caller that supplies no conversation of its
+        // own (a queue task's fresh dispatch: autonomous.js never sends
+        // `messages`) would otherwise resume with an empty `history` and no
+        // actual memory of the tool calls/results/files it already
+        // touched, making "continue, don't restart" an instruction the model
+        // has no material to follow — the queue's "start over" bug's other
+        // half, and the one the fixed queue status alone didn't close.
+        // Restore the interrupted turn's own transcript (stashed by the
+        // round-cap-stop branch below) when there is nothing of the
+        // caller's own to interleave it with; an interactive multi-turn
+        // chat's real prior conversation is left alone rather than guessing
+        // where the transcript belongs inside it.
+        if (Array.isArray(resumed.messages) && resumed.messages.length && history.length === 0) {
+          history.push(...resumed.messages);
+        }
         // Round 1's ask travels as `prompt`; a follow-up dispatch (and every
         // turn that skips the shorthand) has to receive it through history.
         if (prompt) prompt = `${preamble}\n\n${prompt}`;
@@ -1136,6 +1152,11 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
             tokens: turnUsage.total_tokens || 0,
             note,
             chain: resumed ? resumed.interruptions : 0,
+            // The actual tool-call/tool-result transcript built up this turn —
+            // everything folded/pushed into `history` by completed rounds — so
+            // a resume can restore real memory of the work, not just a count
+            // of it (see the `resumed.messages` rehydration above).
+            messages: history,
           });
           if (rootOnDelta) rootOnDelta({ delta: `\n\n${note}` });
           return withTurnUsage({

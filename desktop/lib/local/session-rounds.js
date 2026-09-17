@@ -13,7 +13,8 @@
  * This makes the cap *session* state instead of turn state:
  *
  *   - a turn that reaches its horizon records the unfinished work against the
- *     session key (rounds spent, tokens, the note the user saw);
+ *     session key (rounds spent, tokens, the note the user saw, and the
+ *     tool-call transcript itself — see `record`'s `messages`);
  *   - the next turn in that session takes the record — consuming it, so one
  *     resume per interruption and a chain of interruptions is a chain of
  *     deliberate asks, never an automatic loop — and gets a continuation
@@ -126,8 +127,17 @@ function adopt({ now = Date.now(), maxAgeMs = 10 * 60 * 1000 } = {}) {
  * File an interruption. `chain` carries the count forward from the entry this
  * turn resumed, so `interruptions` reports how many times one job has been cut
  * off — visible in the note and useful when deciding to raise the horizon.
+ *
+ * `messages` is the interrupted turn's own tool-call transcript (its live
+ * `history` array at the moment it hit the horizon) — real memory of what was
+ * already done, not just a rounds/tokens count of it. Without it a caller
+ * that supplies no conversation of its own (a queue task's fresh dispatch)
+ * resumes with an empty history: the model is told "continue, don't restart"
+ * with nothing to continue FROM, which is a cold start wearing a note.
+ * Stored as a defensive copy — the caller's `history` array keeps being
+ * mutated by the turn that is returning it.
  */
-function record(key, { rounds, tokens, note, chain } = {}, now = Date.now()) {
+function record(key, { rounds, tokens, note, chain, messages } = {}, now = Date.now()) {
   prune(now);
   const prior = entries.get(key);
   const entry = {
@@ -136,6 +146,7 @@ function record(key, { rounds, tokens, note, chain } = {}, now = Date.now()) {
     note: typeof note === 'string' ? note : '',
     at: now,
     interruptions: (Number.isFinite(chain) ? chain : prior && prior.interruptions) || 0,
+    messages: Array.isArray(messages) ? messages.slice() : [],
   };
   entry.interruptions += 1;
   entries.delete(key);

@@ -50,6 +50,7 @@ const overlays = require('./overlays.js');
 const {
   updateConfig, loadConfig, loadPermissions, savePermissions, addPermissionRule,
   DEFAULT_PERMISSIONS, permissionsPath, configPath,
+  memoryPersistState, setMemoryPersist,
 } = require('./config.js');
 const { copyToClipboard } = require('./clipboard.js');
 const { snapshotCheckpoint, listCheckpoints, loadCheckpoint } = require('./checkpoint.js');
@@ -60,7 +61,7 @@ const { transcriptToMarkdown, transcriptToJSON, writeExportFile, lastAssistantTe
 const { detectDevCommand, runDevServer } = require('./devrun.js');
 const credentials = require('./credentials.js');
 const cloudsync = require('./cloudsync.js');
-const { maskKey } = require('./format.js');
+const { maskKey, fmtTokens } = require('./format.js');
 const { openUrl, URLS } = require('./system.js');
 const { sniffProject, buildAegisMd } = require('./init.js');
 const {
@@ -214,6 +215,109 @@ async function applyAccountKey(c, raw, { label = 'AEGIS API key' } = {}) {
     if (n) note(c, `${n} pinnable model${n === 1 ? '' : 's'} available — /model to pin one`);
   } catch {}
   return res;
+}
+
+/** Human token count for the sync quota: 1000000 -> "1M", 42800 -> "43k".
+ *  The ceiling is denominated in tokens (aegis1 FREE_SYNC_TOKENS = 1 MB,
+ *  PRO_SYNC_TOKENS = 10 MB), which for stored prose is about one per
+ *  character — "1000000" at a glance tells a user nothing about how close they
+ *  are to it. */
+function fmtQuotaTokens(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '?';
+  if (v >= 1e6) return `${(v / 1e6).toFixed(v % 1e6 === 0 ? 0 : 1)}M`;
+  if (v >= 1e4) return `${Math.round(v / 1e3)}k`;
+  return fmtTokens(v);
+}
+
+/**
+ * The persisting-memory gate, read off the command context (the live app
+ * exposes `cloudSyncState()`) with a fallback for callers that only pass the
+ * older boolean probe — `/cloud` and `/sync` predate the rename, and a stub
+ * context in a test must not have to grow a method to render a panel.
+ */
+function memoryGate(c) {
+  if (c && typeof c.cloudSyncState === 'function') {
+    try {
+      return c.cloudSyncState();
+    } catch {
+      /* fall through to the boolean */
+    }
+  }
+  const enabled =
+    c && typeof c.cloudSyncEnabled === 'function' ? c.cloudSyncEnabled() === true : true;
+  return { enabled, source: 'default' };
+}
+
+/**
+ * Flip the gate through the command context (app.js's `setCloudSync` is
+ * `config.setMemoryPersist`), which is what keeps the setting and the running
+ * session agreeing. Guarded because a context stub that never flips anything
+ * still has to be able to *run* the handler — the command smoke test drives
+ * every handler with no arguments.
+ */
+function setMemoryGate(c, on) {
+  if (c && typeof c.setCloudSync === 'function') return c.setCloudSync(on);
+  try {
+    return setMemoryPersist(on);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The persisting-memory block every cloud surface shows: the switch, the
+ * ceiling, and — the part that was missing — what a stopped write does and
+ * does not cost.
+ *
+ * The honesty requirement is not cosmetic. aegis1 meters WRITES only
+ * (`_memory_sync_access`), so a free account that passes ~1 MB of transcript
+ * keeps every entry it stored and simply stops accumulating new ones. The old
+ * rollout printed nothing at all, so "memory is free with any account" and
+ * "nothing is being stored any more" were both true and indistinguishable.
+ * These lines make the ceiling a state the user can see: the number, whose
+ * limit it is, and the one sentence that separates the working half (reads)
+ * from the stopped half (new writes).
+ */
+function memoryStatusLines(c) {
+  const gate = memoryGate(c);
+  const st = cloudsync.status();
+  const q = st.quota;
+  const used = q && q.used != null ? fmtQuotaTokens(q.used) : null;
+  const limit = q && q.limit != null ? fmtQuotaTokens(q.limit) : null;
+  const how =
+    gate.source === 'legacy'
+      ? '  (kept from your old cloudSync setting)'
+      : gate.source === 'default'
+        ? '  (default)'
+        : '';
+  const rows = [
+    [span(C.white + BOLD, 'Persisting memory'), span(BOLD_OFF, '')],
+    [span(C.gray, '─'.repeat(34))],
+    [
+      span(C.white, `  ${gate.enabled ? 'on' : 'off'}`),
+      span(C.gray, `${how}  ·  ${gate.enabled ? 'each session is stored so an interrupted turn can be resumed' : 'nothing new is stored'}`),
+    ],
+  ];
+  if (limit) {
+    rows.push([
+      span(C.gray, '  quota:  '),
+      span(C.white, `${used} of ${limit} tokens synced`),
+      span(C.gray, '  (aegis1 charges writes; reads are always served)'),
+    ]);
+  } else {
+    rows.push([span(C.gray, '  quota:  not reported yet — /sync now asks the server for the current numbers')]);
+  }
+  if (st.overQuota) {
+    rows.push([span(C.coral, '  writes: paused — the plan’s ceiling is reached, so new memory is not being stored')]);
+    rows.push([span(C.green, '  reads:  still work — everything already stored stays readable (/aegis-recall <topic>)')]);
+    rows.push([span(C.gray, '          free room at https://aegiscloud.org/subscribe, or /cloud memory off to stop trying')]);
+  }
+  if (gate.enabled && st.pending > 0) {
+    rows.push([span(C.gray, `  pending: ${st.pending} session(s) waiting to sync`)]);
+  }
+  rows.push([span(C.gray, `  /cloud memory on | off   ·   /sync now pushes once by hand`)]);
+  return rows;
 }
 
 /** Push + pull once, and report the counts (or the quota refusal). */
@@ -1364,7 +1468,7 @@ const COMMANDS = [
     },
   },
   {
-    name: 'cloud', args: ['sub', 'value'], hint: '[status|key <api_key>|activate|deactivate|sync [on|off|now]]', category: 'support',
+    name: 'cloud', args: ['sub', 'value'], hint: '[status|key <api_key>|activate|deactivate|memory [on|off]|sync [on|off|now]]', category: 'support',
     desc: 'Show and control ÆGIS cloud sync',
     handler: async (c, args) => {
       const sub = (args.sub || '').toLowerCase();
@@ -1408,12 +1512,35 @@ const COMMANDS = [
         return true;
       }
 
+      if (sub === 'memory' || sub === 'persist' || sub === 'memory-persist') {
+        // The write half's one switch. `/cloud sync on|off` and `/sync on|off`
+        // still work (they always meant "should this host store my sessions"),
+        // but this is the name that says what is actually being flipped.
+        const mode = (rest || 'status').toLowerCase();
+        if (mode === 'on' || mode === 'off') {
+          const on = mode === 'on';
+          setMemoryGate(c, on);
+          if (on) {
+            done(c, 'persisting memory on — sessions are stored to your account so an interrupted turn can be resumed');
+            note(c, '/cloud memory shows the quota; past the plan’s ceiling reads keep working and only new writes pause');
+          } else {
+            note(c, 'persisting memory off — nothing new is stored');
+            note(c, 'everything already in the cloud stays readable (/aegis-recall <topic>), and /sync now still pushes once by hand');
+          }
+          c.render();
+          return true;
+        }
+        panel(c, memoryStatusLines(c));
+        c.render();
+        return true;
+      }
+
       if (sub === 'sync' || sub === 'push' || sub === 'pull') {
         const mode = sub === 'sync' ? (rest || 'status').toLowerCase() : sub;
         if (mode === 'on' || mode === 'off') {
           const on = mode === 'on';
-          c.setCloudSync(on);
-          note(c, on ? 'cloud sync on — /sync now pushes after each turn' : 'cloud sync off — nothing is sent until /sync now');
+          setMemoryGate(c, on);
+          note(c, on ? 'persisting memory on — sessions are stored after each turn (this is the old "cloud sync")' : 'persisting memory off — nothing new is stored; /sync now still runs a manual pass');
           c.render();
           return true;
         }
@@ -1423,18 +1550,17 @@ const COMMANDS = [
           return true;
         }
         const st = cloudsync.status();
-        const rows = [
-          [span(C.gold + BOLD, 'Cloud sync'), span(BOLD_OFF, '')],
-          [span(C.gray, '─'.repeat(34))],
-          [span(C.white, `  ${c.cloudSyncEnabled() ? 'on' : 'off'}`), span(C.gray, c.cloudSyncEnabled() ? '  (auto-push each turn)' : '  (manual: /sync now)')],
+        panel(c, [
+          ...memoryStatusLines(c),
+          [span(C.gray, '')],
+          [span(C.white + BOLD, 'Sync ledger'), span(BOLD_OFF, '')],
           [span(C.gray, `  local sessions: ${st.local}  ·  pending push: ${st.pending}  ·  in sync: ${st.synced}`)],
           [span(C.gray, `  last push: ${st.lastPushAt ? new Date(st.lastPushAt).toLocaleString() : 'never'}  ·  last pull: ${st.lastPullAt ? new Date(st.lastPullAt).toLocaleString() : 'never'}`)],
           [span(C.gray, `  state: ${st.path}`)],
-        ];
+        ]);
         for (const e of st.errors.slice(0, 3)) {
-          rows.push([span(C.coral, `  ⚠ ${e.error}`)]);
+          panel(c, [[span(C.coral, `  ⚠ ${e.error}`)]]);
         }
-        panel(c, rows);
         c.render();
         return true;
       }
@@ -1444,9 +1570,11 @@ const COMMANDS = [
       panel(c, [
         ...keyPanelLines(c, 'AEGIS cloud'),
         [span(C.gray, '')],
+        ...memoryStatusLines(c),
+        [span(C.gray, '')],
         [span(C.white + BOLD, '  Sync'), span(BOLD_OFF, '')],
-        [span(C.gray, `  ${c.cloudSyncEnabled() ? 'on' : 'off'}  ·  ${st.pending} pending  ·  ${st.synced} in sync  ·  ${st.importedRemote} pulled from cloud`)],
-        [span(C.gray, '  /cloud sync on | now | off')],
+        [span(C.gray, `  ${st.pending} pending  ·  ${st.synced} in sync  ·  ${st.importedRemote} pulled from cloud`)],
+        [span(C.gray, '  /cloud memory on | off   ·   /sync now')],
       ]);
       c.render();
       return true;
@@ -1479,24 +1607,22 @@ const COMMANDS = [
   },
   {
     name: 'sync', aliases: ['cloudsync', 'cloud-sync'], args: ['mode'], hint: '[now|on|off|status]', category: 'data',
-    desc: 'Sync conversations with AEGIS Cloud',
+    desc: 'Store sessions in AEGIS Cloud (cross-session memory)',
     hidden: (c) => !cloudReady(),
     handler: async (c, args) => {
       const mode = (args.mode || '').toLowerCase();
       if (mode === 'on' || mode === 'off') {
-        c.setCloudSync(mode === 'on');
-        note(c, mode === 'on' ? 'cloud sync on' : 'cloud sync off — /sync now still runs a manual pass');
+        setMemoryGate(c, mode === 'on');
+        note(c, mode === 'on' ? 'persisting memory on — sessions are stored so an interrupted turn can be resumed' : 'persisting memory off — nothing new is stored; /sync now still runs a manual pass');
         c.render();
         return true;
       }
       if (mode === 'status') {
         const st = cloudsync.status();
-        panel(c, [
-          [span(C.gold + BOLD, 'Cloud sync'), span(BOLD_OFF, '')],
-          [span(C.gray, '─'.repeat(34))],
-          [span(C.white, `  ${c.cloudSyncEnabled() ? 'on' : 'off'}`)],
-          [span(C.gray, `  local ${st.local}  ·  pending ${st.pending}  ·  in sync ${st.synced}`)],
-        ]);
+        const rows = memoryStatusLines(c);
+        rows.push([span(C.gray, '')]);
+        rows.push([span(C.gray, `  local ${st.local}  ·  pending ${st.pending}  ·  in sync ${st.synced}`)]);
+        panel(c, rows);
         c.render();
         return true;
       }

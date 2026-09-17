@@ -26,7 +26,15 @@ const { createEngine } = require('./engine.js');
 const { GLYPH, VERBS, themeOf, RESET, THEME_TABLE } = require('./theme.js');
 const { LiveRegion, termWidth, w } = require('./screen.js');
 const { parseLine, COMMANDS, visibleCommands } = require('./commands.js');
-const { updateConfig, loadPermissions, loadConfig, configExists } = require('./config.js');
+const {
+  updateConfig,
+  loadPermissions,
+  loadConfig,
+  configExists,
+  memoryPersistState,
+  memoryPersistEnabled,
+  setMemoryPersist,
+} = require('./config.js');
 const credentials = require('./credentials.js');
 const cloudsync = require('./cloudsync.js');
 const { readSecret } = require('./secret.js');
@@ -377,16 +385,32 @@ function createApp(options = {}) {
     return res;
   }
 
+  /**
+   * The persisting-memory gate — the WRITE half of aegis_memory, and now ON by
+   * default for every account (see config.js `memoryPersistState` for the
+   * migration and the reasoning). The name is historical: `/sync`, `/cloud sync`
+   * and `cloudSyncEnabled()` predate the flip, and they all mean this one gate,
+   * so there is exactly one boolean behind every switch and status line.
+   */
   function cloudSyncEnabled() {
     try {
-      return loadConfig().cloudSync === true;
+      return memoryPersistEnabled();
     } catch {
-      return false;
+      return true; // default on: a corrupt config must not silently stop storage
+    }
+  }
+
+  /** Where that answer came from — 'config' | 'legacy' | 'default'. */
+  function cloudSyncState() {
+    try {
+      return memoryPersistState();
+    } catch {
+      return { enabled: true, source: 'default', explicit: false };
     }
   }
 
   function setCloudSync(on) {
-    return updateConfig({ cloudSync: on === true });
+    return setMemoryPersist(on);
   }
 
   /**
@@ -1012,6 +1036,7 @@ function createApp(options = {}) {
       readSecret: (text) => readSecret(text, { stdin: process.stdin, stdout: out }),
       cloudsync,
       cloudSyncEnabled: () => cloudSyncEnabled(),
+      cloudSyncState: () => cloudSyncState(),
       setCloudSync: (on) => setCloudSync(on),
       adoptLegacyKey: () => adoptLegacyKeyOnce(),
     };
@@ -1111,10 +1136,45 @@ function createApp(options = {}) {
       }
       if (cmd.tool === 'aegis_ask') return await runPrompt(args.prompt);
       await runTool(cmd.tool, args);
+      // `/memory` is where a user actually looks at what is stored, so the
+      // quota state belongs here as well as in /cloud: the ceiling is the one
+      // fact about this feature that changes what the account can do, and it is
+      // invisible from the entries themselves.
+      if (cmd.tool === 'aegis_memory_list' || cmd.tool === 'aegis_memory_search') memoryQuotaNote();
     } catch (e) {
       emit(render.renderNotice(ctx(), 'error', e.message));
     }
     return true;
+  }
+
+  /**
+   * One line of quota state for the memory read commands. Quiet when the server
+   * has not reported a ceiling yet (nothing useful to say), a statement when it
+   * has, and — when the account is at it — the two halves spelled out: reads
+   * keep working, new writes do not.
+   */
+  function memoryQuotaNote() {
+    let st;
+    try {
+      st = cloudsync.status();
+    } catch {
+      return;
+    }
+    const q = st.quota;
+    if (!q) return;
+    const used = fmtTokens(q.used || 0);
+    const limit = fmtTokens(q.limit || 0);
+    if (st.overQuota) {
+      emit(
+        render.renderNotice(
+          ctx(),
+          'warn',
+          `cloud memory: ${used} of ${limit} synced tokens — at the plan's ceiling. Everything stored stays readable; new writes are paused until there is room. /cloud memory for the full state.`
+        )
+      );
+      return;
+    }
+    emit(render.renderNotice(ctx(), 'info', `cloud memory: ${used} of ${limit} synced tokens — /cloud memory for the full state`));
   }
 
   /**
@@ -1236,9 +1296,12 @@ function createApp(options = {}) {
       /* persistence is best-effort */
     }
     // Auto-sync hook: one place, reached by both the linear REPL and the
-    // chatflow's session loop, and only when the user turned it on. Off by
-    // default because a push is billed against the plan's synced-token ceiling
-    // (aegis1 charges the *growth* of a session), so uploading is a choice.
+    // chatflow's session loop. On by default — a push is billed against the
+    // plan's synced-token ceiling (aegis1 charges the *growth* of a session),
+    // so it is a real gate rather than an unconditional write, but the default
+    // is on because a session that dies at its tool-round horizon is only
+    // recoverable if the transcript exists somewhere the next session can read
+    // it. `/cloud memory off` is the opt-out.
     if (cloudSyncEnabled()) autoSync();
   }
 
@@ -1250,6 +1313,13 @@ function createApp(options = {}) {
    * per session per session-cycle — a quota refusal that repeats forever is a
    * wall of text, not information — and never thrown, because the user's turn
    * already succeeded by the time this runs.
+   *
+   * The quota refusal gets its own sentence, and it is the whole point of the
+   * default flip being safe: past the plan's ceiling the account does NOT lose
+   * anything it already stored (reads keep working — aegis1 meters writes
+   * only), and the failure is not "sync failed", it is "there is no room left
+   * for new writes". Saying which half stopped is what keeps a silent stop from
+   * looking like a broken feature.
    */
   let autoSyncNotes = new Set();
   function autoSync() {
@@ -1261,13 +1331,55 @@ function createApp(options = {}) {
           const f = res.failed[0];
           if (autoSyncNotes.has(f.kind)) return;
           autoSyncNotes.add(f.kind);
+          if (f.kind === 'quota') {
+            emit(
+              render.renderNotice(
+                ctx(),
+                'warn',
+                `cloud memory: the plan's synced-token ceiling is reached — earlier sessions stay readable, only NEW writes pause. /cloud memory shows the quota; /cloud memory off stops trying.`
+              )
+            );
+            return;
+          }
           const hint = f.hint ? ` — ${f.hint}` : '';
-          emit(render.renderNotice(ctx(), f.kind === 'quota' ? 'warn' : 'error', `cloud sync: ${f.message}${hint}`));
+          emit(render.renderNotice(ctx(), 'error', `cloud sync: ${f.message}${hint}`));
         }
       })
       .catch(() => {
         /* offline is not worth interrupting a session over */
       });
+  }
+
+  /**
+   * First-run notice for the write half, printed once, right after onboarding.
+   *
+   * The default flip is invisible otherwise: the read half was already on for
+   * everyone, so nothing about the first session looks different — the thing
+   * that changed is that the transcript is now being *stored*, and that costs
+   * quota on a free plan. One line at the moment the account is set up is the
+   * difference between a default and a surprise.
+   */
+  function memoryFirstRunNotice() {
+    const st = cloudSyncState();
+    if (!st.enabled) {
+      emit(
+        render.renderNotice(
+          ctx(),
+          'info',
+          'cross-session memory: off (you turned it off) — /cloud memory on stores sessions so an interrupted turn can be picked up later'
+        )
+      );
+      return;
+    }
+    const quota = cloudsync.status().quota;
+    const usage = quota && quota.limit ? ` (used ${fmtTokens(quota.used || 0)} of ${fmtTokens(quota.limit)} tokens)` : '';
+    emit(
+      render.renderNotice(
+        ctx(),
+        'info',
+        `cross-session memory: on${usage} — sessions are stored to your account so a turn that is interrupted can be resumed. /cloud memory shows the quota; /cloud memory off stops it. Past the ceiling, saved memory stays readable and only new writes pause.`
+      )
+    );
   }
 
   /** One line of session accounting, for ctrl+t and the meta row. */  function tokenSummary() {
@@ -1466,6 +1578,11 @@ function createApp(options = {}) {
           )
         );
       }
+      // The write half of cross-session memory is on by default (see
+      // config.js). Say so once, on the run that sets the account up, together
+      // with the ceiling and the opt-out — a default nobody is told about is a
+      // setting they cannot make a decision about.
+      if (onboard.firstRun) memoryFirstRunNotice();
       // A stored pin the platform does not advertise routes elsewhere in
       // silence (see validatePinnedModel) — checked once, here, where the user
       // can act on it. Not on `-p`: a network round-trip ahead of the first
@@ -1519,6 +1636,7 @@ function createApp(options = {}) {
     forgetApiKey,
     adoptLegacyKeyOnce,
     cloudSyncEnabled,
+    cloudSyncState,
     setCloudSync,
     cloudsync,
     keyStatus: () => credentials.keyStatus(),

@@ -75,6 +75,87 @@ const DEFAULT_CONFIG = {
   lastCwd: '',
 };
 
+// ── persisting memory (the WRITE half of aegis_memory) ──────────────────────
+
+/**
+ * Cross-session memory has two halves. The READ half (`aegis_recall`) is sent
+ * unconditionally by both hosts — it is cheap, it is what lets an interrupted
+ * turn be picked up in a later session, and it is free on every plan. The
+ * WRITE half is what actually stored anything, and it used to sit behind
+ * `cloudSync`, which is absent (i.e. off) on every fresh install. That is the
+ * defect this key replaces: the copy promises "cross-session memory free with
+ * any account", the read half shipped to everybody, and the write half — the
+ * half that makes the promise true — was opt-in and undiscoverable.
+ *
+ * So the gate is now `memoryPersist` and it defaults ON. It stays a real gate:
+ * `/cloud memory off` (or `/sync off`) writes it false, and this resolver
+ * honours it. The write half also has a price, so the ceiling is surfaced
+ * rather than guessed at — aegis1 meters WRITES only (FREE_SYNC_TOKENS = 1 MB,
+ * PRO_SYNC_TOKENS = 10 MB); reads keep working past it. `/cloud memory` and the
+ * first-run notice state that in those words.
+ *
+ * Migration, not a reset. `loadConfig()` merges DEFAULT_CONFIG under the parsed
+ * file, so the *absence* of a key cannot be told from a default once merged —
+ * that is why this resolver reads the raw values in the order below instead of
+ * checking a merged boolean:
+ *
+ *   memoryPersist (explicit)  →  cloudSync (an explicit pre-flip choice)
+ *   →  MEMORY_PERSIST_DEFAULT (on)
+ *
+ * An explicit `cloudSync: false` on disk therefore stays off (nobody who turned
+ * sync off gets quietly opted back in), an explicit `cloudSync: true` stays on,
+ * and a config with neither key becomes on. `setMemoryPersist()` then removes
+ * the legacy key, so the choice exists in exactly one place from then on.
+ */
+const MEMORY_PERSIST_KEY = 'memoryPersist';
+const LEGACY_MEMORY_PERSIST_KEY = 'cloudSync';
+const MEMORY_PERSIST_DEFAULT = true;
+
+/**
+ * Resolve the write half, with where the answer came from.
+ *
+ * @param {object} [cfg] a loaded config (defaults to `loadConfig()`).
+ * @returns {{enabled:boolean, source:'config'|'legacy'|'default'}}
+ *          `explicit` is true for the first two — that is the distinction the
+ *          status panels need to say "you turned this off" vs "this is the
+ *          default", which is the difference between a setting and a rumour.
+ */
+function memoryPersistState(cfg) {
+  let c = cfg;
+  if (!c) {
+    try {
+      c = loadConfig();
+    } catch {
+      return { enabled: MEMORY_PERSIST_DEFAULT, source: 'default', explicit: false };
+    }
+  }
+  if (c && typeof c[MEMORY_PERSIST_KEY] === 'boolean') {
+    return { enabled: c[MEMORY_PERSIST_KEY], source: 'config', explicit: true };
+  }
+  if (c && typeof c[LEGACY_MEMORY_PERSIST_KEY] === 'boolean') {
+    return { enabled: c[LEGACY_MEMORY_PERSIST_KEY], source: 'legacy', explicit: true };
+  }
+  return { enabled: MEMORY_PERSIST_DEFAULT, source: 'default', explicit: false };
+}
+
+/** True when this host should persist memory (default on — see above). */
+function memoryPersistEnabled(cfg) {
+  return memoryPersistState(cfg).enabled;
+}
+
+/**
+ * Persist the flip, and retire the legacy key in the same write so the two can
+ * never disagree. `undefined` (not `false`) is what removes a key through
+ * JSON.stringify — writing `false` would look like an explicit opt-out under
+ * the legacy name.
+ */
+function setMemoryPersist(on) {
+  return updateConfig({
+    [MEMORY_PERSIST_KEY]: on === true,
+    [LEGACY_MEMORY_PERSIST_KEY]: undefined,
+  });
+}
+
 /** Read the config, falling back to defaults (never throws). */
 function loadConfig() {
   try {
@@ -176,6 +257,12 @@ module.exports = {
   DEFAULT_CONFIG,
   loadConfig,
   updateConfig,
+  MEMORY_PERSIST_KEY,
+  LEGACY_MEMORY_PERSIST_KEY,
+  MEMORY_PERSIST_DEFAULT,
+  memoryPersistState,
+  memoryPersistEnabled,
+  setMemoryPersist,
   DEFAULT_PERMISSIONS,
   loadPermissions,
   savePermissions,
