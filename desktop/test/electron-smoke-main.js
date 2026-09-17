@@ -229,7 +229,15 @@ const CAPTURE = `
       return m && /request failed|Error:/i.test(m.textContent + ' ' + bodyOf(r));
     }).length,
     sendDisabled: document.getElementById('send').disabled,
-    textLen: liveText().length
+    textLen: liveText().length,
+    // The rolling session meter. Read from the real topbar node, not from a
+    // re-derivation of the math: the whole failure mode this guards against is
+    // a correct counter that never reaches the DOM.
+    sessionMeter: (function () {
+      var el = document.getElementById('session-meter');
+      if (!el) return { missing: true };
+      return { text: el.textContent, hidden: Boolean(el.hidden) };
+    })()
   };
 `;
 
@@ -386,6 +394,27 @@ async function main() {
     'send-re-enabled',
     settledB.sendDisabled === false,
     `sendDisabled=${settledB.sendDisabled}`
+  );
+
+  // ── The rolling session meter, in the real DOM ───────────────────────────
+  // This turn was stopped mid-stream, so the wire never reported usage — the
+  // exact case the counter used to drop on the floor: `rollTurn` added
+  // `undefined` to the total and the turn vanished from the session. It must
+  // now be counted, estimated from the turn's own text, folded on the interrupt
+  // path, and visible in the topbar. Three distinct failures are pinned here:
+  // a hidden/absent meter (the counter never reached the DOM), a bare `0 tok`
+  // (a zero that was never measured), and no tokens at all (the turn dropped).
+  const meter = settledB.sessionMeter || {};
+  const meterText = String(meter.text || '');
+  check(
+    'session-meter-visible',
+    !meter.missing && meter.hidden === false,
+    `meter=${JSON.stringify(meter)} — the rolling total must be on screen after a stopped turn`
+  );
+  check(
+    'session-meter-counted',
+    /\d[\d,]* tok/.test(meterText) && !/^0 tok/.test(meterText.trim()),
+    `meter text=${JSON.stringify(meterText)} — a stopped turn must contribute its estimate, never a bare 0`
   );
   // The honest invariant: what survived is a real answer that is *shorter than
   // the stream the stub would have sent*. Comparing against `textAtEscape` (the

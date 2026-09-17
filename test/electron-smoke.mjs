@@ -383,6 +383,8 @@ async function main() {
     'stream-really-stopped',
     'send-re-enabled',
     'partial-not-whole',
+    'session-meter-visible',
+    'session-meter-counted',
   ];
   for (const name of expectedDriverChecks) {
     check(
