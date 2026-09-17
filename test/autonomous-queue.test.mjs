@@ -542,6 +542,83 @@ try {
     assert(seen[seen.length - 1].model === 'nexus-brain', 'and the turn still went to the pool');
   });
 
+  // Regression target: a queued task that hit its tool-round horizon used to
+  // be settled 'done' (runOne read only the engine's stoppedOnRounds flag into
+  // the digest, never into the queue status), which threw away the session
+  // ledger's continuation — nothing ever sent the resumed turn, so the queue
+  // reported success on unfinished work and a human had to notice and re-add
+  // the whole task from scratch. Pinned via runOne directly (not proceed())
+  // so each attempt's on-disk status can be inspected in between.
+  await test('a task that hits its round horizon stays pending (not done) and resumes until it finishes', async () => {
+    const env = envFor();
+    const calls = [];
+    const engine = {
+      chat: async (payload) => {
+        calls.push(payload);
+        if (calls.length < 3) {
+          return {
+            choices: [{ message: { content: '' }, finish_reason: 'length' }],
+            usage: { total_tokens: 10 },
+            stoppedOnRounds: true,
+          };
+        }
+        return { choices: [{ message: { content: 'all done' } }], usage: { total_tokens: 5 } };
+      },
+    };
+    const worker = autonomous.createQueueWorker({ engine, env, log: () => {} });
+    const added = queue.addTask(env, { task: 'a long task', cwd: tmp });
+
+    let outcome = await worker.runOne({ id: added.id }, {});
+    assert(outcome.ok === true, `a round-cap stop is not an error: ${outcome.error || ''}`);
+    assert(outcome.stoppedOnRounds === true, 'the outcome says it stopped on rounds');
+    let item = queue.findTask(queue.loadQueue(env), added.id);
+    assert(item.status === 'pending', `a round-cap stop must stay pending, not done: got ${item.status}`);
+    assert(item.roundStops === 1, `roundStops counts the interruption: got ${item.roundStops}`);
+
+    await worker.runOne({ id: added.id }, {});
+    item = queue.findTask(queue.loadQueue(env), added.id);
+    assert(item.status === 'pending', 'still unfinished after the second stop');
+    assert(item.roundStops === 2, `roundStops increments: got ${item.roundStops}`);
+
+    outcome = await worker.runOne({ id: added.id }, {});
+    assert(outcome.ok === true && !outcome.stoppedOnRounds, 'the third call actually finishes');
+    item = queue.findTask(queue.loadQueue(env), added.id);
+    assert(item.status === 'done', `a finished task settles done: got ${item.status}`);
+    assert(item.roundStops === 0, 'roundStops resets once the task actually finishes');
+    assert(calls.length === 3, 'each attempt is a distinct provider call');
+    assert(calls[1].sessionId === calls[0].sessionId, 'the resumed attempt reuses the same session id as the first, so the engine ledger recognises it');
+  });
+
+  await test('a task that never converges is given up on as an error, not looped forever', async () => {
+    const env = envFor();
+    let calls = 0;
+    const engine = {
+      chat: async () => {
+        calls += 1;
+        return {
+          choices: [{ message: { content: '' }, finish_reason: 'length' }],
+          usage: { total_tokens: 1 },
+          stoppedOnRounds: true,
+        };
+      },
+    };
+    const worker = autonomous.createQueueWorker({ engine, env, log: () => {} });
+    const added = queue.addTask(env, { task: 'a task that can never finish', cwd: tmp });
+
+    for (let i = 0; i <= autonomous.MAX_ROUND_STOPS; i += 1) {
+      const outcome = await worker.runOne({ id: added.id }, {});
+      const item = queue.findTask(queue.loadQueue(env), added.id);
+      if (i < autonomous.MAX_ROUND_STOPS) {
+        assert(item.status === 'pending', `attempt ${i + 1} stays pending: got ${item.status}`);
+      } else {
+        assert(item.status === 'error', `attempt ${i + 1} (past the cap) gives up instead of looping: got ${item.status}`);
+        assert(/tool-round horizon/.test(item.error || ''), `the error explains why: ${item.error}`);
+        assert(outcome.ok === false, 'the returned outcome reflects the give-up as a failure');
+      }
+    }
+    assert(calls === autonomous.MAX_ROUND_STOPS + 1, `exactly ${autonomous.MAX_ROUND_STOPS + 1} attempts were made, not an unbounded loop: got ${calls}`);
+  });
+
   await test('withRoundHorizon sets the engine knob and always puts it back', async () => {
     // engine.js reads AEGIS_AUTONOMOUS_MAX_ROUNDS from process.env at turn time.
     const before = process.env.AEGIS_AUTONOMOUS_MAX_ROUNDS;

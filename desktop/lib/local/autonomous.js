@@ -56,6 +56,15 @@ const gitScope = require('./git-scope.js');
 const DEFAULT_ROUNDS = 40;
 
 /**
+ * Consecutive tool-round-horizon stops a queued task gets before runOne gives
+ * up on it as unable to converge and settles it 'error' instead of 'pending'.
+ * Without this bound a task that never finishes would keep proceed()'s drain
+ * loop picking it back up forever — proceed() defaults to no --max at all, so
+ * nothing else would ever stop it.
+ */
+const MAX_ROUND_STOPS = 3;
+
+/**
  * The engine tools that report the file they write, and the argument holding
  * it. This set is the attribution record for a task's commit: `exec` is absent
  * on purpose — a shell command names no paths, so a file it creates cannot be
@@ -326,7 +335,8 @@ function autonomousDirective(rounds = DEFAULT_ROUNDS) {
  */
 function digestLine(item, result) {
   const task = String(item.task || '').replace(/\s+/g, ' ').trim().slice(0, 120);
-  const mark = result && result.ok ? '✓' : '✗';
+  const paused = Boolean(result && result.ok && result.stoppedOnRounds);
+  const mark = paused ? '⏸' : result && result.ok ? '✓' : '✗';
   const files = (result && Array.isArray(result.files) && result.files.slice(0, 6)) || [];
   const where = files.length ? ` — touched: ${files.join(', ')}${result.files.length > files.length ? ', …' : ''}` : '';
   const why = !result || result.ok ? '' : ` — ${String((result && result.error) || 'failed').slice(0, 120)}`;
@@ -616,13 +626,41 @@ function createQueueWorker({ engine, env = process.env, log = () => {}, git = gi
     const items = queue.loadQueue(env);
     const claimed = queue.markRunning(items, item.id, { now: now() });
     if (!claimed) return { ok: false, error: `unknown task #${item.id}`, carry };
+    const priorRoundStops = Number(claimed.roundStops) || 0;
     queue.saveQueue(env, items);
 
-    const result = await runTask(claimed, { carry, commit });
+    const raw = await runTask(claimed, { carry, commit });
+
+    // A task that hit its tool-round horizon has NOT finished — engine.js's
+    // session ledger (session-rounds.js) is holding the rest of the work
+    // under this task's stable session id (sessionIdFor(item.id)), ready to
+    // inject a continuation preamble the moment this item is dispatched
+    // again. Settling it 'done' here (the old behavior) threw that away: the
+    // queue believed the task was finished, so nothing ever sent the next
+    // turn that would have consumed the resume, and a human had to notice
+    // the output was incomplete and re-queue the whole task from scratch.
+    //
+    // Left 'pending' instead, so proceed()'s own drain loop picks it straight
+    // back up — unless it has now failed to converge MAX_ROUND_STOPS times in
+    // a row, at which point looping on it forever (an unattended proceed()
+    // with no --max has no other cap at all) is worse than a visible error.
+    const hitRoundCap = Boolean(raw.ok && raw.stoppedOnRounds);
+    const roundStops = hitRoundCap ? priorRoundStops + 1 : 0;
+    const exhausted = hitRoundCap && roundStops > MAX_ROUND_STOPS;
+    const result = exhausted
+      ? {
+          ...raw,
+          ok: false,
+          error:
+            `stopped at its tool-round horizon ${roundStops} times in a row without finishing — ` +
+            'raise AEGIS_AUTONOMOUS_MAX_ROUNDS or split the task into smaller ones',
+        }
+      : raw;
+    const status = exhausted ? 'error' : hitRoundCap ? 'pending' : result.ok ? 'done' : 'error';
 
     const after = queue.loadQueue(env);
     queue.settle(after, claimed.id, {
-      status: result.ok ? 'done' : 'error',
+      status,
       result: {
         ok: result.ok,
         output: result.output || '',
@@ -634,13 +672,15 @@ function createQueueWorker({ engine, env = process.env, log = () => {}, git = gi
       error: result.ok ? null : result.error,
       now: now(),
     });
+    const settled = queue.findTask(after, claimed.id);
+    if (settled) settled.roundStops = roundStops;
     queue.saveQueue(env, after);
     queue.appendRun(env, {
       id: claimed.id,
       task: claimed.task,
       cwd: claimed.cwd,
       model: resolveModel({ model: claimed.model, env }),
-      status: result.ok ? 'done' : 'error',
+      status: status === 'pending' ? 'stopped' : status,
       at: new Date(now()).toISOString(),
       ms: result.ms,
       usage: result.usage || null,
@@ -722,6 +762,7 @@ function commitMessage(item) {
 module.exports = {
   DEFAULT_MODEL,
   DEFAULT_ROUNDS,
+  MAX_ROUND_STOPS,
   AEGIS_MODEL_IDS,
   isAegisModel,
   modelRefusal,

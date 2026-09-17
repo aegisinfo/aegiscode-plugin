@@ -266,6 +266,10 @@ function retryTask(env, id, opts = {}) {
   item.updated = opts.now || Date.now();
   delete item.error;
   delete item.pid;
+  // A manual retry is a fresh deliberate ask, so it gets its own full run of
+  // MAX_ROUND_STOPS chances (autonomous.js) rather than inheriting whatever
+  // count a previous, unrelated failure left behind.
+  delete item.roundStops;
   saveQueue(env, items);
   return item;
 }

@@ -100,8 +100,14 @@ function describeCounts(items) {
  */
 function printRunReport(ran, io) {
   for (const r of ran) {
-    const mark = r.ok ? '✓' : '✗';
-    io.stdout.write(`aegiscode: ${mark} #${r.id} ${r.ok ? 'done' : 'failed'} (${fmtElapsed(r.ms)})`);
+    // stoppedOnRounds + ok means the task hit its tool-round horizon, not
+    // that it finished — the queue item is left 'pending' (autonomous.js's
+    // runOne) so a later proceed() resumes it. Calling that "done" would
+    // hide the exact case this whole mechanism exists to make visible.
+    const paused = Boolean(r.ok && r.stoppedOnRounds);
+    const mark = paused ? '⏸' : r.ok ? '✓' : '✗';
+    const label = paused ? 'paused — will resume' : r.ok ? 'done' : 'failed';
+    io.stdout.write(`aegiscode: ${mark} #${r.id} ${label} (${fmtElapsed(r.ms)})`);
     if (r.commit && r.commit.ok && r.commit.staged) {
       io.stdout.write(` — committed ${r.commit.staged} path(s)`);
     } else if (r.commit && r.commit.skipped && r.commit.reason) {
