@@ -31,15 +31,36 @@ const theme = require(join(cliDir, 'src', 'theme.js'));
 const { stripAnsi } = screen;
 const plain = (lines) => (Array.isArray(lines) ? lines : [lines]).map((l) => stripAnsi(l));
 
-// Platform-aware expected glyphs (theme.js swaps a couple for fonts that lack
-// them — the fidelity target is the token, not one terminal's font).
-const HOOK = process.platform === 'win32' || process.platform === 'darwin' ? '_|' : '⎿';
-const BLOOM = process.platform === 'win32' ? '*' : '✻';
+// Expected glyphs come from the resolved capability CLASS, not the host
+// platform. theme.js swaps a couple for font stacks that lack them, and the
+// honest axis is what the terminal can draw — PowerShell in Windows Terminal
+// draws ⎿ and ✻ exactly like zsh, while this test's `process.platform` says
+// nothing about the far end of an SSH session. The class table is pinned
+// explicitly; the live table is then required to agree with the live class.
+const capsMod = require(join(cliDir, 'src', 'caps.js'));
+const NATIVE = { glyphs: 'unicode', face: 'native', star: 'native' };
+const EDGES = { glyphs: 'unicode', face: 'edges', star: 'native' };
+const ASCII = { glyphs: 'ascii', face: 'edges', star: 'narrow' };
 
 // ── glyph fidelity ──────────────────────────────────────────────────────────
 eq(theme.GLYPH.cursor, '❯', 'the prompt/cursor glyph is ❯');
-eq(theme.GLYPH.hook, HOOK, 'the hook glyph is ⎿');
-eq(theme.GLYPH.bloom, BLOOM, 'the done glyph is ✻');
+
+// The class→rune mapping: only the edge-only and ASCII classes drop ⎿/✻/⏸.
+eq(theme.glyphsFor(NATIVE).hook, '⎿', 'a native-unicode class keeps the ⎿ hook');
+eq(theme.glyphsFor(NATIVE).bloom, '✻', 'a native-unicode class keeps the ✻ bloom');
+eq(theme.glyphsFor(NATIVE).pause, '⏸', 'a native-unicode class keeps the ⏸ pause glyph');
+eq(theme.glyphsFor(EDGES).hook, '_|', 'an edge-only font class falls back to the ASCII hook');
+eq(theme.glyphsFor(EDGES).bloom, '*', 'an edge-only font class falls back to the ASCII bloom');
+eq(theme.glyphsFor(ASCII).hook, '_|', 'an ASCII class uses the ASCII hook');
+eq(theme.glyphsFor(ASCII).bloom, '*', 'an ASCII class uses the ASCII bloom');
+
+// …and the live table agrees with the class this host resolved to.
+const liveGlyphs = theme.glyphsFor(capsMod.caps());
+eq(theme.GLYPH.hook, liveGlyphs.hook, "the hook glyph matches this host's glyph class");
+eq(theme.GLYPH.bloom, liveGlyphs.bloom, "the done glyph matches this host's glyph class");
+// Downstream assertions read these; they follow the live class, never the OS.
+const HOOK = liveGlyphs.hook;
+const BLOOM = liveGlyphs.bloom;
 
 // ── number formatting: the €4dp rule is the fix the CLI must not lose ───────
 eq(format.fmtTokens(1500), '1,500', 'tokens are grouped');

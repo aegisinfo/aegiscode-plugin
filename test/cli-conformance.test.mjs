@@ -126,14 +126,24 @@ oneOf(theme.GLYPH.bloom, ['✻', '*'], 'GLYPH.bloom'); // ✻ U+273B
 oneOf(theme.GLYPH.star, ['✦', '*'], 'GLYPH.star'); // ✦ renders wide on Apple fonts
 oneOf(theme.GLYPH.pause, ['⏸', '❚❚'], 'GLYPH.pause'); // ⏸ U+23F8
 
-// The spinner is the loudest part of the fingerprint: ✢ · ✻ * ✽ ✶ on Linux,
-// an ASCII set on Windows fonts.
+// The spinner is the loudest part of the fingerprint: ✢ · ✻ * ✽ ✶ where the
+// font can draw them, an ASCII set where it cannot. The axis is the glyph
+// class, NOT `process.platform` — PowerShell inside Windows Terminal draws the
+// reference set, and a `win32` process over SSH draws whatever the far end can
+// show. Keying this on the platform was the bug; keying it on the class is the
+// guard.
 assert(theme.GLYPH.spin.length === 6, `the spinner must have 6 frames, got ${theme.GLYPH.spin.length}`);
-if (process.platform === 'win32') {
-  assert(same(theme.GLYPH.spin, ['|', '/', '-', '\\', '*', '-']), 'the Windows spinner frames must match');
-} else {
-  assert(same(theme.GLYPH.spin, ['✢', '·', '✻', '*', '✽', '✶']), 'the spinner frames must match the reference');
-}
+const REFERENCE_SPIN = ['✢', '·', '✻', '*', '✽', '✶'];
+const ASCII_SPIN = ['|', '/', '-', '\\', '*', '-'];
+assert(same(theme.glyphsFor({ glyphs: 'ascii' }).spin, ASCII_SPIN),
+  'an ASCII glyph class must get the ASCII spinner frames');
+assert(same(theme.glyphsFor({ glyphs: 'unicode', face: 'native' }).spin, REFERENCE_SPIN),
+  'a native-unicode glyph class must get the reference spinner frames');
+// …and the live table must agree with the class it resolved, whatever host
+// this guard happens to run on. This is what the old `win32` branch was
+// reaching for, stated on the right axis.
+assert(same(theme.GLYPH.spin, theme.glyphsFor(require(join(cliDir, 'src', 'caps.js')).caps()).spin),
+  'the live spinner must match the spinner for the live glyph class');
 
 // ── 3. Working and completion verbs ──────────────────────────────────────────
 assert(same(theme.VERBS, [
@@ -217,42 +227,42 @@ assert(sources.render.includes('VERBS'), 'the working line must draw a verb from
 // into a loop — the ink would be right and the guard would be lying.
 assert(sources.render.includes('stencilGlyph'),
   'the art ink map must be derived through art.stencilGlyph, not raw runes');
-// Assert the END-TO-END property, per platform: take the art as that platform
-// will actually draw it, and require that every rune in it carries ink. Both
-// sides must agree on the platform, so the module is re-required under a faked
-// process.platform with the cli/src cache dropped — otherwise the ink map is
-// keyed on the host's stencil while the rows use the target's, and a stale map
-// would look like a passing test.
+// Assert the END-TO-END property, per CAPABILITY CLASS. The old version of this
+// block re-required the modules under a faked `process.platform` and called it
+// per-platform coverage. It was not: the pass is resolved from the environment,
+// so all three faked platforms resolved the same native-unicode class and the
+// loop asserted one thing three times while printing `ok` for `darwin` and
+// `win32`. The classes below are the ones that actually ship — a Windows
+// Terminal / zsh host, a font stack with no box-drawing, and a legacy console.
 {
   const INK = { blue: '\x1b[34m', lavender: '\x1b[35m', dim: '\x1b[2m', white: '\x1b[37m', gold: '\x1b[33m' };
   // Only the WHALE half is tinted per shade; artRow paints the mascot half solid
   // gold, so a mascot outline rune like ▐ needs no entry in the ink map. Testing
   // the whole mark would therefore demand ink for runes that are never tinted.
-  const realPlatform = process.platform;
-  const fresh = (rel, platform) => {
-    for (const key of Object.keys(require.cache)) {
-      if (key.startsWith(join(cliDir, 'src'))) delete require.cache[key];
-    }
-    Object.defineProperty(process, 'platform', { value: platform, configurable: true });
-    return require(join(cliDir, rel));
-  };
+  const capsMod = require(join(cliDir, 'src', 'caps.js'));
+  const realCaps = capsMod.caps();
+  const CLASSES = [
+    ['native', { glyphs: 'unicode', face: 'native', star: 'native' }], // zsh, Windows Terminal
+    ['edges', { glyphs: 'unicode', face: 'edges', star: 'native' }], // no box-drawing in the font
+    ['ascii', { glyphs: 'ascii', face: 'edges', star: 'narrow' }], // legacy console
+  ];
   try {
-    for (const platform of ['linux', 'darwin', 'win32']) {
-      const renderer = fresh(join('src', 'render.js'), platform);
-      const parts = fresh(join('src', 'art.js'), platform).welcomeArtParts(100);
+    for (const [name, patch] of CLASSES) {
+      capsMod.setCaps(patch);
+      const parts = art.welcomeArtParts(100);
       const whale = parts.rows.map((r) => r[1] || '').join('');
       const runes = [...new Set(whale.split(''))].filter((c) => c !== ' ');
-      assert(runes.length > 0, `the ${platform} whale must draw something`);
+      assert(runes.length > 0, `the ${name} whale must draw something`);
       const inked = new Set(
-        renderer.tintWhale(runes.join(''), INK).filter((s) => s.s).map((s) => s.t),
+        rend.tintWhale(runes.join(''), INK).filter((s) => s.s).map((s) => s.t),
       );
       for (const rune of runes) {
-        assert(inked.has(rune), `the ${platform} whale must ink its '${rune}' shade`);
+        assert(inked.has(rune), `the ${name} whale must ink its '${rune}' shade`);
       }
     }
   } finally {
-    Object.defineProperty(process, 'platform', { value: realPlatform, configurable: true });
-    fresh(join('src', 'render.js'), realPlatform);
+    capsMod.setCaps(realCaps);
+    capsMod.resetCaps();
   }
 }
 

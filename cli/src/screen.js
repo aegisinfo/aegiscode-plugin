@@ -27,16 +27,14 @@
 
 const ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]/g;
 
-// Real terminal cell width (wcwidth-style). Combining marks and variation
-// selectors occupy no cell; CJK fullwidth forms and emoji-presentation glyphs
-// occupy two; everything else one. A plain code-point count misaligns every
-// width decision — padding, wrapping, cursor placement — the moment a line
-// contains CJK or emoji, because the terminal draws those two cells wide.
-// (Regexes copied verbatim from aegiscodex-dev/src/screen.js.)
-const RE_ZERO = /[\u0300-\u036F\u1AB0-\u1AFF\u1DC0-\u1DFF\u20D0-\u20FF\uFE00-\uFE0F\uFE20-\uFE2F]/u;
-const RE_WIDE = /[\u1100-\u115F\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uA960-\uA97F\uAC00-\uD7A3\uF900-\uFAFF\uFE10-\uFE19\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6\u{1F1E6}-\u{1F1FF}\u{1F300}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1F900}-\u{1F9FF}\u{1FA70}-\u{1FAFF}\u{20000}-\u{3FFFD}]/u;
-/** Cell width of one code point. */
-const cwidth = (ch) => (RE_ZERO.test(ch) ? 0 : RE_WIDE.test(ch) ? 2 : 1);
+const { caps, cellWidth } = require('./caps.js');
+
+// Real terminal cell width (wcwidth-style) comes from `caps.js`, which is the
+// one place the table lives: a platform that draws a rune two cells wide that
+// wcwidth does not know about (`AEGIS_WIDE_RUNES=✦`) has to shift *every* width
+// decision at once, and a second copy of the table here is exactly how the
+// transcript pads to one width while the overlay pads to another.
+const cwidth = (ch) => cellWidth(ch);
 
 function stripAnsi(s) {
   return String(s).replace(ANSI_RE, '');
@@ -47,10 +45,7 @@ function stripAnsi(s) {
  *  previous revision so callers measuring render output stay correct. */
 function w(s) {
   let n = 0;
-  for (const ch of stripAnsi(s)) {
-    if (RE_ZERO.test(ch)) continue;
-    n += RE_WIDE.test(ch) ? 2 : 1;
-  }
+  for (const ch of stripAnsi(s)) n += cwidth(ch);
   return n;
 }
 
@@ -127,11 +122,15 @@ function padLine(line, width) {
 }
 
 /** Term size, clamped so a zero-column report (CI, redirected stdout) still
- *  yields a paintable frame. */
-const getSize = () => ({
-  cols: Math.max(20, (process.stdout && process.stdout.columns) || 80),
-  rows: Math.max(5, (process.stdout && process.stdout.rows) || 24),
-});
+ *  yields a paintable frame. Resolved through `caps.js` so `AEGIS_WIDTH` and
+ *  `--width` reach every caller — the overlays used to read
+ *  `process.stdout.columns` directly, which is 0 on a redirected run and left
+ *  the frame 80 columns wide while the transcript had already been told
+ *  otherwise. */
+const getSize = () => {
+  const c = caps();
+  return { cols: c.cols, rows: c.rows };
+};
 
 // ── wrapping (plain strings; the string renderers use these) ─────────────────
 
@@ -277,7 +276,8 @@ function paintFrom(lines, startRow) {
 }
 
 function termWidth(fallback = 80) {
-  return Math.max(20, (process.stdout && process.stdout.columns) || fallback);
+  const { cols } = getSize();
+  return cols > 0 ? cols : Math.max(20, fallback);
 }
 
 /**

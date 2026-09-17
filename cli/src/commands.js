@@ -45,6 +45,9 @@ const { execSync } = require('node:child_process');
 
 const { span } = require('./screen.js');
 const { C, BOLD, BOLD_OFF } = require('./theme.js');
+// `caps.js` is dependency-free (it requires nothing), so this cannot cycle the
+// way a `theme.js` → `art.js` → `theme.js` require would.
+const { caps, setCaps, resetCaps, describe } = require('./caps.js');
 const panels = require('./panels.js');
 const overlays = require('./overlays.js');
 const {
@@ -890,7 +893,7 @@ const COMMANDS = [
       // This client's /status surface is the account-status tool (the same
       // tool /aegis-status names) plus the local session panel below it.
       await c.runTool('aegis_status', {});
-      panel(c, panels.buildStatus(c.state(), c.ctx));
+      panel(c, panels.buildStatus(c.state(), Object.assign({}, c.ctx, { caps: describe() })));
       c.render();
       return true;
     },
@@ -922,6 +925,87 @@ const COMMANDS = [
       }
       c.saveConfig({ themeIndex: c.ctx.themeIndex });
       note(c, `Theme: ${c.ctx.light ? 'light' : 'dark'}`);
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'terminal', aliases: ['tty'], args: ['mode', 'mode2'],
+    hint: '[ascii|unicode|color|no-color|star <native|narrow>|width <cols>|auto|status]', category: 'model',
+    desc: 'Show or override how this terminal is drawn (mark, colour, width)',
+    handler: async (c, args) => {
+      // The same report `aegiscode --terminal` prints, and the same switch the
+      // `--ascii` flag sets — so a session can be re-styled without restarting
+      // when a paste from PowerShell turns out to render badly in this host.
+      // `args` is positional (app.js `parseArgs`), so the second token is
+      // `mode2` for both `star narrow` and `width 100`.
+      const sub = (args.mode || '').toLowerCase();
+      const second = args.mode2 != null ? String(args.mode2).trim() : '';
+
+      if (sub === '' || sub === 'status') {
+        panel(c, panels.buildTerminalCaps(describe(), { pinned: !!caps().pinned }));
+        c.render();
+        return true;
+      }
+
+      // The patch pins every *axis* but never the frame: `cols`/`rows` must stay
+      // absent so `setCaps` leaves `sizePinned` false and a live resize keeps
+      // re-reading the stream (see caps.js). Copying the whole caps object here
+      // would freeze the width at the moment the command ran.
+      const cur = caps();
+      const axes = {
+        glyphs: cur.glyphs, face: cur.face, star: cur.star,
+        depth: cur.depth, vt: cur.vt, wideRunes: cur.wideRunes,
+        reasons: Object.assign({}, cur.reasons),
+      };
+
+      if (sub === 'auto') {
+        // Drop every override, including any the session inherited from the
+        // flags/env it was started with — "auto" means "probe again", not
+        // "restore what you were launched with".
+        resetCaps();
+        note(c, 'Terminal: auto — capabilities re-probed from the environment.');
+        c.render();
+        return true;
+      }
+      // `why` in the report must describe what the session is actually doing,
+      // not the probe it started from: after `/terminal ascii` on a truecolor
+      // host, `why: TERM=xterm-256color` would contradict `mark: ascii`.
+      if (sub === 'ascii' || sub === 'unicode') {
+        axes.glyphs = sub === 'ascii' ? 'ascii' : 'unicode';
+        axes.face = sub === 'ascii' ? 'edges' : 'native';
+        axes.star = sub === 'ascii' ? 'narrow' : 'native';
+        if (axes.reasons) axes.reasons.glyphs = `/terminal ${sub}`;
+      } else if (sub === 'color' || sub === 'no-color' || sub === 'nocolor') {
+        axes.depth = sub === 'color' ? 24 : 0;
+        if (axes.reasons) axes.reasons.depth = `/terminal ${sub}`;
+      } else if (sub === 'star') {
+        const want = second.toLowerCase();
+        if (!['native', 'narrow'].includes(want)) { note(c, 'Usage: /terminal star <native|narrow>'); c.render(); return true; }
+        axes.star = want;
+        if (axes.reasons) axes.reasons.star = `/terminal star ${want}`;
+      } else if (sub === 'width') {
+        // A pinned width is a frame override, so it goes in as cols — the one
+        // key that deliberately trips `sizePinned`.
+        const width = Number(second);
+        if (!Number.isFinite(width) || width < 20) { note(c, 'Usage: /terminal width <cols> (>= 20)'); c.render(); return true; }
+        setCaps(Object.assign({}, axes, { cols: Math.round(width) }));
+        note(c, `Terminal: width pinned to ${Math.round(width)} columns.`);
+        panel(c, panels.buildTerminalCaps(describe(), { pinned: !!caps().pinned }));
+        c.render();
+        return true;
+      } else {
+        note(c, 'Usage: /terminal [ascii|unicode|color|no-color|star <native|narrow>|width <cols>|auto|status]');
+        c.render();
+        return true;
+      }
+
+      setCaps(axes);
+      panel(c, panels.buildTerminalCaps(describe(), { pinned: !!caps().pinned }));
+      // Already-painted scrollback keeps the glyphs it was drawn with — a
+      // terminal has no way to rewrite what it has scrolled past. Everything
+      // from here on (and this viewport) uses the new mark.
+      note(c, 'Terminal updated — the current viewport is redrawn; text already scrolled past keeps its old glyphs.');
       c.render();
       return true;
     },

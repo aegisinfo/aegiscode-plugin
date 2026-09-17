@@ -45,10 +45,15 @@ try {
   markdown = null;
 }
 
-/** Error mark — the reference's failed-check glyph (theme.js has no GLYPH.err). */
-const ERR = '✗';
-/** Warning mark — the reference's ⚠ (theme.js has no GLYPH.warn). */
-const WARN = '⚠';
+// The failed-check `✗` and warning `⚠` marks now come from the shared glyph
+// table (`GLYPH.err` / `GLYPH.warn`), which downgrades them to `x` / `!` on a
+// terminal with no Unicode claim. They used to be two file-local constants
+// here, so a legacy Windows console printed U+2717 and U+26A0 into a font that
+// has neither — the notice rows were the last place the ASCII pass could not
+// reach. Read them at CALL time: `GLYPH` is mutated in place by `/terminal`, so
+// a value captured at require time would survive the switch.
+const errMark = () => GLYPH.err;
+const warnMark = () => GLYPH.warn;
 
 const fg = (t, c) => `${c}`;
 const bg = (c) => BG(...c);
@@ -125,8 +130,12 @@ function renderBanner(ctx, info = {}) {
   const width = Math.max(20, Number(info.width) || 80);
   const lines = [];
 
-  // Full-width gold header rule.
-  lines.push(`${t.gold}━${'─'.repeat(Math.max(0, width - 2))}━${RESET}`);
+  // Full-width gold header rule — the heavy/light pair from the shared glyph
+  // table, so the frame is `━───━` on a Unicode terminal and `=---=` on a
+  // legacy console instead of printing two box-drawing runes it cannot draw.
+  lines.push(
+    `${t.gold}${GLYPH.ruleHeavy}${GLYPH.rule.repeat(Math.max(0, width - 2))}${GLYPH.ruleHeavy}${RESET}`
+  );
   lines.push('');
 
   const parts = welcomeArtParts(width);
@@ -257,7 +266,7 @@ function renderTurn(ctx, turn, width = 80) {
     // turn.ok is only known once the call has actually run (the agent loop's
     // tool-activity event fires after execution); undefined means "no result
     // yet to report" (the plain registry-tool path, which never set it).
-    const status = turn.ok === undefined ? '' : turn.ok ? ` ${t.green}✓${RESET}` : ` ${t.red}${ERR}${RESET}`;
+    const status = turn.ok === undefined ? '' : turn.ok ? ` ${t.green}${GLYPH.check}${RESET}` : ` ${t.red}${errMark()}${RESET}`;
     lines.push(`${t.white}${GLYPH.block}${RESET} ${t.gray}${turn.label || 'tool'}${RESET}${status}`);
     const args =
       turn.args == null
@@ -277,7 +286,7 @@ function renderTurn(ctx, turn, width = 80) {
       lines.push(`  ${t.gray}${GLYPH.hook}  $ ${clip(args, Math.max(0, width - 6))}${RESET}`);
     }
   } else if (role === 'error') {
-    lines.push(`${t.red}${ERR} ${text}${RESET}`);
+    lines.push(`${t.red}${errMark()} ${text}${RESET}`);
   } else {
     for (const l of wrapBlock(text, Math.max(8, width - 2))) lines.push(`${t.white}${l}${RESET}`);
   }
@@ -367,9 +376,10 @@ function renderHeading(ctx, text, width = 80) {
   const label = ` ${text} `;
   const fill = Math.max(0, width - w(label));
   const left = Math.floor(fill / 2);
+  const rule = GLYPH.rule;
   return (
-    `${t.gray}${'─'.repeat(left)}${RESET}${t.gold}${BOLD}${label}${RESET}` +
-    `${t.gray}${'─'.repeat(Math.max(0, fill - left))}${RESET}`
+    `${t.gray}${rule.repeat(left)}${RESET}${t.gold}${BOLD}${label}${RESET}` +
+    `${t.gray}${rule.repeat(Math.max(0, fill - left))}${RESET}`
   );
 }
 
@@ -411,18 +421,19 @@ function renderApproval(ctx, info = {}, width = 80) {
 }
 
 /** A transient notice. Kinds map gray / coral / red / green with the matching
- *  glyph: info `·`, warn `⚠`, error `✗`, ok `✔`. */
+ *  glyph: info `·`, warn `⚠`, error `✗`, ok `✔` — all four read from the shared
+ *  table at call time, so `--ascii` swaps them along with the rest of the UI. */
 const NOTICE = {
-  info: ['gray', GLYPH.bullet],
-  warn: ['coral', WARN],
-  error: ['red', ERR],
-  ok: ['green', GLYPH.check],
+  info: ['gray', () => GLYPH.bullet],
+  warn: ['coral', warnMark],
+  error: ['red', errMark],
+  ok: ['green', () => GLYPH.check],
 };
 
 function renderNotice(ctx, kind, text) {
   const t = themeOf(ctx);
   const [token, mark] = NOTICE[kind] || NOTICE.info;
-  return `${t[token]}${mark} ${text}${RESET}`;
+  return `${t[token]}${mark()} ${text}${RESET}`;
 }
 
 module.exports = {

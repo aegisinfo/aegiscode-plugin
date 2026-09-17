@@ -16,6 +16,18 @@
 
 const path = require('node:path');
 
+// A closed pipe is not a failure. `aegiscode --terminal | head`, PowerShell's
+// `| Select-Object -First 5`, and a pager the user quits all close the read end
+// while we still have lines to write, and the default unhandled `error` event
+// on stdout turns that into a stack trace over the answer. Every line of output
+// this host produces is disposable, so the first EPIPE ends the process cleanly.
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on('error', (e) => {
+    if (e && (e.code === 'EPIPE' || e.code === 'ERR_STREAM_DESTROYED')) process.exit(0);
+    throw e;
+  });
+}
+
 const HELP = `aegiscode — AEGIS in your shell.
 
 Usage:
@@ -47,6 +59,14 @@ Options:
       --width <cols>      force a render width (useful for piping/logs)
       --yolo              skip tool-approval prompts (exec/writeFile/editFile
                            run without asking) — same as the in-session /yolo
+      --ascii             draw with the ASCII mark and glyph set (no Unicode).
+                           Same as AEGIS_ART=ascii; /terminal ascii toggles it
+                           mid-session.
+      --no-color          no colour at all (same as NO_COLOR=1)
+      --terminal          print the resolved terminal capabilities and exit —
+                           one report shape on every platform, so pasting it
+                           from PowerShell (or into a bug report) reads the same
+                           as pasting it from zsh
   -c, --continue          skip onboarding and resume the most recent session
   -h, --help              this text
   -v, --version           print the version
@@ -67,6 +87,15 @@ function parseArgs(argv) {
     light: false,
     width: null,
     yolo: false,
+    // Three-state, like `color`: `null` means "no art flag was given, let the
+    // capability probe decide". It must NOT default to `false`, because `false`
+    // is how `--unicode` is spelled — a default of `false` sets
+    // `AEGIS_ART=unicode` on every run and silently out-ranks the legacy-console
+    // ASCII downgrade, so a plain `aegiscode` on an old Windows console would
+    // draw Unicode blocks it cannot render.
+    ascii: null,
+    color: null,
+    terminal: false,
     continue: false,
     prompt: null,
     help: false,
@@ -156,6 +185,28 @@ function parseArgs(argv) {
         break;
       case '--width':
         opts.width = Number(next());
+        break;
+      case '--ascii':
+        // The same switch as AEGIS_ART=ascii, spelled as a flag because it is
+        // the one thing a user has to do to fix a mangled welcome mark, and
+        // asking them to export a variable and restart the shell first is how
+        // the mark stayed broken.
+        opts.ascii = true;
+        break;
+      case '--unicode':
+        opts.ascii = false;
+        break;
+      case '--no-color':
+      case '--no-colour':
+        opts.color = false;
+        break;
+      case '--color':
+      case '--colour':
+        opts.color = true;
+        break;
+      case '--terminal':
+      case '--caps':
+        opts.terminal = true;
         break;
       default:
         if (a.startsWith('-') && a !== '-') throw new Error(`unknown option: ${a}`);
@@ -322,6 +373,42 @@ async function main(argv = process.argv.slice(2)) {
   const pkg = require(path.join(__dirname, '..', 'package.json'));
   if (opts.version) {
     process.stdout.write(pkg.version + '\n');
+    return 0;
+  }
+
+  // ── terminal capabilities, resolved before anything else is loaded ────────
+  //
+  // Ordering is the whole point. `theme.js` materialises its palettes and its
+  // glyph table at load time and `art.js` picks its stencil at load time, and
+  // `app.js` pulls in both. Resolving caps first means the welcome screen is
+  // drawn for the terminal actually in use — PowerShell with VT enabled gets
+  // the same mark as zsh, a legacy console gets the ASCII pass — instead of
+  // whatever the first probe guessed being frozen into a module that is never
+  // re-evaluated.
+  const { setCaps, describe } = require('../src/caps.js');
+  const capEnv = { ...process.env };
+  if (opts.ascii === true) capEnv.AEGIS_ART = 'ascii';
+  if (opts.ascii === false) capEnv.AEGIS_ART = 'unicode';
+  if (opts.color === false) capEnv.NO_COLOR = '1';
+  if (opts.color === true) {
+    // An explicit --color has to beat an inherited NO_COLOR, and NO_COLOR is
+    // checked first, so it is removed rather than out-ranked.
+    delete capEnv.NO_COLOR;
+    capEnv.FORCE_COLOR = '3';
+  }
+  if (opts.width) capEnv.AEGIS_WIDTH = String(opts.width);
+  setCaps(null, capEnv);
+
+  // `--terminal` answers "why does it look like that here?" in one shape on
+  // every platform, so a paste from PowerShell reads like one from zsh. It
+  // prints the resolved values and exits before a session, a config read or a
+  // network call can colour the answer.
+  if (opts.terminal) {
+    const rows = describe();
+    const key = rows.reduce((m, [k]) => Math.max(m, k.length), 0);
+    process.stdout.write(`aegiscode ${pkg.version} — terminal capabilities\n\n`);
+    for (const [k, v] of rows) process.stdout.write(`  ${k.padEnd(key)}  ${v}\n`);
+    process.stdout.write('\nOverride with --ascii / --color / --width, or AEGIS_ART,\nAEGIS_STAR, AEGIS_COLOR, AEGIS_VT, AEGIS_WIDTH (see README).\n');
     return 0;
   }
 

@@ -186,7 +186,11 @@ function buildHelp(commands, ctx = {}) {
 
 // ── /status ──────────────────────────────────────────────────────────────────
 
-/** @param {object} state session state (see the module header in the task) */
+/**
+ * @param {object} state session state (see the module header in the task)
+ * @param {{light?: boolean, caps?: Array<[string,string]>}} [ctx] `caps` is the
+ *   `caps.describe()` row list, rendered as the terminal-capability rows.
+ */
 function buildStatus(state, ctx = {}) {
   const t = themeOf(ctx);
   const s = obj(state);
@@ -219,6 +223,21 @@ function buildStatus(state, ctx = {}) {
   if (s.version != null) add('Version', 'v' + str(s.version));
   add('Node', process.version);
   add('Platform', `${process.platform} ${process.arch}`);
+  // Terminal capabilities, read off the same `caps.describe()` rows `/terminal`
+  // renders — passed in on `ctx` so this builder stays pure (no caps.js require)
+  // and the two reports cannot drift. Absent in tests and headless runs; `add()`
+  // skips empty values, so the rows simply do not appear.
+  const capsRows = Array.isArray(ctx.caps) ? ctx.caps : [];
+  const cap = (k) => {
+    const hit = capsRows.find((r) => Array.isArray(r) && String(r[0]) === k);
+    return hit ? str(hit[1]) : '';
+  };
+  add('Terminal', cap('terminal'));
+  add('Mark', cap('mark'));
+  add('Star', cap('star'));
+  add('Color', cap('color'));
+  add('Control', cap('control'));
+  add('Frame', cap('size'));
 
   for (const l of kv(t, rows, { keyStyle: t.gray, valStyle: t.white })) lines.push(l);
 
@@ -598,6 +617,44 @@ function buildTerminalSetup(state, ctx = {}) {
   lines.push([span(t.gray, '  • TERM=xterm-256color enables full color + resize handling')]);
   lines.push([span(t.gray, '  • Set LANG (e.g. en_US.UTF-8) for correct glyphs and word wrap')]);
   lines.push([span(t.gray, '  • Resize mid-session is handled (SIGWINCH); overlays adapt')]);
+  return lines;
+}
+
+// ── /terminal ────────────────────────────────────────────────────────────────
+
+/**
+ * The capability report — the same rows `aegiscode --terminal` prints, because
+ * both render `caps.describe()`. Taking the rows as an argument keeps this
+ * builder pure (see the module header): no `require('./caps.js')` here, so
+ * `/terminal` and the launcher flag cannot drift into two different reports.
+ *
+ * This is the panel the CLI help promised at `aegiscode.js:63` ("`/terminal
+ * ascii` toggles it mid-session") long before the command existed.
+ *
+ * @param {Array<[string,string]>} report rows from `caps.describe()`
+ * @param {{pinned?: boolean, light?: boolean}} [ctx] `pinned` adds the warning
+ *   shown after `/terminal width`, which turns off resize re-reads.
+ */
+function buildTerminalCaps(report, ctx = {}) {
+  const t = themeOf(ctx);
+  const rows = (Array.isArray(report) ? report : [])
+    .filter((r) => Array.isArray(r) && r.length >= 2)
+    .map(([k, v]) => [str(k), str(v)]);
+  const lines = [];
+  lines.push([span(t.gold + BOLD, 'Terminal capabilities'), span(BOLD_OFF, '')]);
+  if (!rows.length) {
+    lines.push([span('', ' '), span(t.gray, 'No capability report available.')]);
+    return lines;
+  }
+  for (const l of kv(t, rows, { keyStyle: t.white, valStyle: t.gray })) lines.push(l);
+  lines.push([span('', '')]);
+  if (ctx && ctx.pinned) {
+    lines.push([span(t.coral, GLYPH.warn), span(t.gold, ' width is pinned — resizes are ignored until /terminal auto')]);
+    lines.push([span('', '')]);
+  }
+  lines.push([span(t.gray, 'Override: /terminal ascii | unicode | color | no-color | star <native|narrow>')]);
+  lines.push([span(t.gray, '          /terminal width <cols> | auto | status')]);
+  lines.push([span(t.gray, 'At launch: --ascii --unicode --no-color --width <cols> --terminal')]);
   return lines;
 }
 
@@ -1142,6 +1199,7 @@ module.exports = {
   buildOnboarding,
   buildShellCompletion,
   buildTerminalSetup,
+  buildTerminalCaps,
   buildPRs,
   buildBenchmark,
   buildWaifu,

@@ -67,7 +67,52 @@ aegiscode "why is the sky blue"  # one-shot, prints the answer and the tokens
 aegiscode -p "..." --json        # machine-readable
 echo "q" | aegiscode -p -        # prompt on stdin
 aegiscode -m deepseek/deepseek-v4-flash -p "..."   # pin a model
+aegiscode --terminal              # print the resolved terminal capabilities
+aegiscode --ascii                 # force the ASCII mark (legacy consoles)
+aegiscode --width 100             # pin the frame width
 ```
+
+## One look on every terminal
+
+The welcome screen, the palette and the glyph set are resolved from what the
+terminal *can actually draw*, not from `process.platform`. PowerShell inside
+Windows Terminal sets `WT_SESSION`/`TERM_PROGRAM`, so it renders the **same
+byte-identical frame** as zsh: `unicode` mark, `native` star, 24-bit colour. The
+host OS is only a fallback hint; the environment wins.
+
+`cli/src/caps.js` resolves one capability object — mark (`unicode`/`ascii`), face
+(`native`/`edges`), star (`native`/`narrow`), colour depth (24/8/4/0), control
+(`ansi`/`plain`), size and EOL — and everything that draws goes through it.
+`theme.js` builds its palettes and glyph table via `caps.rgb()`/`caps.bg()`, so a
+16-colour console is painted in colours it has instead of literal escape text,
+and `art.js` applies composable stencils (`ascii`, `edges`, `star`) rather than a
+per-platform art table.
+
+Only a **legacy** Windows console degrades — and it says why:
+
+| host | mark | star | colour | reason |
+| --- | --- | --- | --- | --- |
+| win32 legacy conhost | `ascii` | `narrow` | 16 | Consolas has no block glyphs |
+| win32 Windows Terminal | `unicode` | `native` | truecolor | Windows VT host (`WT_SESSION`) |
+| Linux/macOS, zsh | `unicode` | `native` | truecolor | — |
+| `TERM=dumb` | `ascii` | `narrow` | none | no control sequences |
+
+The **star defaults to native on Windows VT.** `✦` appears eleven times in the
+welcome art, so forcing it narrow there would *create* the divergence this is
+meant to remove; ConPTY does font fallback single-width. `AEGIS_STAR=narrow`
+is the escape hatch if a host proves otherwise.
+
+Overrides, at launch — `--ascii`, `--unicode`, `--no-color`, `--color`,
+`--width <cols>`, `--terminal` (print the report) — and in-session via
+`/terminal ascii|unicode|color|no-color|star <native|narrow>|width <cols>|auto|status`.
+`/terminal auto` re-probes rather than restoring launch flags. `/terminal width`
+pins the frame, so resizes are ignored until `/terminal auto`; every other
+`/terminal` switch leaves resize handling intact.
+
+The same axes are settable by environment for scripts and CI: `AEGIS_ART`,
+`AEGIS_ASCII`, `AEGIS_UNICODE`, `AEGIS_STAR`, `AEGIS_COLOR`, `AEGIS_VT`,
+`AEGIS_WIDTH`, `AEGIS_WIDE_RUNES`. `NO_COLOR` is honoured to the letter —
+"present and not an empty string, regardless of its value".
 
 ## First run
 
@@ -307,6 +352,7 @@ node ../test/cli-commands.test.mjs    # the full command table, aliases, dispatc
 node ../test/cli-panels.test.mjs      # every panel builder, defensive against missing data
 node ../test/cli-support.test.mjs     # config/history/tokens/agents/export/checkpoints
 node ../test/cli-conformance.test.mjs # the design guard: palette, glyphs, art, verbs
+node ../test/cli-terminal-caps.test.mjs # capability resolution: PowerShell and zsh agree
 node ../test/cli-render.test.mjs      # width safety, accounting, live region
 node ../test/cli-overlays.test.mjs    # the / palette, model + effort pickers, resume list
 node ../test/cli-fuzzy.test.mjs       # palette ranking and match positions

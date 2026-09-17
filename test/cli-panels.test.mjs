@@ -71,6 +71,22 @@ const state = {
   url: 'https://aegisintel.up.railway.app/api/v1',
 };
 
+// A capability report in `caps.describe()`'s shape. The real one comes from
+// `caps.js`; the panels only ever read it, which is what keeps `/terminal`,
+// `/status` and `aegiscode --terminal` from drifting into three reports.
+const CAPS_ROWS = [
+  ['platform', 'linux'],
+  ['terminal', 'xterm-256color'],
+  ['locale', 'en_GB.UTF-8'],
+  ['mark', 'unicode'],
+  ['star', 'native'],
+  ['color', 'truecolor'],
+  ['control', 'ansi'],
+  ['size', '100x30 (stdout.columns)'],
+  ['eol', '\\n'],
+  ['why', 'TERM=xterm-256color; COLORTERM=truecolor'],
+];
+
 // ── panel output shape ──────────────────────────────────────────────────────
 function validate(name, lines) {
   assert(Array.isArray(lines), `${name} returns an array`);
@@ -97,7 +113,7 @@ const flat = (lines) => validate('inline', lines);
 const BUILDER_NAMES = [
   'buildHelp', 'buildStatus', 'buildCost', 'buildContext', 'buildTokens', 'buildAgents',
   'buildPermissions', 'buildModelList', 'buildRewindList', 'buildOnboarding',
-  'buildShellCompletion', 'buildTerminalSetup', 'buildPRs', 'buildBenchmark', 'buildWaifu',
+  'buildShellCompletion', 'buildTerminalSetup', 'buildTerminalCaps', 'buildPRs', 'buildBenchmark', 'buildWaifu',
   'buildAegisStatus', 'buildAegisRecall', 'buildAegisMulti', 'buildBilling', 'buildMemory',
   'buildMemoryTiers', 'buildRouter', 'buildYolo', 'buildSkills', 'buildMcp',
   'buildHooksStatus', 'buildHooksList', 'buildTroubleshooting', 'buildReleaseNotes',
@@ -129,6 +145,8 @@ const CALLS = {
   buildOnboarding: [[state], []],
   buildShellCompletion: [[state], []],
   buildTerminalSetup: [[state], []],
+  // The rows `caps.describe()` produces, handed in so this builder stays pure.
+  buildTerminalCaps: [[CAPS_ROWS], [[]]],
   buildPRs: [['123 fix a thing\n124 another', ], [undefined]],
   buildBenchmark: [[[['render', 3], ['parse', 1]]], []],
   buildWaifu: [[ctx], [undefined]],
