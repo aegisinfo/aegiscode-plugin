@@ -14,12 +14,13 @@
  * wrong.
  *
  * `budgetFor`/`maxTokensCeiling`/`FLAT_CEILING`/`EFFORT_TOKEN_BUDGET` come from
- * budget.js and `usageTokens` from usage.js, sibling classic scripts loaded
- * before this one (see index.html). There is no max-tokens control on this
- * surface at all: the ceiling is display-only (what a model says its own output
- * limit is, reported in the Model hint) and `budgetFor` answers — from the
- * Effort rung — what a request actually travels with. The token-usage →
- * displayed-number mapping stays unit-testable without window.aegis/models.
+ * budget.js and `turnAccounting`/`fmtCost` from usage.js, sibling classic
+ * scripts loaded before this one (see index.html). There is no
+ * max-tokens control on this surface at all: the ceiling is display-only (what a
+ * model says its own output limit is, reported in the Model hint) and
+ * `budgetFor` answers — from the Effort rung — what a request actually travels
+ * with. The token-usage → displayed-number mapping stays unit-testable without
+ * window.aegis/models.
  */
 
 // Everything below runs inside an IIFE. preload.js's contextBridge.exposeInMainWorld
@@ -2002,8 +2003,14 @@ async function spawnPath(card, spec) {
     const bits = [spec.path.title];
     if (data && data.model) bits.push(data.model);
     else if (spec.model) bits.push(spec.model);
-    const flowTokens = usageTokens(data && data.usage);
-    if (flowTokens != null) bits.push(`${flowTokens} tokens`);
+    // A lane card is a dispatch the same way a turn is, and it was the
+    // un-costed half of the 3x story: it reported tokens with no charge beside
+    // them, so the extra calls were the least visible thing on the screen.
+    const flow = turnAccounting(data && data.usage, spec.model, {
+      costUsd: data && typeof data.costUsd === 'number' ? data.costUsd : undefined,
+    });
+    if (flow.tokens != null) bits.push(`${flow.tokens} tokens`);
+    if (flow.cost != null) bits.push(fmtCost(flow.cost, flow.real));
     meta.textContent = bits.join(' · ');
   } catch (err) {
     const message = err && err.message ? err.message : String(err);
@@ -3080,8 +3087,17 @@ async function send() {
     // class it is what sized the call, and a user cannot tell a 16k turn from a
     // 64k one by looking at the answer.
     else if (effort) bits.push(`effort: ${effort}`);
-    const turnTokens = usageTokens(data && data.usage);
-    if (turnTokens != null) bits.push(`tokens: ${turnTokens}`);
+    // Tokens AND what they cost, on the CLI's rule: a pooled turn's settled
+    // charge (`costUsd`) is reported verbatim, and only a turn without one is
+    // priced from the local rate table and marked an estimate. Printing tokens
+    // alone left this surface with no comparable meter at all — the desktop
+    // and the CLI run the same engine, so a gap between them had to be
+    // measured on the same prompt, and one side was not measuring.
+    const turn = turnAccounting(data && data.usage, model, {
+      costUsd: data && typeof data.costUsd === 'number' ? data.costUsd : undefined,
+    });
+    if (turn.tokens != null) bits.push(`tokens: ${turn.tokens}`);
+    if (turn.cost != null) bits.push(fmtCost(turn.cost, turn.real));
     addMessage('assistant', text, bits.join(' · ') || undefined, sessionId, toolLog);
 
     try {
