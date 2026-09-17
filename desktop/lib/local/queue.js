@@ -179,17 +179,32 @@ function upsert(items, entry) {
  * with it as the tool loop's working directory), `model` is the AEGIS Cloud
  * model id to run it on, and `commit` asks the worker to commit what the task
  * changed (scoped — see autonomous.js).
+ *
+ * AEGIS CLOUD ONLY, REFUSED AT THE DOOR. The worker sends every task out as
+ * `class: 'aegis'`, so a model the pool does not serve cannot run here at all —
+ * it is a task that fails minutes into a drain, after being picked up, with an
+ * opaque server error. `model: null` stays legal: that is "no pick", and
+ * autonomous.resolveModel fills in the pooled brain. Anything else has to pass
+ * that module's own accept-list, so the CLI (`aegiscode autonomous add
+ * --model`), the desktop card and a hand-written queue file are all held to the
+ * same rule. Required lazily: queue.js is a dependency of autonomous.js, and
+ * this check must not turn that into a load-order cycle.
  */
 function addTask(env, opts = {}) {
   const task = String(opts.task == null ? '' : opts.task).trim();
   if (!task) throw new Error('queue: a task needs text');
+  const statedModel = String(opts.model == null ? '' : opts.model).trim();
+  if (statedModel) {
+    const refusal = require('./autonomous.js').modelRefusal(statedModel);
+    if (refusal) throw new Error(`queue: ${refusal}`);
+  }
   const items = loadQueue(env);
   const now = opts.now || Date.now();
   const entry = {
     id: nextId(items),
     task,
     cwd: opts.cwd || process.cwd(),
-    model: opts.model || null,
+    model: statedModel || null,
     effort: opts.effort || null,
     workers: Number.isInteger(opts.workers) ? opts.workers : null,
     singlePass: Boolean(opts.singlePass),

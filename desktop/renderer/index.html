@@ -142,14 +142,21 @@
           for="autonomous-toggle"
           id="autonomous-toggle-wrap"
           hidden
-          title="Let the model work autonomously: fan out to multiple reasoning workers and synthesize their findings into one answer. Aegis Cloud models only."
+          title="Fan THIS chat turn out to several Aegis Cloud reasoning workers and synthesize their findings into one answer. Aegis Cloud only, and off by default because it costs about (workers + 1) full model calls per turn. This is a per-turn setting for the thread; it does not govern the unattended queue below, which runs each queued task on a single pass unless that task asks for the fan-out."
         >
           <input type="checkbox" id="autonomous-toggle" />
-          <span>work autonomously</span>
+          <span>fan out this turn</span>
         </label>
         <div id="autonomous-controls" class="autonomous-controls" hidden>
           <label for="autonomous-workers">Workers</label>
-          <input type="number" id="autonomous-workers" min="1" max="8" step="1" />
+          <input
+            type="number"
+            id="autonomous-workers"
+            min="1"
+            max="8"
+            step="1"
+            title="How many reasoning workers this turn fans out to. Every worker is a separate full model call on the same tier, so the turn costs roughly this number plus one times a normal one — higher is not automatically better."
+          />
         </div>
         <p class="hint" id="model-hint"></p>
       </section>

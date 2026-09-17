@@ -73,12 +73,64 @@ function writtenPath(tool) {
 
 /**
  * The default AEGIS Cloud model for autonomous work: the pooled brain, which
- * is the tier the server fans out to multiple reasoning workers and
- * synthesises. Autonomous tasks are exactly the ones worth that spend, and
- * `nexus-brain` is the canonical id the catalog itself prefers (the other tier
- * spellings are aliases of it — see filterAegisCatalog in engine.js).
+ * is the tier the server can fan out to multiple reasoning workers and
+ * synthesise. `nexus-brain` is the canonical id the catalog itself prefers
+ * (the other tier spellings are aliases of it — see filterAegisCatalog in
+ * engine.js).
+ *
+ * The model id is only the tier. It is NOT what makes an autonomous task
+ * expensive — the fan-out is, and the fan-out is opt-in per task (see
+ * resolveFanout below). This used to be documented the other way round ("the
+ * pooled brain ... autonomous tasks are exactly the ones worth that spend"),
+ * and the worker sent `autonomous: true` on every queued task, so the most
+ * expensive shape of the most expensive tier ran on one-line tasks too.
  */
 const DEFAULT_MODEL = 'nexus-brain';
+
+/**
+ * THE QUEUE RUNS ON AEGIS CLOUD, AND NOTHING ELSE.
+ *
+ * A queued task is billed to the AEGIS pool and every turn it makes goes out
+ * with `class: 'aegis'` (see runTask below) — the pool is the only backend this
+ * worker can reach. So a model id here has to be one the *pool* serves. A
+ * direct-provider id is not a cheaper option the queue could fall back to; it
+ * is a request the pool cannot honour, or worse, a per-provider spelling
+ * (`anthropic`, `groq`, …) that quietly pins one upstream instead of letting
+ * the pool auto-route across whichever providers hold a live key.
+ *
+ * The accept-list is therefore the pooled-brain tier family — the one entry
+ * engine.js's filterAegisCatalog offers for the Aegis Cloud class, plus the
+ * `-smart`/`-neo` tier spellings the server still serves as aliases of it. This
+ * mirrors selectBrainEntry() there rather than re-deriving "anything starting
+ * with nexus-": `nexus-fast` is not a tier the catalog has ever served, and
+ * accepting a made-up id means a queued task that fails at the server after
+ * being picked up, or runs on a tier nobody chose.
+ */
+const AEGIS_MODEL_RE = /^(?:nexus|aegis)-brain(?:-(?:smart|neo))?$/;
+const AEGIS_MODEL_IDS = Object.freeze(['nexus-brain', 'aegis-brain']);
+
+/** True when `id` names an AEGIS Cloud pooled-brain tier (the queue's only models). */
+function isAegisModel(id) {
+  return AEGIS_MODEL_RE.test(String(id == null ? '' : id).trim());
+}
+
+/**
+ * Why a STATED model id cannot be queued, or '' when it can. Blank is not a
+ * refusal — "no pick" is the default model, which resolveModel supplies.
+ *
+ * The message names the pool, because the failure it prevents ("queued on
+ * claude-sonnet-4, ran on — or was billed to — something else") is invisible
+ * otherwise: `class: 'aegis'` would be sent with an id the server does not
+ * serve, and the task would come back as an opaque error minutes later.
+ */
+function modelRefusal(id) {
+  const stated = String(id == null ? '' : id).trim();
+  if (!stated || isAegisModel(stated)) return '';
+  return (
+    `the autonomous queue runs Aegis Cloud models only (${DEFAULT_MODEL}, ` +
+    `${AEGIS_MODEL_IDS.join('/')} aliases); "${stated}" is not one`
+  );
+}
 
 /** Phrase match for "work autonomously" in a prompt or a queued task. */
 const AUTONOMOUS_REQUEST_RE =
@@ -160,23 +212,92 @@ function withRoundHorizon(rounds, env, fn) {
 }
 
 /**
- * The model an autonomous task runs on: an explicit pick wins, then the
- * environment (so a systemd timer can pin a cheap tier), then the pooled
- * brain. Never the interactive session's model — a queue survives the session
- * that queued it, so it cannot inherit that session's choice.
+ * The model an autonomous task runs on: an explicit pick wins, then an AEGIS
+ * Cloud pin in the environment (so a systemd timer can choose a tier), then the
+ * pooled brain. Never the interactive session's model — a queue survives the
+ * session that queued it, so it cannot inherit that session's choice.
+ *
+ * TWO DIFFERENT TREATMENTS FOR TWO DIFFERENT SOURCES, on purpose:
+ *
+ *   - a pick that came from the TASK is returned verbatim, even when it is
+ *     wrong. Substituting a correct model for a stated one is how a queue
+ *     "runs on nexus-brain" while the file says otherwise; the caller refuses
+ *     it out loud instead (modelRefusal, queue.addTask, and the pre-flight in
+ *     runTask).
+ *   - a non-Aegis value in the ENVIRONMENT is skipped, because AEGIS_MODEL is
+ *     shared with the interactive surfaces (which run direct providers), so a
+ *     stray value there is not a statement about the queue. Refusing every
+ *     task over it would break drains for a reason that is not the task's
+ *     fault; a fallback to the pooled brain keeps the drain honest and on-cloud.
  */
 function resolveModel({ model, env } = {}) {
   const e = env || process.env;
   const picked = String(model || '').trim();
   if (picked) return picked;
   const fromEnv = String(e.AEGIS_AUTONOMOUS_MODEL || e.AEGIS_MODEL || '').trim();
-  return fromEnv || DEFAULT_MODEL;
+  return isAegisModel(fromEnv) ? fromEnv : DEFAULT_MODEL;
 }
 
-/** Effort rung for an unattended turn: high unless the caller/environment says otherwise. */
-function resolveEffort({ effort, env } = {}) {
+/**
+ * The environment pin the queue had to ignore, or '' when there was none.
+ *
+ * Reported (not silent) because an operator who exported
+ * AEGIS_AUTONOMOUS_MODEL=deepseek-v4-flash asked for a model and is not getting
+ * it: the queue falls back to the pool, and the one place that says so is this
+ * string, which runTask emits as a note and the desktop card shows.
+ */
+function ignoredEnvModel({ model, env } = {}) {
+  if (String(model || '').trim()) return ''; // the task's own pick is what counts
   const e = env || process.env;
-  return String(effort || e.AEGIS_AUTONOMOUS_EFFORT || 'high');
+  const fromEnv = String(e.AEGIS_AUTONOMOUS_MODEL || e.AEGIS_MODEL || '').trim();
+  if (!fromEnv || isAegisModel(fromEnv)) return '';
+  const which = String(e.AEGIS_AUTONOMOUS_MODEL || '').trim() ? 'AEGIS_AUTONOMOUS_MODEL' : 'AEGIS_MODEL';
+  return `${which}="${fromEnv}" is not an Aegis Cloud model — running on ${DEFAULT_MODEL} instead`;
+}
+
+/**
+ * Whether a queued task runs the pooled-brain worker fan-out (aegis1
+ * services/pool_brain.py) or one plain turn on the same tier.
+ *
+ * COST IS THE REASON THIS IS OPT-IN. The fan-out is the single biggest
+ * multiplier this app can put on a bill: pool_brain spawns up to `workers`
+ * reasoning workers plus a synthesis pass, re-sends the task context to every
+ * one of them, and sizes each from the same effort ladder. A 3-worker
+ * high-effort task is therefore roughly four full reasoning calls against a
+ * 65536-token ladder, where the identical task single-pass is one call on the
+ * medium rung. The fan-out earns that on genuinely open-ended investigation
+ * ("why did X regress across this repo"); it is pure waste on a task that
+ * already names the file to edit.
+ *
+ * Precedence: the task's own `autonomous: true` (or `singlePass: false`, the
+ * explicit "fan me out") wins, then AEGIS_AUTONOMOUS_FANOUT=1 in the
+ * environment, else single pass.
+ */
+function resolveFanout(item = {}, env = process.env) {
+  const it = item || {};
+  if (it.autonomous === true || it.singlePass === false) return true;
+  const e = env || process.env;
+  return /^(1|true|yes|on)$/i.test(String(e.AEGIS_AUTONOMOUS_FANOUT || '').trim());
+}
+
+/**
+ * Effort rung for an unattended turn.
+ *
+ * The rung is a spend knob, not a quality slider: the pooled class sizes its
+ * whole budget ladder from it (aegis1 services/pool_brain.py pass_budgets:
+ * low/medium/high -> 16384/32768/65536 tokens TOTAL across the fan-out), and
+ * the engine uses it for any model that reasons against its own output budget.
+ * `high` is the right rung for a fan-out — it is what buys a synthesis pass
+ * worth reading — but on a single pass it is a 2x over medium for budget
+ * nobody reads, so the default follows the shape of the task rather than
+ * always being the most expensive rung. An explicit pick (item.effort) or
+ * AEGIS_AUTONOMOUS_EFFORT still wins outright.
+ */
+function resolveEffort({ effort, env, fanout } = {}) {
+  const e = env || process.env;
+  const stated = String(effort || e.AEGIS_AUTONOMOUS_EFFORT || '').trim();
+  if (stated) return stated;
+  return fanout ? 'high' : 'medium';
 }
 
 /**
@@ -290,8 +411,24 @@ function createQueueWorker({ engine, env = process.env, log = () => {}, git = gi
    */
   async function runTask(item, { carry = '', commit } = {}) {
     const cwd = item.cwd || process.cwd();
+    // Aegis Cloud or nothing — checked BEFORE the turn, not at the server. An
+    // item whose model is not a pooled tier (a hand-edited queue file, a
+    // `--model` the CLI accepted before this rule existed, another host's
+    // older build) would otherwise go out as `class: 'aegis'` with an id the
+    // pool does not serve: billed work if it happens to be a per-provider
+    // spelling, an opaque server error otherwise. Failing here names the model
+    // and the allowed ones, and costs nothing.
+    const refusal = modelRefusal(item.model);
+    if (refusal) {
+      const failed = { ok: false, error: refusal, model: item.model, ms: 0 };
+      emit({ type: 'finish', taskId: item.id, ok: false, result: failed });
+      return failed;
+    }
     const model = resolveModel({ model: item.model, env });
-    const effort = resolveEffort({ effort: item.effort, env });
+    const ignored = ignoredEnvModel({ model: item.model, env });
+    if (ignored) emit({ type: 'note', taskId: item.id, note: ignored });
+    const fanout = resolveFanout(item, env);
+    const effort = resolveEffort({ effort: item.effort, env, fanout });
     const rounds = maxRounds(env, item.maxRounds);
     // Approval requests have no one to answer them here; see the header.
     let approvalAsked = null;
@@ -331,7 +468,7 @@ function createQueueWorker({ engine, env = process.env, log = () => {}, git = gi
     const wantCommit = commit === undefined ? Boolean(item.commit) : Boolean(commit);
     const before = wantCommit ? safe(() => git.gitStatusSnapshot(cwd), null) : null;
 
-    emit({ type: 'start', taskId: item.id, model, cwd, rounds });
+    emit({ type: 'start', taskId: item.id, model, cwd, rounds, fanout, effort });
     const started = now();
     let result;
     try {
@@ -341,13 +478,16 @@ function createQueueWorker({ engine, env = process.env, log = () => {}, git = gi
             class: 'aegis',
             model,
             prompt: taskPrompt(item, { carry, rounds }),
-            // The pooled brain ("work autonomously" in the GUI): the server fans
-            // the round out to several reasoning workers and synthesises. A
-            // `singlePass` task opts out — the retry/write-up passes in the
-            // engine send `brain: false` for exactly this reason.
-            autonomous: !item.singlePass,
+            // The pooled-brain fan-out ("fan out this turn" in the GUI chat
+            // header, and opt-in here): the server fans the round out to
+            // several reasoning workers and synthesises. It costs about
+            // workers+1 full reasoning calls, so it travels only when the task
+            // asked for it — see resolveFanout above. A `singlePass` task is
+            // the default for exactly that reason; the retry/write-up passes in
+            // the engine send `brain: false` for the same one-call reason.
+            autonomous: fanout,
             effort,
-            workers: item.workers || undefined,
+            workers: fanout ? item.workers || undefined : undefined,
             // The turn's working directory rides on `env`: engine.js reads the
             // tool loop's cwd from envFor(payload), so a top-level `cwd` field
             // is a directory the engine would ignore and every tool would run
@@ -582,13 +722,18 @@ function commitMessage(item) {
 module.exports = {
   DEFAULT_MODEL,
   DEFAULT_ROUNDS,
+  AEGIS_MODEL_IDS,
+  isAegisModel,
+  modelRefusal,
   WRITE_TOOLS,
   writtenPath,
   isAutonomousRequest,
   maxRounds,
   withRoundHorizon,
   resolveModel,
+  ignoredEnvModel,
   resolveEffort,
+  resolveFanout,
   autonomousDirective,
   taskPrompt,
   appendDigest,

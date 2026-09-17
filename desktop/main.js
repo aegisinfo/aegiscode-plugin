@@ -1357,6 +1357,11 @@ function createQueueDispatch({
       draining,
       stopping: stopRequested,
       defaultCwd: process.cwd(),
+      // What a task with no model of its own actually runs on. The queue is
+      // Aegis Cloud only, so this is a pooled tier id — and the card prints it,
+      // because "which model is this drain spending on" was previously
+      // unanswerable from the UI.
+      defaultModel: autonomous.resolveModel({ env }),
       queueFile: queue.queuePath(env),
       runs: queue.readRuns(env, { limit: 20 }),
     };
@@ -1385,6 +1390,13 @@ function createQueueDispatch({
     if (!isExistingDir(cwd)) return { error: `not a directory: ${cwd}` };
 
     const model = String(p.model == null ? '' : p.model).trim().slice(0, 120) || null;
+    // Aegis Cloud only (autonomous.js modelRefusal): the worker's requests go
+    // out as `class: 'aegis'`, so a model the pool does not serve is a task that
+    // fails inside a drain. Refused HERE so the card gets the reason at the
+    // moment of queueing instead of a red row later. queue.addTask enforces the
+    // same rule for the CLI and for hand-written queue files.
+    const modelRefusal = model ? autonomous.modelRefusal(model) : '';
+    if (modelRefusal) return { error: modelRefusal };
     const effortRaw = String(p.effort == null ? '' : p.effort).trim().toLowerCase();
     return {
       opts: {
@@ -1394,6 +1406,12 @@ function createQueueDispatch({
         effort: QUEUE_EFFORTS.has(effortRaw) ? effortRaw : null,
         workers: clampInt(p.workers, 1, QUEUE_MAX_WORKERS),
         maxRounds: clampInt(p.maxRounds, 1, QUEUE_MAX_ROUNDS),
+        // The pooled-brain fan-out is opt-in (autonomous.js resolveFanout):
+        // it costs about workers+1 full reasoning calls on one task, so the
+        // card has to ask for it per task. queue.addTask stores the inverse
+        // (`singlePass`), which is also the field a hand-written queue file
+        // or the CLI uses.
+        singlePass: !(p.fanout === true || p.autonomous === true),
         commit: Boolean(p.commit),
         source: 'desktop',
       },

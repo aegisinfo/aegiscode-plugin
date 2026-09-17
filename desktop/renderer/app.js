@@ -891,6 +891,12 @@ function queueStatusMark(status) {
 /** The outcome line under a task: what happened, or why it did not. */
 function queueMetaText(item) {
   const bits = [item.status];
+  // Which model and which shape, per row. Both are spend facts the card used
+  // to hide: an unpinned task runs main.js's defaultModel (a pooled tier), and
+  // a task is a single pass unless it was queued with `fanout` — the difference
+  // is roughly (workers + 1) full reasoning calls.
+  if (item.model) bits.push(item.model);
+  bits.push(item.singlePass === false || item.autonomous === true ? 'fan-out' : 'single pass');
   if (item.status === 'error') {
     bits.push(item.error ? String(item.error) : 'failed — no reason recorded');
   } else if (item.status === 'done') {
@@ -977,6 +983,10 @@ function renderQueueState(state) {
   if (state.running) bits.push(`running #${state.running.id}`);
   else if (queueDraining) bits.push('draining…');
   bits.push(`${state.pending || 0} pending`);
+  // What the queue can spend on at all: Aegis Cloud, and which tier an
+  // unpinned task lands on (main.js snapshot().defaultModel resolves it the
+  // same way the worker does, so the card cannot disagree with the bill).
+  if (state.defaultModel) bits.push(`Aegis Cloud · ${state.defaultModel}`);
   if (queueDraining && state.stopping) bits.push('stopping after this task');
   if (els.queueHint) {
     els.queueHint.textContent = [queueNote, bits.join(' · ')].filter(Boolean).join(' · ');

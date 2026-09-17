@@ -415,24 +415,131 @@ try {
   });
 
   // ── the worker's pure helpers (autonomous.js) ───────────────────────────
-  await test('resolveModel prefers the task, then the environment, then the pooled brain', () => {
-    assert(autonomous.resolveModel({ model: 'nexus-smart', env: { AEGIS_AUTONOMOUS_MODEL: 'x' } }) === 'nexus-smart', 'an explicit pick wins');
-    assert(autonomous.resolveModel({ env: { AEGIS_AUTONOMOUS_MODEL: 'nexus-fast' } }) === 'nexus-fast', 'then the environment');
-    assert(autonomous.resolveModel({ env: { AEGIS_MODEL: 'nexus-neo' } }) === 'nexus-neo', 'the generic spelling is honoured');
+  await test('resolveModel runs Aegis Cloud or the pooled brain, never a foreign id', () => {
+    assert(autonomous.resolveModel({ model: 'nexus-brain-smart', env: { AEGIS_AUTONOMOUS_MODEL: 'x' } }) === 'nexus-brain-smart', 'an explicit Aegis pick wins');
+    // A pick from the TASK is returned verbatim even when wrong: substituting a
+    // correct model for a stated one is how a queue "runs on nexus-brain" while
+    // the file says something else. The refusal is the caller's job (next test).
+    assert(autonomous.resolveModel({ model: 'claude-sonnet-4', env: {} }) === 'claude-sonnet-4', 'a wrong task pick is reported, not rewritten');
+    assert(autonomous.resolveModel({ env: { AEGIS_AUTONOMOUS_MODEL: 'nexus-brain' } }) === 'nexus-brain', 'an Aegis environment pin is honoured');
+    assert(autonomous.resolveModel({ env: { AEGIS_MODEL: 'aegis-brain-neo' } }) === 'aegis-brain-neo', 'in the generic spelling too');
+    // AEGIS_MODEL is shared with the interactive surfaces, which DO run direct
+    // providers, so a stray value there is not a statement about the queue: it
+    // is skipped rather than allowed to put a non-pool model on the wire.
+    assert(autonomous.resolveModel({ env: { AEGIS_AUTONOMOUS_MODEL: 'deepseek-v4-flash' } }) === 'nexus-brain', 'a foreign environment pin is skipped');
+    assert(autonomous.resolveModel({ env: { AEGIS_MODEL: 'claude-opus-4' } }) === 'nexus-brain', 'in the generic spelling too');
     assert(autonomous.resolveModel({ env: {} }) === autonomous.DEFAULT_MODEL, 'then the default');
     assert(autonomous.DEFAULT_MODEL === 'nexus-brain', 'which is the pooled brain tier');
     assert(autonomous.resolveModel({ model: '  ', env: {} }) === 'nexus-brain', 'blank is not a choice');
   });
 
-  await test('effort defaults to high and the round horizon is overridable', () => {
-    assert(autonomous.resolveEffort({ env: {} }) === 'high', 'unattended work defaults to high');
+  await test('a model the pool does not serve is refused by name, at the door', () => {
+    for (const id of ['nexus-brain', 'nexus-brain-smart', 'nexus-brain-neo', 'aegis-brain', 'aegis-brain-smart', 'nexus-brain-neo ']) {
+      assert(autonomous.isAegisModel(id), `should be accepted: ${id}`);
+      assert(autonomous.modelRefusal(id) === '', `and not refused: ${id}`);
+    }
+    // `nexus-fast` is the id that made this necessary: it looks like a cheaper
+    // tier of the same family, and the catalog has never served it.
+    for (const id of ['nexus-fast', 'claude-sonnet-4', 'gpt-5', 'anthropic', 'deepseek-v4-pro', 'nexus', '']) {
+      assert(!autonomous.isAegisModel(id), `should not be accepted: ${JSON.stringify(id)}`);
+    }
+    const why = autonomous.modelRefusal('  claude-sonnet-4  ');
+    assert(/claude-sonnet-4/.test(why), `the refusal names the offending model: ${why}`);
+    assert(/Aegis Cloud/.test(why) && /nexus-brain/.test(why), `and the pool plus an allowed id: ${why}`);
+    assert(autonomous.modelRefusal('') === '' && autonomous.modelRefusal(null) === '', 'blank is not a refusal — it is "no pick"');
+
+    const ignored = autonomous.ignoredEnvModel({ env: { AEGIS_AUTONOMOUS_MODEL: 'deepseek-v4-flash' } });
+    assert(/AEGIS_AUTONOMOUS_MODEL/.test(ignored) && /deepseek-v4-flash/.test(ignored), `the skipped pin is reported, not silent: ${ignored}`);
+    assert(/nexus-brain/.test(ignored), 'and it says what ran instead');
+    assert(/AEGIS_MODEL=/.test(autonomous.ignoredEnvModel({ env: { AEGIS_MODEL: 'anthropic' } })), 'the generic spelling is named too');
+    assert(autonomous.ignoredEnvModel({ env: { AEGIS_MODEL: 'nexus-brain' } }) === '', 'an Aegis pin is nothing to report');
+    assert(autonomous.ignoredEnvModel({ model: 'nexus-brain', env: { AEGIS_MODEL: 'anthropic' } }) === '', 'nor is one the task overrode');
+
+    // The door: queue.addTask holds the CLI, the card and a hand-written file
+    // to the same accept-list.
+    let threw = null;
+    try {
+      queue.addTask(envFor(), { task: 'x', cwd: tmp, model: 'nexus-fast' });
+    } catch (e) {
+      threw = e;
+    }
+    assert(threw && /nexus-fast/.test(threw.message), `addTask refuses a foreign model: ${threw && threw.message}`);
+    assert(queue.loadQueue(envFor()).length === 0, 'and nothing was written to the queue');
+    assert(queue.addTask(envFor(), { task: 'x', cwd: tmp, model: 'nexus-brain' }).model === 'nexus-brain', 'an Aegis pick is stored as given');
+    queue.clearQueue(envFor());
+  });
+
+  await test('the fan-out is opt-in, because it is the cost multiplier', () => {
+    assert(autonomous.resolveFanout({}, {}) === false, 'a plain queued task runs one pass');
+    assert(autonomous.resolveFanout({ singlePass: true }, {}) === false, 'singlePass stays single');
+    assert(autonomous.resolveFanout({ autonomous: true }, {}) === true, 'a task can ask for the fan-out');
+    assert(autonomous.resolveFanout({ singlePass: false }, {}) === true, 'the queue field can too');
+    assert(autonomous.resolveFanout({}, { AEGIS_AUTONOMOUS_FANOUT: '1' }) === true, 'so can the environment');
+    assert(autonomous.resolveFanout({}, { AEGIS_AUTONOMOUS_FANOUT: 'yes' }) === true, 'in any true spelling');
+    assert(autonomous.resolveFanout({}, { AEGIS_AUTONOMOUS_FANOUT: 'no' }) === false, 'and "no" is not one of them');
+  });
+
+  await test('effort follows the task shape and the round horizon is overridable', () => {
+    assert(autonomous.resolveEffort({ env: {} }) === 'medium', 'a single-pass task runs the medium rung, not the priciest one');
+    assert(autonomous.resolveEffort({ env: {}, fanout: true }) === 'high', 'the fan-out keeps the high rung it needs for synthesis');
     assert(autonomous.resolveEffort({ effort: 'low', env: {} }) === 'low', 'the caller can lower it');
     assert(autonomous.resolveEffort({ env: { AEGIS_AUTONOMOUS_EFFORT: 'medium' } }) === 'medium', 'and so can the environment');
+    assert(autonomous.resolveEffort({ effort: 'high', env: {}, fanout: false }) === 'high', 'an explicit pick beats the shape default');
 
     assert(autonomous.maxRounds({}, undefined) === autonomous.DEFAULT_ROUNDS, 'the default horizon');
     assert(autonomous.maxRounds({}, 7) === 7, 'a stated horizon wins');
     assert(autonomous.maxRounds({ AEGIS_AUTONOMOUS_MAX_ROUNDS: '9' }) === 9, 'the environment is read');
     assert(autonomous.maxRounds({ AEGIS_AUTONOMOUS_MAX_ROUNDS: 'nonsense' }) === autonomous.DEFAULT_ROUNDS, 'garbage falls back');
+  });
+
+  // The cost knobs are only real if they reach the wire, and the refusal is only
+  // real if it happens BEFORE the turn. Both are asserted on the payload the
+  // engine actually receives, with a fake engine — no network, no model.
+  await test('the worker sends one plain pooled turn unless the task asks to fan out', async () => {
+    const seen = [];
+    const engine = {
+      chat: async (payload) => {
+        seen.push(payload);
+        return { choices: [{ message: { content: 'done' } }], usage: { total_tokens: 1 } };
+      },
+    };
+    const events = [];
+    const worker = autonomous.createQueueWorker({ engine, env: envFor(), log: (e) => events.push(e) });
+
+    const plain = await worker.runTask({ id: 1, task: 'rename the flag', cwd: tmp }, { commit: false });
+    assert(plain.ok, `the plain task ran: ${plain.error || ''}`);
+    assert(seen[0].class === 'aegis', 'the turn is billed to the Aegis pool');
+    assert(seen[0].model === 'nexus-brain', `on the pooled brain: ${seen[0].model}`);
+    assert(seen[0].autonomous === false, 'the cost multiplier is OFF by default — this is the whole point of the change');
+    assert(seen[0].workers === undefined, 'and it carries no worker count to size a fan-out with');
+    assert(seen[0].effort === 'medium', `a single pass runs the medium rung: ${seen[0].effort}`);
+    const start = events.find((e) => e.type === 'start');
+    assert(start && start.fanout === false && start.effort === 'medium', 'the card is told the shape it is paying for');
+
+    const fanned = await worker.runTask({ id: 2, task: 'investigate the regression', cwd: tmp, autonomous: true, workers: 3 }, { commit: false });
+    assert(fanned.ok, 'the fan-out task ran');
+    assert(seen[1].autonomous === true, 'the fan-out travels when the task asked for it');
+    assert(seen[1].workers === 3, 'with its worker count');
+    assert(seen[1].effort === 'high', 'and the high rung it needs for synthesis');
+    assert(seen[1].model === 'nexus-brain', 'still on the same tier — the tier is not what made it expensive');
+
+    // The pre-flight: a foreign id is refused before any turn, so a bad row in a
+    // drain costs nothing instead of failing at the server minutes later.
+    const before = seen.length;
+    const refused = await worker.runTask({ id: 3, task: 'x', cwd: tmp, model: 'deepseek-v4-flash' }, { commit: false });
+    assert(!refused.ok && /deepseek-v4-flash/.test(refused.error), `refused by name: ${refused.error}`);
+    assert(seen.length === before, 'and no turn was made');
+    assert(refused.ms === 0, 'the refusal is not billed work');
+    const finish = events.filter((e) => e.type === 'finish').pop();
+    assert(finish && finish.ok === false && finish.taskId === 3, 'the card gets a failed row, not a hang');
+
+    // An ignored environment pin is reported rather than obeyed in silence.
+    const noisy = [];
+    const pinned = autonomous.createQueueWorker({ engine, env: envFor({ AEGIS_AUTONOMOUS_MODEL: 'deepseek-v4-flash' }), log: (e) => noisy.push(e) });
+    await pinned.runTask({ id: 4, task: 'x', cwd: tmp }, { commit: false });
+    const note = noisy.find((e) => e.type === 'note');
+    assert(note && /deepseek-v4-flash/.test(note.note), `the skip is announced: ${note && note.note}`);
+    assert(seen[seen.length - 1].model === 'nexus-brain', 'and the turn still went to the pool');
   });
 
   await test('withRoundHorizon sets the engine knob and always puts it back', async () => {
