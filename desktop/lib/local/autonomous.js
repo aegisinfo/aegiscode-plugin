@@ -582,6 +582,8 @@ function commitMessage(item) {
 module.exports = {
   DEFAULT_MODEL,
   DEFAULT_ROUNDS,
+  WRITE_TOOLS,
+  writtenPath,
   isAutonomousRequest,
   maxRounds,
   withRoundHorizon,

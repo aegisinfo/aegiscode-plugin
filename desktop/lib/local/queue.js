@@ -135,7 +135,14 @@ function saveQueue(env, items) {
   return writeQueue(queuePath(env), items);
 }
 
-/** Highest id in the queue, +1. Ids are never reused, so a run log's `#7` stays meaningful. */
+/**
+ * Highest id in the queue, +1. Ids increase for as long as the queue file has
+ * any history to count, so they are never reused while anything remains. They
+ * are NOT globally unique across generations: `clear --all` empties the file and
+ * the next `add` starts again at #1. The runs log therefore records each task's
+ * text and time alongside its id — a `#7` is unique within one queue generation,
+ * and the text is what makes it identifiable across a `clear --all`.
+ */
 function nextId(items) {
   let max = 0;
   for (const i of items) {
@@ -146,9 +153,16 @@ function nextId(items) {
 }
 
 /**
- * Insert or replace by id, leaving every other item (including ones this
- * process has never seen) untouched. This is the ONLY way a drain writes back:
- * `writeQueue(file, upsert(loaded, myItem))`.
+ * Insert or replace by id, leaving every other item in the list untouched.
+ *
+ * This is the ONLY way a drain writes back — `saveQueue(env, upsert(loadQueue(env),
+ * myItem))` — and the load has to be FRESH, taken immediately before the write.
+ * upsert can only preserve what the caller actually passed it: hand it a stale
+ * snapshot and anything added since is erased, because `saveQueue` rewrites the
+ * whole file. The worker re-reads before each of its two writes for exactly this
+ * reason (autonomous.js: claim and settle). The remaining window is the instant
+ * between that read and the write, which is why `add` never takes the drain lock
+ * and a queue is a work list, not a ledger.
  */
 function upsert(items, entry) {
   const list = Array.isArray(items) ? items : [];
@@ -410,11 +424,15 @@ function parsePlanStatus(text) {
       if (line.trim() === '' || /^\s+\S/.test(line)) continue;
       inStatus = false; // anything else (e.g. '---') ends the block
     }
-    const hm = line.match(/^## Phase (\d+)\s*(✅)?/);
+    // Every PLAN.md in these repos writes `## Phase 7 ✅ — title` (✅ right after
+    // the number). A trailing `## Phase 7 — title ✅` is accepted too, because
+    // reconcile reads plans other sessions and agents wrote, and a heading that
+    // says it shipped means it shipped wherever the ✅ sits.
+    const hm = line.match(/^##\s*Phase\s+(\d+)\b/);
     if (hm) {
       const num = Number(hm[1]);
       headerNums.add(num);
-      if (hm[2]) headerDone.add(num);
+      if (/✅/.test(line.slice(hm[0].length))) headerDone.add(num);
     }
   }
   return { statusDone, headerDone, headerNums };
@@ -423,7 +441,12 @@ function parsePlanStatus(text) {
 function extractPhaseTitle(text, num) {
   const m = String(text || '').match(new RegExp(`^## Phase ${num}\\b(.*)$`, 'm'));
   if (!m) return `Phase ${num}`;
-  const rest = m[1].trim().replace(/^(✅|⚠️)\s*/, '').replace(/^[—-]\s*/, '');
+  const rest = m[1]
+    .trim()
+    .replace(/^(✅|⚠️)\s*/, '')
+    .replace(/\s*(✅|⚠️)$/, '')
+    .replace(/^[—-]\s*/, '')
+    .trim();
   return rest || `Phase ${num}`;
 }
 
