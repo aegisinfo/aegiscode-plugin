@@ -46,6 +46,7 @@ const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'aegiscode-onboard-'));
 process.env.AEGISCODE_HOME = HOME;
 
 const screens = require(join(cliDir, 'src', 'screens.js'));
+const art = require(join(cliDir, 'src', 'art.js'));
 const theme = require(join(cliDir, 'src', 'theme.js'));
 const screen = require(join(cliDir, 'src', 'screen.js'));
 const events = require(join(cliDir, 'src', 'events.js'));
@@ -134,6 +135,23 @@ const plain = (lines) => screen.stripAnsi(text(lines));
   const back = plain(screens.welcomeLines({ light: false }, 100, 44, false));
   has(back, 'Welcome back!', 'a returning run is greeted as such');
   assert(!back.includes('Welcome to AEGIS Code'), 'and not as a first run');
+
+  // The tagline, and the narrow fallback that keeps it from being clipped.
+  // `centered()` clips rather than wraps, so the threshold is load-bearing: the
+  // full line at 100 cols, the short one when the terminal is too narrow for
+  // it. Both are asserted against the constants, not against literal prose, so
+  // a copy change in art.js flows through here instead of failing a stale
+  // expectation.
+  const { TAGLINE, TAGLINE_SHORT } = art;
+  has(first, TAGLINE, 'the welcome screen shows the tagline');
+  assert(!first.includes('Cloud brain in your shell'), 'and not the retired copy');
+  const narrow = plain(screens.welcomeLines({ light: false }, screen.w(TAGLINE) - 1, 44, false));
+  has(narrow, TAGLINE_SHORT, 'a terminal too narrow for the tagline gets the short copy');
+  assert(!narrow.includes(TAGLINE), 'and never a clipped full line');
+  // The threshold is derived from the string's width, so widening the copy must
+  // move the breakpoint with it rather than start silently truncating.
+  const justFits = plain(screens.welcomeLines({ light: false }, screen.w(TAGLINE) + 4, 44, false));
+  has(justFits, TAGLINE, 'one cell wider than the breakpoint, the full line is back');
 
   // Every row must fit the terminal, or the frame wraps and the boxes shear.
   for (const cols of [80, 100, 120, 44]) {
@@ -371,6 +389,43 @@ function tick() {
   has(hist, 'function appendHistory', 'the history writer exists');
   has(cmd, "require('./screens.js')", 'commands.js shares the theme table');
   has(cmd, 'screens.applyTheme(', 'so /theme dark|light picks a real row, not index 0');
+}
+
+// ── the tagline has exactly one owner ───────────────────────────────────────
+//
+// The drift this pins was structural, not textual: the string was written out
+// twice — once as a rule in `art.js`, once inline in `screens.js` — so changing
+// one left the other shipping the old sentence, and every existing assertion
+// still passed because none of them looked at the copy. Asserting the two
+// *rendered* lines agree (above) catches a stale copy today; asserting the
+// literal exists in exactly one source file is what stops the second copy being
+// reintroduced tomorrow, which is the failure mode that actually recurred.
+{
+  const files = fs.readdirSync(path.join(cliDir, 'src')).filter((f) => f.endsWith('.js'));
+  const owners = files
+    .filter((f) => fs.readFileSync(path.join(cliDir, 'src', f), 'utf8').includes(art.TAGLINE))
+    .sort();
+  eq(owners.join(','), 'art.js', 'the tagline literal lives in exactly one source file');
+
+  const shortOwners = files
+    .filter((f) => fs.readFileSync(path.join(cliDir, 'src', f), 'utf8').includes(art.TAGLINE_SHORT))
+    .sort();
+  eq(shortOwners.join(','), 'art.js', 'and so does the short copy');
+
+  // The consumers must go through the constant. A literal here would be the
+  // duplicate again, just spelled slightly differently.
+  const screensSrc = fs.readFileSync(path.join(cliDir, 'src', 'screens.js'), 'utf8');
+  const renderSrc = fs.readFileSync(path.join(cliDir, 'src', 'render.js'), 'utf8');
+  has(screensSrc, 'TAGLINE_SHORT', 'screens.js takes the short copy from the constant');
+  has(renderSrc, 'TAGLINE', 'render.js takes the tagline from the constant');
+  // The breakpoint must be derived from the copy's own width. A hardcoded column
+  // count is the same class of bug: it survives the copy change and starts
+  // clipping silently, and `centered()` clips rather than wraps.
+  has(
+    screensSrc,
+    'cols >= w(TAGLINE) + 4',
+    'the narrow/wide breakpoint is derived from the tagline width, not hardcoded',
+  );
 }
 
 // ── restorePrefs: the second-launch path ────────────────────────────────────
