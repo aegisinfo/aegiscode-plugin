@@ -352,13 +352,29 @@ function createClient(opts = {}) {
    * provider for this request only. Mirrors chatCompletion()'s streaming /
    * fallback semantics exactly.
    *
-   * This transport deliberately never sends X-AEGIS-Key. `_byok_identify_user`
-   * on the server resolves the payer from that header alone, so omitting it
-   * keeps every desktop BYOK turn anonymous: the relay still serves it,
-   * `charge_byok` never runs (`app.py` charges only `if _byok_user_id:`), and
-   * nothing is billed — BYOK is free on desktop, by product decision, not by
-   * omission. The route is unauthenticated by design regardless (aegis1
-   * tests/test_byok_fee.py pins the anonymous path as allowed).
+   * The caller's *AEGIS* key is sent alongside the provider key as X-AEGIS-Key.
+   * Two credentials, two headers, on purpose: the provider key authenticates the
+   * upstream call, the AEGIS key says whose bank pays the handling fee —
+   * `_byok_identify_user` on the server resolves the payer from it, and nothing
+   * else. With no AEGIS key the header is omitted and the call is anonymous;
+   * THIS function still sends it, because it is a transport and the route is
+   * unauthenticated by design (aegis1 tests/test_byok_fee.py pins the anonymous
+   * path as allowed) — refusing here would break every other caller of a
+   * published endpoint.
+   *
+   * Attribution is the whole game, because an unattributed turn is the one way
+   * a BYOK call escapes the fee: the relay serves it, `charge_byok` never runs
+   * (`app.py` charges only `if _byok_user_id:`), and the call is logged against
+   * user 0 as uncollected — a free ride. So the shipped HOSTS refuse a keyless
+   * BYOK send before the relay is reached: desktop/lib/local/engine.js raises
+   * 401, and the desktop app and the CLI share that engine (the CLI stages it
+   * as cli/vendor/desktop/lib/local/engine.js), so one gate covers both. Every
+   * turn is then attributable, and therefore billable: a funded balance is
+   * debited, an unfunded one is recorded as owed — `charge_byok` clamps the
+   * debit at zero and never refuses the call, so "cannot pay" and "must not be
+   * billed" stop being the same thing. `AEGIS_BYOK_REQUIRE_BALANCE` (off by
+   * default) remains the server's own, separate 402 gate and is not what makes
+   * the fee land.
    */
   async function byokChatCompletion({
     provider = 'openai',
@@ -384,8 +400,10 @@ function createClient(opts = {}) {
       'X-AEGIS-Version': clientVersion,
       'X-Provider-Key': key,
     };
-    // No X-AEGIS-Key here, on purpose (see the docstring above) — this keeps
-    // every desktop BYOK turn anonymous and unbilled.
+    // Identify the payer. Absent key => anonymous call, which the server
+    // accepts but cannot bill; sending it is what turns a BYOK turn into
+    // billable traffic instead of a free ride.
+    if (apiKey) headers['X-AEGIS-Key'] = apiKey;
     if (!stream || typeof onStream !== 'function') {
       return apiPost('/api/v1/byok/chat/completions', { ...body, stream: false }, headers);
     }

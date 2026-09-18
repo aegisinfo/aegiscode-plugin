@@ -712,16 +712,29 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
       return { class: cls, models: tags.map((t) => ({ id: t.id })) };
     }
     if (cls === 'byok') {
-      // The server's catalog names every provider it accepts a key for and the
-      // models each unlocks. Deliberately NOT gated on aegis.apiKey: BYOK's
-      // whole point is a caller who brings their own credential, and no
-      // account key is needed on desktop at all — see byokChatCompletion() in
-      // client/aegis.js, which never attaches one, so nothing here is ever
-      // billed.
+      // The server's catalog names every provider it accepts a key for, the
+      // models each unlocks, and whether an AEGIS account key is even needed
+      // to ask (it is not — the catalog answers an anonymous request).
+      // Deliberately NOT gated on aegis.apiKey the way the pooled class above
+      // is: BYOK's whole point is a caller who brings their own credential, and
+      // hiding the catalog would hide the answer to "which key do I go and get"
+      // from exactly the person deciding whether to bother. Nothing here
+      // enforces billing either: the desktop is one client of a route that is
+      // unauthenticated by design, so refusing in this process would stop
+      // exactly one host out of many. The relay owns that decision, and reports
+      // it via `fee.require_balance` below.
       let providers = [];
+      let fee = null;
       try {
         const data = await aegis.byokProviders();
         providers = (data && data.providers) || [];
+        // The handling fee AEGIS adds on top of the caller's vendor bill. It is
+        // the server's own published rate (services/pricing.price_byok_call) and
+        // is passed through untouched — never re-derived here, because a client
+        // that hardcodes a fee is a client that can disagree with the ledger.
+        // Absent until the server publishes one, and the UI must then say
+        // nothing rather than show a guess.
+        fee = (data && data.fee) || null;
       } catch {
         providers = [];
       }
@@ -744,6 +757,8 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
       return {
         class: cls, models, providers,
         needsProviderKey: models.length > 0 && !models.some((m) => m.configured),
+        needsAegisKey: !aegis.apiKey,
+        fee,
       };
     }
     // Custom endpoints: the model id is the *user's* choice — a provider model
@@ -936,22 +951,47 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
       // opts.model is still the compound "provider:model" id here — the
       // relay wants them split (a `provider` field plus a bare `model`).
       // opts.apiKey is the PROVIDER key resolved by chat() above (from the
-      // byokNamespace(provider) settings row); byokChatCompletion() never
-      // attaches the account's own AEGIS key, so this call is anonymous and
-      // free — no balance to run out of, no 402 to translate.
+      // byokNamespace(provider) settings row), never the account's own AEGIS
+      // key — that one is baked into the `aegis` client already and attached
+      // automatically by byokChatCompletion() as X-AEGIS-Key so the account
+      // gets billed the handling fee; see client/aegis.js.
       const { provider, model: bareModel } = splitByokModel(opts.model);
-      return await aegis.byokChatCompletion({
-        provider,
-        model: bareModel,
-        providerKey: opts.apiKey,
-        prompt: opts.prompt,
-        system: opts.system,
-        messages: opts.messages,
-        maxTokens: opts.maxTokens,
-        stream: true,
-        onStream: opts.onDelta,
-        signal: opts.signal,
-      });
+      try {
+        return await aegis.byokChatCompletion({
+          provider,
+          model: bareModel,
+          providerKey: opts.apiKey,
+          prompt: opts.prompt,
+          system: opts.system,
+          messages: opts.messages,
+          maxTokens: opts.maxTokens,
+          stream: true,
+          onStream: opts.onDelta,
+          signal: opts.signal,
+        });
+      } catch (e) {
+        // The relay's own balance gate (aegis1 `AEGIS_BYOK_REQUIRE_BALANCE`,
+        // app.py `byok_chat_completions`) answers 402 with a body aimed at an
+        // API consumer — "Insufficient balance. Top up to continue using
+        // BYOK." Shown raw in a chat transcript that reads as a crash rather
+        // than a bill, so the one thing the user has to DO is said here, in the
+        // hosts' own voice. The status is preserved so every existing caller
+        // (the CLI's error painter, the desktop turn guard) still sees a 402.
+        //
+        // The provider key is untouched by this: it is the caller's own and it
+        // is still valid. What ran out is the AEGIS balance the handling fee
+        // is billed against, which is the whole reason this lane has a fee.
+        if (e && e.status === 402) {
+          const err = new Error(
+            'byok: this account has no AEGIS balance left, and the BYOK handling fee is ' +
+              'billed there — your provider key is still valid, this is not a key problem. ' +
+              'Top up the account, then try again (or /class aegis to use the pooled lane).'
+          );
+          err.status = 402;
+          throw err;
+        }
+        throw e;
+      }
     }
 
     const common = {
@@ -1092,12 +1132,27 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
         err.status = 400;
         throw err;
       }
-      // No AEGIS account key is required here on purpose: client/aegis.js's
-      // byokChatCompletion() never sends X-AEGIS-Key, so every desktop BYOK
-      // turn reaches the relay anonymous and unbilled — BYOK is free on
-      // desktop. A provider key is still required (checked above), because
-      // that one is the caller's own credential to the upstream model, not a
-      // billing attribution.
+      // …and the AEGIS account key is what makes the turn BILLABLE at all. The
+      // relay authenticates on the provider key and resolves the payer
+      // separately, from X-AEGIS-Key (app.py `_byok_identify_user`): with no
+      // account key the server can attribute the handling fee to no one, so it
+      // is logged against user 0 as uncollected — an anonymous free ride the
+      // fee exists to close. Require the account key here so EVERY BYOK turn is
+      // attributed and every caller pays the handling fee: a funded balance is
+      // debited immediately, an unfunded one records the fee as owed
+      // (token_bank.charge_byok clamps to zero and never refuses), and nobody
+      // is served free. Balance is the server's own concern, not this gate's —
+      // with a balance or without one, the account still pays. `listModels`
+      // still answers anonymously (the catalog is how a user finds out which
+      // key to get), so this refuses only the send, and only until a key lands.
+      if (cls === 'byok' && !aegis.apiKey) {
+        const err = new Error(
+          'byok: connect your AEGIS account key first — the BYOK handling fee is billed there. ' +
+            'Add it in the Status card (or run /login), then try again.'
+        );
+        err.status = 401;
+        throw err;
+      }
 
       // Custom classes carry no enumerable model list (see listModels), so a
       // blank id here means the user never typed one. Fail loudly in-process

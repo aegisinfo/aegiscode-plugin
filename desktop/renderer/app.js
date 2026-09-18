@@ -2658,6 +2658,16 @@ async function loadModels(cls) {
       hint = null; // carries a link, built below
     } else if (!list.length) {
       hint = cls === 'ollama' ? 'Ollama not running or no models pulled.' : 'No models listed.';
+    } else if (cls === 'byok' && data && data.needsAegisKey) {
+      // Enforced by this CLIENT, not by the server, so it no longer waits on
+      // the server's fee.require_balance flag (off by default): the shared
+      // local engine refuses a keyless BYOK send outright (401), because an
+      // unattributed turn is served and billed to nobody — the fee lands on
+      // user 0 as uncollected. Saying "required" here is now literal, not a
+      // nudge. Checked BEFORE needsProviderKey because the account key is the
+      // blocker and the provider key is not yet the question.
+      hint = `${list.length} model${list.length === 1 ? '' : 's'} available — ` +
+        'an AEGIS account key is required: the BYOK handling fee is billed there.';
     } else if (cls === 'byok' && data && data.needsProviderKey) {
       // Unlike the pooled 'aegis' class, byok still shows every model here —
       // the catalog answers with no key at all — but none of them are
@@ -2825,10 +2835,9 @@ async function loadSettings() {
   // pair like the two custom endpoints above — the catalog is the source of
   // truth so a provider added server-side shows up here with no client
   // release. No base-URL field: byok always talks to AEGIS's own relay
-  // (/api/v1/byok/chat/completions) — the provider key typed here
-  // authenticates to the UPSTREAM provider only. Desktop never attaches an
-  // AEGIS account key on this call (client/aegis.js), so it is free: no fee
-  // note here, unlike the CLI/online hosts, which still bill it.
+  // (/api/v1/byok/chat/completions), which is what attaches the AEGIS key
+  // and makes the call billable — the provider key typed here authenticates
+  // to the UPSTREAM provider only.
   try {
     const byokData = await models.listModels('byok');
     const byokProviders = Array.isArray(byokData && byokData.providers) ? byokData.providers : [];
@@ -2843,6 +2852,29 @@ async function loadSettings() {
         onSave: (_baseURL, key) => saveSetting(provider, '', key),
         onRemove: () => removeSetting(provider),
       }));
+    }
+    // What AEGIS charges for relaying the turn, stated outright. The figure is
+    // the server's own (`fee` on GET /api/v1/byok/providers); nothing is shown
+    // when it publishes none, because a hardcoded client-side fee is one that
+    // can drift from the ledger that actually bills. Until this line existed
+    // the only place the fee was ever disclosed was the CLI's `/class byok`
+    // output — a desktop user's per-turn cost figure was the vendor's rate with
+    // no mention that AEGIS also collects.
+    const fee = byokData && byokData.fee;
+    if (fee && !fee.disabled &&
+        (Number(fee.in_usd_per_1k) > 0 || Number(fee.out_usd_per_1k) > 0)) {
+      const note = document.createElement('div');
+      note.className = 'setting-row';
+      note.id = 'byok-fee-note';
+      const text = document.createElement('div');
+      text.className = 'setting-name';
+      const per1k = (n) => `${Number(n).toFixed(4)}`;
+      text.textContent =
+        `BYOK handling fee: ${per1k(fee.in_usd_per_1k)} / 1k in, ` +
+        `${per1k(fee.out_usd_per_1k)} / 1k out — billed to your AEGIS account ` +
+        'on top of your own provider bill.';
+      note.appendChild(text);
+      els.settingsList.appendChild(note);
     }
   } catch {
     /* catalog unreachable (offline, server down) — the two custom rows above still work */
