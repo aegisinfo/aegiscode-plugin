@@ -627,6 +627,63 @@ for (const name of ['compact', 'recap']) {
   }
 }
 
+// ── /byok: every panel line is a span array, never a plain string ──────────
+//
+// Regression pin: byokProviderLines() used to build each row with
+// `` `  ${span(...)}${label}  ${state}` `` — template-literal interpolation
+// stringifies a span object to "[object Object]" instead of keeping it as
+// one, so the line handed to panel() was a plain string. screen.js's
+// padLine()/paint() only understand a line as an *array* of `{t, s, w}`
+// spans: fed a string, `for (const sp of line)` walks it character by
+// character, each fake "span" comes out `{t: undefined, w: undefined}`, and
+// paint()'s `out += sp.s + sp.t` prints the literal text "NaN" once per
+// character — reproduced live via a real pty (`tools/cli-screenshot.py`'s
+// harness) before the fix, where /byok rendered a wall of "NaN" instead of
+// the provider list. The no-argument smoke test above never caught this
+// because its stub client has no `byokProviders()`, so /byok took the
+// `aegis_byok_status` tool fallback and never reached byokProviderLines() at
+// all — this test supplies the catalog so the real path runs.
+{
+  const pushed = [];
+  const stub = {
+    ctx: { modelClass: 'aegis' },
+    transcript: [],
+    push: (r) => pushed.push(r),
+    note: (t) => pushed.push({ role: 'note', text: t }),
+    panel: (lines) => pushed.push({ role: 'panel', lines }),
+    render: () => {},
+    client: {
+      byokProviders: async () => ({
+        providers: [
+          { id: 'openai', label: 'OpenAI', configured: false, models: ['gpt-5-mini'], key_prefix: 'sk-', key_url: 'https://platform.openai.com/api-keys' },
+          { id: 'grok', label: 'xAI', configured: true, masked: 'xai-***abcd', models: [{ id: 'grok-4.5' }] },
+        ],
+      }),
+    },
+  };
+  await findCommand('byok').handler(stub, {});
+  const panelRow = pushed.find((r) => r.role === 'panel');
+  assert(panelRow, '/byok pushes a panel row');
+  for (const line of panelRow.lines) {
+    assert(
+      Array.isArray(line) || line === '',
+      `every /byok panel line is a span array or an empty spacer, not a plain string (got ${JSON.stringify(line)})`
+    );
+    if (Array.isArray(line)) {
+      for (const sp of line) {
+        assert(sp && typeof sp.t === 'string' && typeof sp.w === 'number', `every span has a string .t and numeric .w (got ${JSON.stringify(sp)})`);
+      }
+    }
+  }
+  const rendered = panelRow.lines.filter(Array.isArray).map((l) => l.map((sp) => sp.t).join('')).join('\n');
+  assert(!/NaN/.test(rendered), `/byok never renders the literal text "NaN" (got:\n${rendered})`);
+  assert(/openai/.test(rendered) && /grok/.test(rendered), '/byok renders the real provider ids');
+  assert(/gpt-5-mini/.test(rendered), '/byok renders model ids');
+  assert(/sk-/.test(rendered), '/byok renders the key prefix');
+  assert(/platform\.openai\.com/.test(rendered), '/byok renders the key url');
+  console.log('  /byok: panel lines are span arrays, no NaN, real provider data renders');
+}
+
 console.log('CLI commands test passed');
 console.log(`  commands: ${COMMANDS.length} entries (${all.length} listed, ${vis.length} visible with this env)`);
 console.log(`  categories: ${CATEGORIES.length} · effort levels: ${EFFORT_LEVELS.join('/')}`);

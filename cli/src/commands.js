@@ -188,15 +188,24 @@ function findByokProvider(providers, typed) {
   return { provider: null, exact: false };
 }
 
-/** One catalog row: id, whether it is already set, its models, and key guidance. */
+/** One catalog row: id, whether it is already set, its models, and key guidance.
+ *
+ * Every line is an array of span objects, never a plain string — panel/paint
+ * (`screen.js` `padLine`/`paint`) iterate a line as spans and read `.t`/`.w`
+ * off each entry. A plain string here gets walked character-by-character
+ * instead, each "span" comes out `{t: undefined, w: undefined}`, and paint's
+ * `sp.s + sp.t` prints the literal text "NaN" once per character.
+ */
 function byokProviderLines(providers) {
   const lines = [];
   for (const p of providers) {
     const state = p.configured
       ? span(C.green, `set${p.masked ? ` (${p.masked})` : ''}`)
       : span(C.gray, 'not set');
-    const label = p.label ? span(C.gray, ` — ${p.label}`) : '';
-    lines.push(`  ${span(C.gold + BOLD, p.id)}${label}  ${state}`);
+    const row = [span(C.gold + BOLD, `  ${p.id}`)];
+    if (p.label) row.push(span(C.gray, ` — ${p.label}`));
+    row.push(span('', '  '), state);
+    lines.push(row);
     // `models` arrives as bare ids. The catalog used to be read here as if each
     // one were an object with `.id`, which silently rendered nothing — a
     // provider listed with an empty model line reads as "no models", not as a
@@ -204,9 +213,9 @@ function byokProviderLines(providers) {
     const models = (p.models || [])
       .map((m) => (typeof m === 'string' ? m : m && m.id))
       .filter(Boolean);
-    if (models.length) lines.push(`      ${span(C.gray, `models: ${models.join(', ')}`)}`);
-    if (p.key_prefix) lines.push(`      ${span(C.gray, `key starts with ${p.key_prefix}`)}`);
-    if (p.key_url) lines.push(`      ${span(C.gray, p.key_url)}`);
+    if (models.length) lines.push([span(C.gray, `      models: ${models.join(', ')}`)]);
+    if (p.key_prefix) lines.push([span(C.gray, `      key starts with ${p.key_prefix}`)]);
+    if (p.key_url) lines.push([span(C.gray, `      ${p.key_url}`)]);
   }
   return lines;
 }
