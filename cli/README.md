@@ -13,6 +13,42 @@ an editor — built on the same two shared pieces and no others:
 
 Routing, model tiers, memory and billing all stay behind aegiscloud.org.
 
+## Quick start
+
+Four steps, in order. Everything past this section is the fuller reference for
+each one.
+
+**1. Install** — requires Node 18+.
+
+```bash
+npm install -g aegiscode
+```
+
+**2. Log in** — get a key at <https://aegiscloud.org> if you don't have one.
+
+```bash
+aegiscode login                    # prompts, no echo
+aegiscode key status               # verify: masked key + which source is in use
+```
+
+**3. (Optional) Bring your own key** — skip this if you're happy on the
+pooled AEGIS Cloud route (the default). Use your own OpenAI/Anthropic/etc. key
+instead, at a flat handling fee instead of the pooled margin — see [Bring your
+own key](#bring-your-own-key).
+
+```bash
+/byok                              # list providers and which are already set
+/byok-key openai                   # save a key on this machine, prompts, no echo
+/class byok                        # switch the session to run on it
+```
+
+**4. Use it.**
+
+```bash
+aegiscode                          # interactive session
+aegiscode "why is the sky blue"    # one-shot, prints the answer and the tokens
+```
+
 ## Names: one name, `aegiscode`
 
 This host and the CLI used to be two names for two packages. They are one
@@ -30,7 +66,7 @@ Publishing this host as `aegiscode` moves the `latest` dist-tag for that name
 onto it. The previous line (`aegiscode@5.x`, the `aegisinfo/aegiscode` agent) is
 still installable and immutable on the registry — pin `aegiscode@5` for it.
 
-## Install
+## Installation
 
 ```bash
 npm install -g aegiscode
@@ -58,7 +94,7 @@ That one file is shared: the MCP plugin and AEGIS Desktop read the same store, s
 signing in here signs you in everywhere (see [One memory, shared with AEGIS
 Desktop](#one-memory-shared-with-aegis-desktop)).
 
-## Use
+## Launch options
 
 ```bash
 aegiscode                        # interactive session
@@ -149,7 +185,7 @@ folder you just refused to vouch for is not read, edited or executed in.
 Preferences survive a restart: model, effort, theme and vim mode are restored on
 launch, and an explicit flag (`-m`, `--light`) always outranks the stored value.
 
-## Use
+## Commands
 
 In a session, plain text is a prompt. `/help` lists commands, grouped by
 category, the way `aegiscodex-dev` does. The registry is that client's, ported
