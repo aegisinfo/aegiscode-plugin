@@ -87,7 +87,27 @@ const CLASSES = [
   { class: 'ollama', label: 'Ollama (local)', kind: 'local' },
   { class: 'openai-compat', label: 'Custom OpenAI-compatible', kind: 'custom' },
   { class: 'anthropic', label: 'Anthropic-compatible', kind: 'custom' },
+  { class: 'byok', label: 'Bring your own key', kind: 'cloud' },
 ];
+
+/** Local settings namespace for one BYOK provider's key. A `byok:` prefix
+ *  keeps this out of the 'anthropic'/'openai-compat' CUSTOM_CLASSES' own
+ *  namespaces, which are a different feature (a self-hosted/compatible
+ *  endpoint's base URL + key) — same store, deliberately separate rows. */
+function byokNamespace(providerId) {
+  return `byok:${providerId}`;
+}
+
+/** Split a byok model id ("anthropic:claude-sonnet-5") into its provider and
+ *  bare model parts. `modelId` may itself contain ':' (none of today's
+ *  catalog ids do, but nothing guarantees that), so only the FIRST segment is
+ *  the provider — the rest re-joins as the model. */
+function splitByokModel(compound) {
+  const s = typeof compound === 'string' ? compound : '';
+  const i = s.indexOf(':');
+  if (i < 0) return { provider: '', model: s };
+  return { provider: s.slice(0, i), model: s.slice(i + 1) };
+}
 
 /**
  * Mirrors aegiscodex-dev's src/backend.js DEEPSEEK_REASONING_MODEL_RE +
@@ -657,6 +677,16 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
       if (c.class === 'aegis') {
         return { ...c, configured: Boolean(aegis.apiKey) };
       }
+      if (c.class === 'byok') {
+        // Configured means "at least one provider has a locally-stored key",
+        // not a single baseURL+key pair like the CUSTOM_CLASSES below — byok
+        // holds one row per provider (byokNamespace), so customStatus's shape
+        // does not apply here.
+        const anyConfigured = (settings.list() || []).some(
+          (s) => s && typeof s.provider === 'string' && s.provider.startsWith('byok:') && s.configured
+        );
+        return { ...c, configured: anyConfigured };
+      }
       return { ...c, ...customStatus(c.class) };
     });
   }
@@ -680,6 +710,41 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
     if (cls === 'ollama') {
       const tags = await ollama.listTags();
       return { class: cls, models: tags.map((t) => ({ id: t.id })) };
+    }
+    if (cls === 'byok') {
+      // The server's catalog names every provider it accepts a key for, the
+      // models each unlocks, and whether an AEGIS account key is even needed
+      // to ask (it is not — see byokProviders' own docstring). Deliberately
+      // NOT gated on aegis.apiKey the way the pooled class above is: BYOK's
+      // whole point is a caller who brings their own credential, and the
+      // catalog itself answers to an anonymous request.
+      let providers = [];
+      try {
+        const data = await aegis.byokProviders();
+        providers = (data && data.providers) || [];
+      } catch {
+        providers = [];
+      }
+      const models = [];
+      for (const p of providers) {
+        if (!p || !p.id) continue;
+        const local = settings.get(byokNamespace(p.id)) || {};
+        const rawModels = Array.isArray(p.models) ? p.models : [];
+        for (const m of rawModels) {
+          const modelId = typeof m === 'string' ? m : m && m.id;
+          if (!modelId) continue;
+          models.push({
+            id: `${p.id}:${modelId}`,
+            label: `${p.label || p.id} — ${modelId}`,
+            provider: p.id,
+            configured: Boolean(local.configured),
+          });
+        }
+      }
+      return {
+        class: cls, models, providers,
+        needsProviderKey: models.length > 0 && !models.some((m) => m.configured),
+      };
     }
     // Custom endpoints: the model id is the *user's* choice — a provider model
     // name, never a URL. Offering the configured base URL as an `id` meant that
@@ -867,6 +932,29 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
       });
     }
 
+    if (cls === 'byok') {
+      // opts.model is still the compound "provider:model" id here — the
+      // relay wants them split (a `provider` field plus a bare `model`).
+      // opts.apiKey is the PROVIDER key resolved by chat() above (from the
+      // byokNamespace(provider) settings row), never the account's own AEGIS
+      // key — that one is baked into the `aegis` client already and attached
+      // automatically by byokChatCompletion() as X-AEGIS-Key so the account
+      // gets billed the handling fee; see client/aegis.js.
+      const { provider, model: bareModel } = splitByokModel(opts.model);
+      return aegis.byokChatCompletion({
+        provider,
+        model: bareModel,
+        providerKey: opts.apiKey,
+        prompt: opts.prompt,
+        system: opts.system,
+        messages: opts.messages,
+        maxTokens: opts.maxTokens,
+        stream: true,
+        onStream: opts.onDelta,
+        signal: opts.signal,
+      });
+    }
+
     const common = {
       baseURL: opts.cfg.baseURL,
       apiKey: opts.apiKey,
@@ -887,7 +975,14 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
   async function chat(payload, onDelta) {
     const cls = payload && payload.class;
     const model = payload && payload.model;
-    const maxTokens = reasoningBudget(cls, model, payload && payload.maxTokens, payload && payload.effort);
+    // byok's model id is "provider:model" (see splitByokModel) — strip the
+    // provider prefix before pattern-matching, or a DeepSeek reasoning model
+    // selected under byok ("byok" model "deepseek:deepseek-v4-flash") never
+    // matches DEEPSEEK_REASONING_MODEL_RE's anchored pattern and silently
+    // gets no stated budget, which is exactly the "hidden CoT ate the whole
+    // default and returned nothing" failure this budget exists to prevent.
+    const reasoningModelId = cls === 'byok' ? splitByokModel(model).model : model;
+    const maxTokens = reasoningBudget(cls, reasoningModelId, payload && payload.maxTokens, payload && payload.effort);
     // The caller's OWN number, kept apart from `maxTokens` above. That one
     // collapses two different facts into a single value — "the caller stated
     // 4096" and "effort implies 32768" — and the pooled path must treat them
@@ -937,8 +1032,12 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
     const signal = controller.signal;
 
     // A caller can opt out of the agent loop entirely (`tools: false`) and get
-    // the old single-shot turn back.
-    const toolsEnabled = !(payload && payload.tools === false);
+    // the old single-shot turn back. byok is ALWAYS single-shot: the
+    // stateless relay (aegis.byokChatCompletion, /api/v1/byok/chat/completions)
+    // has no tools/tool_choice parameter at all, so sending schemas here would
+    // build a prompt promising tool access the transport silently drops —
+    // the model would reason about exec/readFile and never see a result.
+    const toolsEnabled = cls !== 'byok' && !(payload && payload.tools === false);
     const wire = cls === 'anthropic' ? 'anthropic' : 'openai';
     const toolSchemas = toolsEnabled ? T.toolsFor(wire, { includeSubagent: depth < MAX_SUBAGENT_DEPTH }) : [];
     const toolChoice = (payload && payload.toolChoice) || null;
@@ -965,8 +1064,35 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
     const turnCwd = envFor(payload).cwd;
 
     try {
-      const cfg = cls === 'aegis' || cls === 'ollama' ? {} : settings.get(cls) || {};
-      const apiKey = cls === 'aegis' || cls === 'ollama' ? null : settings.rawKey(cls);
+      // byok's settings row lives under the provider named IN THE MODEL id
+      // ("anthropic:claude-sonnet-5" -> byokNamespace('anthropic')), never
+      // under the literal class name — one flat 'byok' row could not hold
+      // more than one provider's key at a time.
+      const byokParts = cls === 'byok' ? splitByokModel(model) : null;
+      const cfg =
+        cls === 'aegis' || cls === 'ollama' ? {}
+        : cls === 'byok' ? settings.get(byokNamespace(byokParts.provider)) || {}
+        : settings.get(cls) || {};
+      const apiKey =
+        cls === 'aegis' || cls === 'ollama' ? null
+        : cls === 'byok' ? settings.rawKey(byokNamespace(byokParts.provider))
+        : settings.rawKey(cls);
+
+      if (cls === 'byok' && (!byokParts.provider || !byokParts.model)) {
+        const err = new Error(
+          "byok: model must be \"<provider>:<model>\" (pick one from /models) — got " +
+            JSON.stringify(model || '')
+        );
+        err.status = 400;
+        throw err;
+      }
+      if (cls === 'byok' && !apiKey) {
+        const err = new Error(
+          `byok: no key saved for "${byokParts.provider}" — add one before chatting with this model.`
+        );
+        err.status = 400;
+        throw err;
+      }
 
       // Custom classes carry no enumerable model list (see listModels), so a
       // blank id here means the user never typed one. Fail loudly in-process

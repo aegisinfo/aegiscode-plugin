@@ -2658,6 +2658,12 @@ async function loadModels(cls) {
       hint = null; // carries a link, built below
     } else if (!list.length) {
       hint = cls === 'ollama' ? 'Ollama not running or no models pulled.' : 'No models listed.';
+    } else if (cls === 'byok' && data && data.needsProviderKey) {
+      // Unlike the pooled 'aegis' class, byok still shows every model here —
+      // the catalog answers with no key at all — but none of them are
+      // usable until a provider key is saved in Provider settings below.
+      hint = `${list.length} model${list.length === 1 ? '' : 's'} available — ` +
+        'add a provider key in Provider settings below to use one.';
     } else {
       hint = `${list.length} model${list.length === 1 ? '' : 's'} available.`;
     }
@@ -2718,6 +2724,71 @@ function applyCustomPreset(cls, modelId) {
 
 // -------------------------------------------------------------- settings pane
 
+/**
+ * One provider-settings row: name, an optional base-URL field, a key input,
+ * a status label and Save/Remove buttons wired to the generic
+ * `models.settings.*` surface. Shared by the two custom endpoints (which
+ * need a base URL) and the byok providers (which do not — the server
+ * dictates the endpoint; only the key is theirs to set).
+ */
+function buildSettingRow({ provider, name, cfg, showBaseURL, onSave, onRemove }) {
+  const row = document.createElement('div');
+  row.className = 'setting-row';
+  // Targeted by applyCustomPreset() so picking a Model-card preset can
+  // quick-fill the matching base URL here without a full loadSettings()
+  // round trip.
+  row.dataset.provider = provider;
+
+  const label = document.createElement('div');
+  label.className = 'setting-name';
+  label.textContent = name;
+  row.appendChild(label);
+
+  let baseInput = null;
+  if (showBaseURL) {
+    baseInput = document.createElement('input');
+    baseInput.type = 'text';
+    baseInput.className = 'setting-input setting-base';
+    baseInput.placeholder = 'base URL';
+    baseInput.value = cfg.baseURL || '';
+    row.appendChild(baseInput);
+  }
+
+  const keyInput = document.createElement('input');
+  keyInput.type = 'password';
+  keyInput.className = 'setting-input';
+  keyInput.placeholder = cfg.configured
+    ? `key ${cfg.keyMask} (blank = keep)`
+    : 'API key';
+  row.appendChild(keyInput);
+
+  const status = document.createElement('div');
+  status.className = 'setting-status';
+  status.textContent = cfg.configured ? `configured (${cfg.keyMask})` : 'no key';
+  row.appendChild(status);
+
+  const actions = document.createElement('div');
+  actions.className = 'setting-actions';
+
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.className = 'ghost-btn';
+  saveBtn.textContent = 'Save';
+  saveBtn.addEventListener('click', () => onSave(baseInput ? baseInput.value.trim() : '', keyInput.value));
+  actions.appendChild(saveBtn);
+
+  const removeBtn = document.createElement('button');
+  removeBtn.type = 'button';
+  removeBtn.className = 'ghost-btn danger';
+  removeBtn.textContent = 'Remove';
+  removeBtn.disabled = !cfg.configured;
+  removeBtn.addEventListener('click', onRemove);
+  actions.appendChild(removeBtn);
+
+  row.appendChild(actions);
+  return row;
+}
+
 async function loadSettings() {
   els.settingsList.innerHTML = '';
   let settings = [];
@@ -2742,61 +2813,38 @@ async function loadSettings() {
       configured: false,
       keyMask: null,
     };
+    els.settingsList.appendChild(buildSettingRow({
+      provider, name, cfg, showBaseURL: true,
+      onSave: (baseURL, key) => saveSetting(provider, baseURL, key),
+      onRemove: () => removeSetting(provider),
+    }));
+  }
 
-    const row = document.createElement('div');
-    row.className = 'setting-row';
-    // Targeted by applyCustomPreset() so picking a Model-card preset can
-    // quick-fill the matching base URL here without a full loadSettings()
-    // round trip.
-    row.dataset.provider = provider;
-
-    const label = document.createElement('div');
-    label.className = 'setting-name';
-    label.textContent = name;
-    row.appendChild(label);
-
-    const baseInput = document.createElement('input');
-    baseInput.type = 'text';
-    baseInput.className = 'setting-input setting-base';
-    baseInput.placeholder = 'base URL';
-    baseInput.value = cfg.baseURL || '';
-    row.appendChild(baseInput);
-
-    const keyInput = document.createElement('input');
-    keyInput.type = 'password';
-    keyInput.className = 'setting-input';
-    keyInput.placeholder = cfg.configured
-      ? `key ${cfg.keyMask} (blank = keep)`
-      : 'API key';
-    row.appendChild(keyInput);
-
-    const status = document.createElement('div');
-    status.className = 'setting-status';
-    status.textContent = cfg.configured ? `configured (${cfg.keyMask})` : 'no key';
-    row.appendChild(status);
-
-    const actions = document.createElement('div');
-    actions.className = 'setting-actions';
-
-    const saveBtn = document.createElement('button');
-    saveBtn.type = 'button';
-    saveBtn.className = 'ghost-btn';
-    saveBtn.textContent = 'Save';
-    saveBtn.addEventListener('click', () =>
-      saveSetting(provider, baseInput.value.trim(), keyInput.value)
-    );
-    actions.appendChild(saveBtn);
-
-    const removeBtn = document.createElement('button');
-    removeBtn.type = 'button';
-    removeBtn.className = 'ghost-btn danger';
-    removeBtn.textContent = 'Remove';
-    removeBtn.disabled = !cfg.configured;
-    removeBtn.addEventListener('click', () => removeSetting(provider));
-    actions.appendChild(removeBtn);
-
-    row.appendChild(actions);
-    els.settingsList.appendChild(row);
+  // byok: one row per provider the server's catalog names (GET
+  // /api/v1/byok/providers via the engine's listModels('byok')), not a fixed
+  // pair like the two custom endpoints above — the catalog is the source of
+  // truth so a provider added server-side shows up here with no client
+  // release. No base-URL field: byok always talks to AEGIS's own relay
+  // (/api/v1/byok/chat/completions), which is what attaches the AEGIS key
+  // and makes the call billable — the provider key typed here authenticates
+  // to the UPSTREAM provider only.
+  try {
+    const byokData = await models.listModels('byok');
+    const byokProviders = Array.isArray(byokData && byokData.providers) ? byokData.providers : [];
+    for (const p of byokProviders) {
+      if (!p || !p.id) continue;
+      const provider = `byok:${p.id}`;
+      const local = settings.find((s) => s.provider === provider) || {
+        provider, baseURL: '', configured: false, keyMask: null,
+      };
+      els.settingsList.appendChild(buildSettingRow({
+        provider, name: `BYOK: ${p.label || p.id}`, cfg: local, showBaseURL: false,
+        onSave: (_baseURL, key) => saveSetting(provider, '', key),
+        onRemove: () => removeSetting(provider),
+      }));
+    }
+  } catch {
+    /* catalog unreachable (offline, server down) — the two custom rows above still work */
   }
 }
 

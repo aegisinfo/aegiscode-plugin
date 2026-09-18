@@ -44,6 +44,7 @@ const aegis = {
 const settings = {
   get: () => ({ baseURL: 'http://local', configured: true, keyMask: 'sk-…' }),
   rawKey: () => 'raw-key',
+  list: () => [],
 };
 
 const ollama = {
@@ -72,11 +73,11 @@ const providers = {
 
 const engine = createLocalEngine({ aegis, settings, ollama, providers });
 
-// listClasses exposes all four classes with live ollama probe state
+// listClasses exposes all five classes with live ollama probe state
 const classes = await engine.listClasses();
-assert(classes.length === 4, `expected 4 classes, got ${classes.length}`);
+assert(classes.length === 5, `expected 5 classes, got ${classes.length}`);
 const names = classes.map((c) => c.class);
-for (const n of ['aegis', 'ollama', 'openai-compat', 'anthropic']) {
+for (const n of ['aegis', 'ollama', 'openai-compat', 'anthropic', 'byok']) {
   assert(names.includes(n), `missing class ${n}`);
 }
 assert(classes.find((c) => c.class === 'ollama').configured === true, 'ollama configured');
@@ -1171,6 +1172,90 @@ const fakeTools = {
     assert(again.length === 1,
       `an unanswered request is not remembered as a denial (got ${again.length} cards on the retry)`);
   }
+}
+
+// ---- byok class: catalog-driven models, per-provider local keys -----------
+{
+  const catalog = {
+    providers: [
+      { id: 'anthropic', label: 'Anthropic', models: ['claude-sonnet-5'] },
+      { id: 'deepseek', label: 'DeepSeek', models: ['deepseek-v4-flash'] },
+    ],
+  };
+  const byokCalls = [];
+  const byokAegis = {
+    apiKey: 'aegis-key',
+    async byokProviders() { return catalog; },
+    async byokChatCompletion(args) {
+      byokCalls.push(args);
+      if (args.onStream) args.onStream({ delta: 'hi' });
+      return { model: args.model, choices: [{ message: { content: 'hi' } }] };
+    },
+  };
+  // A tiny real store (keyed by the namespace string) instead of a constant
+  // stub: byok needs a DIFFERENT key per provider, which the constant mock
+  // used elsewhere in this file cannot express.
+  const store = new Map();
+  const byokSettings = {
+    get: (p) => ({ provider: p, baseURL: '', configured: store.has(p), keyMask: store.has(p) ? 'sk-…' : null }),
+    set: (p, { key } = {}) => { if (key) store.set(p, key); else store.delete(p); return byokSettings.get(p); },
+    rawKey: (p) => store.get(p) || null,
+    remove: (p) => { store.delete(p); return { ok: true }; },
+    list: () => Array.from(store.keys()).map((p) => byokSettings.get(p)),
+  };
+  const eng = createLocalEngine({ aegis: byokAegis, settings: byokSettings, ollama, providers });
+
+  // listModels builds compound "provider:model" ids from the live catalog,
+  // and reports each one's OWN configured state from the local store — not
+  // the (irrelevant here) server-side stored-key mechanism's flag.
+  const before = await eng.listModels('byok');
+  assert(before.models.length === 2, `byok lists every catalog model, got ${before.models.length}`);
+  assert(before.models.some((m) => m.id === 'anthropic:claude-sonnet-5'), 'anthropic model is offered');
+  assert(before.models.every((m) => m.configured === false), 'nothing configured yet');
+  assert(before.needsProviderKey === true, 'needsProviderKey is set when no provider has a key');
+
+  // A turn with no key stored for the chosen provider must refuse before ever
+  // reaching the relay — an unconfigured class silently calling the relay
+  // with providerKey: undefined is exactly the old "undefined" defect.
+  let refused = null;
+  try {
+    await eng.chat({ class: 'byok', model: 'anthropic:claude-sonnet-5', prompt: 'hi' }, () => {});
+  } catch (e) { refused = e; }
+  assert(refused && /no key saved/.test(refused.message), `unconfigured provider is refused, got ${refused && refused.message}`);
+  assert(byokCalls.length === 0, 'the relay is never called for an unconfigured provider');
+
+  // Saving a key through the SAME generic settings surface openai-compat/
+  // anthropic already use (namespaced byok:<provider>) is what listModels and
+  // chat both read from.
+  await eng.settings.set('byok:anthropic', { key: 'sk-ant-real' });
+  const after = await eng.listModels('byok');
+  assert(after.models.find((m) => m.id === 'anthropic:claude-sonnet-5').configured === true,
+    'the model is configured once its provider has a stored key');
+  assert(after.models.find((m) => m.id === 'deepseek:deepseek-v4-flash').configured === false,
+    'a different provider is unaffected');
+  assert(after.needsProviderKey === false, 'needsProviderKey clears once any provider is configured');
+
+  await eng.chat({ class: 'byok', model: 'anthropic:claude-sonnet-5', prompt: 'hi' }, () => {});
+  assert(byokCalls.length === 1, 'the relay is called once a key is configured');
+  const call = byokCalls[0];
+  assert(call.provider === 'anthropic', `provider is split off the compound id, got ${call.provider}`);
+  assert(call.model === 'claude-sonnet-5', `bare model id reaches the relay, got ${call.model}`);
+  assert(call.providerKey === 'sk-ant-real', 'the LOCALLY stored provider key is what is sent, never the AEGIS key');
+
+  // byok never sends tool schemas — the relay has no tools/tool_choice param,
+  // so promising them would be a silent lie about what the model can do.
+  const toolResult = await eng.chat(
+    { class: 'byok', model: 'anthropic:claude-sonnet-5', prompt: 'hi', tools: undefined }, () => {}
+  );
+  assert(toolResult && !toolResult.error, 'a byok turn still succeeds with tools implicitly requested');
+
+  // A malformed model id (no "provider:model" shape) is refused in-process
+  // rather than sent upstream as a bare, meaningless string.
+  let badModel = null;
+  try {
+    await eng.chat({ class: 'byok', model: 'claude-sonnet-5', prompt: 'hi' }, () => {});
+  } catch (e) { badModel = e; }
+  assert(badModel && /provider.*model/.test(badModel.message), `a bare model id is refused, got ${badModel && badModel.message}`);
 }
 
 console.log('engine tests passed');
