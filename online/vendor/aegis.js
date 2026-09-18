@@ -355,8 +355,16 @@ function createClient(opts = {}) {
    * The caller's *AEGIS* key is sent alongside the provider key as X-AEGIS-Key.
    * Two credentials, two headers, on purpose: the provider key authenticates the
    * upstream call, the AEGIS key says whose bank pays the handling fee. With no
-   * AEGIS key configured the header is omitted and the call stays anonymous —
-   * allowed, just unbilled (see _byok_identify_user on the server).
+   * AEGIS key configured the header is omitted and the call stays anonymous:
+   * the relay still serves it, and `_byok_identify_user` on the server resolves
+   * no payer, so `charge_byok` logs the fee against user 0 as uncollected. The
+   * turn is not refused — `AEGIS_BYOK_REQUIRE_BALANCE` (off by default) is the
+   * server's own gate and the only place that decides this, deliberately, so
+   * that pre-existing unauthenticated BYOK clients do not start getting 402s on
+   * upgrade (aegis1 tests/test_byok_fee.py pins the anonymous path as allowed).
+   * No client enforces it either: the desktop is one caller of a route that is
+   * unauthenticated by design. What this header changes is attribution — sending
+   * it is what makes the fee collectable from the account it belongs to.
    */
   async function byokChatCompletion({
     provider = 'openai',
