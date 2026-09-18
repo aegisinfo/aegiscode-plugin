@@ -1313,4 +1313,46 @@ const fakeTools = {
   assert(relayed[0].providerKey === 'sk-ant-real', 'and it is still the provider key that authenticates upstream');
 }
 
+// ---- byok: the relay's 402 is translated, not passed through raw ----------
+// aegis1's balance gate (`AEGIS_BYOK_REQUIRE_BALANCE`) refuses an unfunded BYOK
+// send with 402 and a body written for an API consumer. That text lands in a
+// chat transcript, where it reads as a crash rather than a bill — so the host
+// restates the one thing the user has to do, while preserving the status every
+// caller above keys off. The distinction that matters: an empty balance is NOT
+// a bad provider key, and saying so is what stops the user from re-typing a
+// key that was never the problem.
+{
+  const balanceAegis = {
+    apiKey: 'aegis-key',
+    async byokProviders() {
+      return { providers: [{ id: 'anthropic', label: 'Anthropic', models: ['claude-sonnet-5'] }] };
+    },
+    async byokChatCompletion() {
+      const e = new Error('Insufficient balance. Top up to continue using BYOK.');
+      e.status = 402;
+      throw e;
+    },
+  };
+  const storedKeys = new Map([['byok:anthropic', 'sk-ant-real']]);
+  const balSettings = {
+    get: (p) => ({ provider: p, baseURL: '', configured: storedKeys.has(p), keyMask: storedKeys.has(p) ? 'sk-…' : null }),
+    set: () => {},
+    rawKey: (p) => storedKeys.get(p) || null,
+    remove: () => ({ ok: true }),
+    list: () => [],
+  };
+  const balEng = createLocalEngine({ aegis: balanceAegis, settings: balSettings, ollama, providers });
+
+  let refused402 = null;
+  try {
+    await balEng.chat({ class: 'byok', model: 'anthropic:claude-sonnet-5', prompt: 'hi' }, () => {});
+  } catch (e) { refused402 = e; }
+  assert(refused402, 'an unfunded byok send is refused');
+  assert(refused402.status === 402, `and stays a 402 for callers that key off it, got ${refused402.status}`);
+  assert(/balance/i.test(refused402.message), `the message names the balance, got ${refused402.message}`);
+  assert(/top up/i.test(refused402.message), `and names the fix, got ${refused402.message}`);
+  assert(!/Insufficient balance\. Top up to continue/.test(refused402.message),
+    'the relay\'s consumer-facing body is not passed through verbatim');
+}
+
 console.log('engine tests passed');

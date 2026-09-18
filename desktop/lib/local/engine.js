@@ -956,18 +956,42 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
       // automatically by byokChatCompletion() as X-AEGIS-Key so the account
       // gets billed the handling fee; see client/aegis.js.
       const { provider, model: bareModel } = splitByokModel(opts.model);
-      return aegis.byokChatCompletion({
-        provider,
-        model: bareModel,
-        providerKey: opts.apiKey,
-        prompt: opts.prompt,
-        system: opts.system,
-        messages: opts.messages,
-        maxTokens: opts.maxTokens,
-        stream: true,
-        onStream: opts.onDelta,
-        signal: opts.signal,
-      });
+      try {
+        return await aegis.byokChatCompletion({
+          provider,
+          model: bareModel,
+          providerKey: opts.apiKey,
+          prompt: opts.prompt,
+          system: opts.system,
+          messages: opts.messages,
+          maxTokens: opts.maxTokens,
+          stream: true,
+          onStream: opts.onDelta,
+          signal: opts.signal,
+        });
+      } catch (e) {
+        // The relay's own balance gate (aegis1 `AEGIS_BYOK_REQUIRE_BALANCE`,
+        // app.py `byok_chat_completions`) answers 402 with a body aimed at an
+        // API consumer — "Insufficient balance. Top up to continue using
+        // BYOK." Shown raw in a chat transcript that reads as a crash rather
+        // than a bill, so the one thing the user has to DO is said here, in the
+        // hosts' own voice. The status is preserved so every existing caller
+        // (the CLI's error painter, the desktop turn guard) still sees a 402.
+        //
+        // The provider key is untouched by this: it is the caller's own and it
+        // is still valid. What ran out is the AEGIS balance the handling fee
+        // is billed against, which is the whole reason this lane has a fee.
+        if (e && e.status === 402) {
+          const err = new Error(
+            'byok: this account has no AEGIS balance left, and the BYOK handling fee is ' +
+              'billed there — your provider key is still valid, this is not a key problem. ' +
+              'Top up the account, then try again (or /class aegis to use the pooled lane).'
+          );
+          err.status = 402;
+          throw err;
+        }
+        throw e;
+      }
     }
 
     const common = {
