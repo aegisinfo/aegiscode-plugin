@@ -250,6 +250,8 @@ function turnAccounting(usage, model, opts = {}) {
  * back is that RUNNING TOTAL. The status bar prints `state.tokens`
  * (renderStatus), and `ctrl+t` prints the tallies in one line
  * (`tokenSummary`: `12,400 tok (10,100 in / 2,300 out) · 4 calls · €0.03`).
+ * The tallies are reproduced; that one abbreviation is not — `fmtRoll` explains
+ * why it drops the parenthetical rather than carrying the CLI's line verbatim.
  *
  * The desktop counted per turn only. Every meta row was a fresh count that
  * reset at the next call, so "what has this session spent" was answerable only
@@ -471,28 +473,30 @@ function fmtTokens(n) {
  * an untouched session adds no noise to a turn's meta line.
  *
  * @param {object} [roll]
- * @returns {string} e.g. `12,400 tok (10,100 in / 2,300 out) · 4 calls · $0.0310`
+ * @returns {string} e.g. `12,400 tok · 4 calls · $0.0310` — the CLI's fields in
+ *   the CLI's order, minus the input/output parenthetical (see below).
  */
 function fmtRoll(roll) {
   const r = roll || emptyRoll();
   if (!r.turns && !r.calls) return '';
-  // The first two fields are `tokenSummary` (cli/src/app.js:1413) verbatim,
-  // separator and all: `12,400 tok (10,100 in / 2,300 out) · 4 calls`. There the
-  // parenthetical is unconditional and the call count is singular at one; both
-  // are kept, because a line that is only *sometimes* shaped like the CLI's is a
-  // lookalike rather than the same quantity. The call count is also the number
-  // that reveals a fan-out, which is why it is not hidden at 1.
+  // The fields are `tokenSummary`'s (cli/src/app.js:1413) in its order — tokens,
+  // calls, money — with one dropped: the `(10,100 in / 2,300 out)` split. `in`
+  // and `out` are a terminal status-line shorthand, legible to someone already
+  // reading that status line and to nobody else, which is what an unlabelled
+  // abbreviation in a GUI topbar turns into. The total is the figure a reader
+  // wants; `r.input`/`r.output` are still folded onto the roll (see `rollTurn`)
+  // for any surface that wants to show the split with real labels. The call
+  // count stays unconditional, because it is the number that reveals a
+  // fan-out, and it is not hidden at 1.
   const bits = [];
   // The token half only when something was actually counted. `rollTurn` counts
   // turns and calls BEFORE it looks at the token count, so a dispatch that
   // reported nothing still reaches here — and printing its empty tally would
-  // put `0 tok (0 in / 0 out)` on the topbar, a figure the meter never took,
-  // which reads as a counter that does not move. The turn count is still
-  // stated, because that much is true.
+  // put `0 tok` on the topbar, a figure the meter never took, which reads as a
+  // counter that does not move. The turn count is still stated, because that
+  // much is true.
   if (r.tokens > 0) {
-    bits.push(
-      `${fmtTokens(r.tokens)} tok (${fmtTokens(r.input)} in / ${fmtTokens(r.output)} out)`
-    );
+    bits.push(`${fmtTokens(r.tokens)} tok`);
   }
   bits.push(`${r.calls} call${r.calls === 1 ? '' : 's'}`);
   // Money is where this line departs from `tokenSummary`, deliberately: that
