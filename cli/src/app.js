@@ -1154,7 +1154,14 @@ function createApp(options = {}) {
     try {
       let args = cmd.build(arg);
       if (cmd.secret) {
-        const key = await askSecret(`provider key for ${args.provider}: `);
+        // A bare "provider key for openai:" tells the user nothing about which
+        // key to paste or where to get it, which is exactly the step people get
+        // wrong. When a command can describe its own secret it does, and the
+        // description is best-effort: a catalog fetch that fails must still
+        // leave a working prompt rather than aborting the command.
+        const spec = await describeSecret(cmd, args);
+        if (spec && spec.note) emit(render.renderNotice(ctx(), 'info', spec.note));
+        const key = await askSecret((spec && spec.prompt) || `provider key for ${args.provider}: `);
         if (!key) {
           emit(render.renderNotice(ctx(), 'warn', 'empty key — nothing sent'));
           return true;
@@ -1202,6 +1209,25 @@ function createApp(options = {}) {
       return;
     }
     emit(render.renderNotice(ctx(), 'info', `cloud memory: ${used} of ${limit} synced tokens — /cloud memory for the full state`));
+  }
+
+  /**
+   * Ask the command how to describe the secret it is about to collect.
+   *
+   * Returns `{ note, prompt }` or null. The command opts in by defining
+   * `secretDescribe(args, client)`, which is awaited and therefore free to
+   * consult the server. A throw here is swallowed on purpose: guidance is an
+   * improvement to a prompt, and a user who typed `/byok-set openai` on a
+   * flaky connection should still get the prompt.
+   */
+  async function describeSecret(cmd, args) {
+    if (typeof cmd.secretDescribe !== 'function') return null;
+    try {
+      const spec = await cmd.secretDescribe(args, client);
+      return spec && typeof spec === 'object' ? spec : null;
+    } catch {
+      return null;
+    }
   }
 
   /**

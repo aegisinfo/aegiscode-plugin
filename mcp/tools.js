@@ -169,15 +169,56 @@ function createTools(client) {
       },
     },
 
+    aegis_byok_providers: {
+      description:
+        "List every provider that accepts a Bring-Your-Own-Key on AEGIS: the exact provider id to pass to aegis_byok_set, the models each one unlocks, where to create the key, and the prefix a valid key starts with. Call this before aegis_byok_set so the user knows which key to go get rather than guessing a provider id.",
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      async run() {
+        const data = await aegis.byokProviders();
+        const providers = data.providers || [];
+        if (!providers.length) return 'AEGIS is not advertising any BYOK providers right now.';
+        const lines = ["Set one with aegis_byok_set — pass the id exactly as shown:"];
+        for (const p of providers) {
+          // Bare ids, not objects — the same mismatch that made the CLI render
+          // an empty model line for every provider.
+          const models = (p.models || [])
+            .map((m) => (typeof m === 'string' ? m : m && m.id))
+            .filter(Boolean);
+          const state = p.configured ? `  ✓ set${p.masked ? ` (${p.masked})` : ''}` : '';
+          lines.push('');
+          lines.push(`  ${p.id}${state}`);
+          if (p.label) lines.push(`      ${p.label}`);
+          if (models.length) lines.push(`      models: ${models.join(', ')}`);
+          if (p.key_prefix) lines.push(`      key starts with: ${p.key_prefix}`);
+          if (p.key_url) lines.push(`      get a key: ${p.key_url}`);
+        }
+        return lines.join('\n');
+      },
+    },
+
     aegis_byok_status: {
       description:
         "List which providers have a Bring-Your-Own-Key configured on this AEGIS account (known ids: openai, anthropic, groq, openrouter, together, deepseek, gemini, …). A configured BYOK key is used automatically by aegis_ask instead of the pooled balance for that provider, so calls no longer cost AEGIS token-bank funds.",
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       async run() {
         const data = await aegis.byokStatus();
-        const rows = Object.entries(data || {}).map(([provider, info]) => {
+        const entries = Object.entries(data || {});
+        if (!entries.length) return 'No BYOK providers are configured. Run aegis_byok_providers to see what you can set.';
+        // The status endpoint historically answered with a bare provider->info
+        // map. Once a catalog is available the same keys are rendered with the
+        // operator's own label, so a message never depends on the reader
+        // knowing that "together" is a company.
+        let labels = {};
+        try {
+          const cat = await aegis.byokProviders();
+          for (const p of cat.providers || []) labels[p.id] = p.label || '';
+        } catch {
+          // Catalog is a nicety here, never a reason to fail a status call.
+        }
+        const rows = entries.map(([provider, info]) => {
           const set = info && info.set;
-          return `  ${provider}: ${set ? `set (${info.masked})` : 'not set'}`;
+          const label = labels[provider] ? `  ${labels[provider]}` : '';
+          return `  ${provider}${label}: ${set ? `set (${info.masked})` : 'not set'}`;
         });
         return `BYOK keys:\n${rows.join('\n')}`;
       },

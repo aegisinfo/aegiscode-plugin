@@ -7,10 +7,13 @@
  * orchestration, routing, or tier logic. All of that lives in the private
  * ae-guix product and behind aegiscloud.org.
  *
- * Runs unchanged under three hosts:
+ * Runs unchanged under four hosts:
  *   - mcp/server.js   (Claude Code MCP plugin)         — CommonJS require
  *   - desktop/        (thin Electron shell)            — CommonJS require
  *                     (vendored byte-identical copy at desktop/vendor/aegis.js)
+ *   - cli/            (aegiscode terminal host)        — CommonJS require
+ *                     (vendored byte-identical copy at
+ *                      cli/vendor/client/aegis.js)
  *   - aegis-online    (browser SPA, vendored copy)     — <script> tag →
  *                     window.AegisClient
  *
@@ -348,6 +351,12 @@ function createClient(opts = {}) {
    * provider key never touches AEGIS storage — it is forwarded straight to the
    * provider for this request only. Mirrors chatCompletion()'s streaming /
    * fallback semantics exactly.
+   *
+   * The caller's *AEGIS* key is sent alongside the provider key as X-AEGIS-Key.
+   * Two credentials, two headers, on purpose: the provider key authenticates the
+   * upstream call, the AEGIS key says whose bank pays the handling fee. With no
+   * AEGIS key configured the header is omitted and the call stays anonymous —
+   * allowed, just unbilled (see _byok_identify_user on the server).
    */
   async function byokChatCompletion({
     provider = 'openai',
@@ -373,6 +382,10 @@ function createClient(opts = {}) {
       'X-AEGIS-Version': clientVersion,
       'X-Provider-Key': key,
     };
+    // Identify the payer. Absent key => anonymous call, which the server
+    // accepts but cannot bill; sending it is what turns a BYOK turn into
+    // billable traffic instead of a free ride.
+    if (apiKey) headers['X-AEGIS-Key'] = apiKey;
     if (!stream || typeof onStream !== 'function') {
       return apiPost('/api/v1/byok/chat/completions', { ...body, stream: false }, headers);
     }
@@ -683,6 +696,15 @@ function createClient(opts = {}) {
     return apiGet('/api/user/api-keys');
   }
 
+  /** The server's BYOK provider catalog: which providers accept a key, which
+   *  models each unlocks, where to get the key, and the prefix a valid key
+   *  starts with. Deliberately NOT key-gated — "which key do I go get, and
+   *  what will it unlock?" is the question asked *before* an AEGIS key exists.
+   *  An AEGIS key, if present, only adds the `configured` column. */
+  async function byokProviders() {
+    return apiGet('/api/v1/byok/providers');
+  }
+
   async function byokSet(provider, providerApiKey) {
     return apiPost('/api/user/api-keys', {
       provider,
@@ -809,6 +831,7 @@ function createClient(opts = {}) {
     tokenBankTopup,
     billingCheckout,
     byokStatus,
+    byokProviders,
     byokSet,
     getMemoryToken,
     memorySearch,

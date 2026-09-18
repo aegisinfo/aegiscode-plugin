@@ -142,6 +142,75 @@ async function loadModels(c) {
  */
 const cloudReady = () => credentials.hasApiKey();
 
+// ── BYOK provider catalog ────────────────────────────────────────────────────
+
+/**
+ * The server's BYOK provider catalog, or null when it cannot be reached.
+ *
+ * The catalog is the *server's* answer to "which keys do you accept, for which
+ * models, and where do I get one". It is deliberately not key-gated, so this
+ * works before an account key exists — which is the whole point, since it is
+ * the screen that tells a user which key to go buy. Returning null rather than
+ * throwing keeps every caller free to fall back to the prose description it
+ * used before the catalog existed.
+ */
+async function byokCatalog(client) {
+  if (!client || typeof client.byokProviders !== 'function') return null;
+  try {
+    const data = await client.byokProviders();
+    const providers = (data && data.providers) || [];
+    return providers.length ? providers : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve a typed provider id against the catalog.
+ *
+ * Exact id first, then a unique case-insensitive match on id, label or alias, so
+ * `/byok-set OpenAI` and `/byok-set together-ai` both land. A non-unique match
+ * returns `{ ambiguous }` rather than silently picking one: storing a key
+ * against the wrong provider is the failure this whole path exists to prevent,
+ * and it is not visible until a call 401s upstream.
+ */
+function findByokProvider(providers, typed) {
+  const want = String(typed || '').trim().toLowerCase();
+  if (!providers) return { provider: null, exact: false };
+  const exact = providers.find((p) => p.id === want);
+  if (exact) return { provider: exact, exact: true };
+  const loose = providers.filter((p) => {
+    const names = [p.id, p.label, ...(p.aliases || [])].filter(Boolean);
+    return names.some((n) => String(n).toLowerCase() === want);
+  });
+  if (loose.length === 1) return { provider: loose[0], exact: false };
+  if (loose.length > 1) return { ambiguous: loose.map((p) => p.id) };
+  return { provider: null, exact: false };
+}
+
+/** One catalog row: id, whether it is already set, its models, and key guidance. */
+function byokProviderLines(providers) {
+  const lines = [];
+  for (const p of providers) {
+    const state = p.configured
+      ? span(C.green, `set${p.masked ? ` (${p.masked})` : ''}`)
+      : span(C.gray, 'not set');
+    const label = p.label ? span(C.gray, ` — ${p.label}`) : '';
+    lines.push(`  ${span(C.gold + BOLD, p.id)}${label}  ${state}`);
+    // `models` arrives as bare ids. The catalog used to be read here as if each
+    // one were an object with `.id`, which silently rendered nothing — a
+    // provider listed with an empty model line reads as "no models", not as a
+    // bug, so tolerate both shapes rather than repeat the mistake.
+    const models = (p.models || [])
+      .map((m) => (typeof m === 'string' ? m : m && m.id))
+      .filter(Boolean);
+    if (models.length) lines.push(`      ${span(C.gray, `models: ${models.join(', ')}`)}`);
+    if (p.key_prefix) lines.push(`      ${span(C.gray, `key starts with ${p.key_prefix}`)}`);
+    if (p.key_url) lines.push(`      ${span(C.gray, p.key_url)}`);
+  }
+  return lines;
+}
+
 // ── account key + cloud sync handlers ────────────────────────────────────────
 
 /** The account-key panel body, shared by /key, /login and /cloud. */
@@ -1824,10 +1893,36 @@ const COMMANDS = [
 
   // ── cloud-only additions (not in the reference vocabulary) ────────────────
   {
+    // A bare `provider -> info` map is the wrong shape for a picker: it can only
+    // describe providers you have ALREADY set, and the question this command
+    // answers is "which key should I go buy". A command is either handler- or
+    // tool-backed, never both (`cli-commands.test.mjs` enforces exactly one), so
+    // this is handler-backed and reaches for the tool by name only as the
+    // fallback for a server that predates the catalog — the command still works,
+    // just with the older, sparser answer.
     name: 'byok', hint: '', category: 'auth',
-    desc: 'Show which providers have your own key configured',
-    tool: 'aegis_byok_status',
-    build: () => ({}),
+    desc: 'List every provider you can bring your own key for, and which are set',
+    handler: async (c) => {
+      const providers = await byokCatalog(c.client);
+      if (!providers) {
+        await c.runTool('aegis_byok_status', {});
+        return true;
+      }
+      const set = providers.filter((p) => p.configured).length;
+      const lines = [
+        [span(C.gold + BOLD, 'Bring your own key'), span(BOLD_OFF, '')],
+        [span(C.gray, '─'.repeat(34))],
+        [
+          span(set ? C.green : C.gray, `  ${set} of ${providers.length} providers set`),
+          span(C.gray, '  — /byok-set <provider>'),
+        ],
+        '',
+        ...byokProviderLines(providers),
+      ];
+      panel(c, lines);
+      c.render();
+      return true;
+    },
   },
   {
     name: 'byok-set', args: ['provider'], hint: '<provider>', category: 'auth',
@@ -1835,6 +1930,54 @@ const COMMANDS = [
     tool: 'aegis_byok_set',
     secret: 'key',
     build: (arg) => ({ provider: String(arg || '').trim() }),
+    /**
+     * Say which key this is and where to get it, before the prompt.
+     *
+     * The old prompt was `provider key for openai:` — which assumes the reader
+     * already knows that a provider id is a company, and leaves them nothing to
+     * check a pasted key against. Here the catalog names the provider, lists the
+     * models the key unlocks, links the place to create it, and states the
+     * prefix a valid key begins with, so a key for the wrong vendor is visible
+     * before it is stored rather than as an upstream 401 later.
+     *
+     * Resolved against aliases too, so the prompt agrees with the id that will
+     * actually be sent (`/byok-set OpenAI` → `openai`, not `OpenAI`).
+     */
+    async secretDescribe(args, client) {
+      const typed = String(args.provider || '').trim();
+      const providers = await byokCatalog(client);
+      if (!providers) {
+        // No catalog: still refuse to prompt for an empty provider, and keep the
+        // words "provider key" so the request is intelligible on its own.
+        return typed ? null : { note: 'Usage: /byok-set <provider> — /byok lists them.', prompt: 'provider key: ' };
+      }
+      const match = findByokProvider(providers, typed);
+      if (match.ambiguous) {
+        return {
+          note: `"${typed}" matches ${match.ambiguous.join(', ')} — retype the exact id. Nothing was sent.`,
+          prompt: null,
+        };
+      }
+      const p = match.provider;
+      if (!p) {
+        const ids = providers.map((x) => x.id).join(', ');
+        return { note: `unknown provider "${typed}". Known ids: ${ids}`, prompt: null };
+      }
+      if (p.configured) {
+        return {
+          note: `${p.id} already has a key${p.masked ? ` (${p.masked})` : ''} — pasting a new one replaces it.`,
+          prompt: `new ${p.label || p.id} key: `,
+        };
+      }
+      const bits = [`${p.label || p.id}`];
+      const models = (p.models || [])
+        .map((m) => (typeof m === 'string' ? m : m && m.id))
+        .filter(Boolean);
+      if (models.length) bits.push(`unlocks ${models.join(', ')}`);
+      if (p.key_prefix) bits.push(`key starts with ${p.key_prefix}`);
+      if (p.key_url) bits.push(`create one at ${p.key_url}`);
+      return { note: bits.join(' · '), prompt: `${p.id} key: ` };
+    },
   },
   {
     name: 'byok-rm', args: ['provider'], hint: '<provider>', category: 'auth',

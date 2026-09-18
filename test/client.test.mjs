@@ -134,6 +134,16 @@ try {
     if (String(url).endsWith('/api/conversations/sync')) {
       return okJson({ session_id: 'remote-abc', sessions: [{ session_id: 'r1', title: 'from cloud' }] });
     }
+    // BYOK relay (aegis1 app.py:9117). Registered here because step 9 below
+    // asserts on the headers this call sends — a stub that throws on the path
+    // would fail the test for the wrong reason (no assertion ever ran).
+    if (String(url).endsWith('/api/v1/byok/chat/completions')) {
+      return okJson({
+        model: 'server-chosen-model',
+        choices: [{ message: { content: 'ok' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      });
+    }
     throw new Error(`unexpected fetch ${url}`);
   };
   const pushResult = await client.conversationSyncPush({
@@ -161,6 +171,33 @@ try {
   );
   const verifyCalls = captured.filter((c) => String(c.url).endsWith('/api/verify-api-key'));
   assert(verifyCalls.length === 1, 'the memory token is cached across push and pull');
+
+  // 9. BYOK must send the caller's *AEGIS* key (X-AEGIS-Key) alongside their
+  // provider key, or the server cannot tell whose bank pays the handling fee.
+  //
+  // This is what makes the BYOK lane billable at all. Without the header,
+  // `_byok_identify_user` on aegis1 returns 0 for every call, so BYOK traffic
+  // was attributed to no one and charged to no one — the lane ran at a
+  // permanent loss and the loss was invisible (the audit rows read as free
+  // rather than as missing). The two credentials are distinct and must never
+  // be conflated: the provider key authenticates the upstream call, the AEGIS
+  // key says who pays. Conflating them would bill a stranger who happened to
+  // own whichever row matched.
+  await client.byokChatCompletion({ prompt: 'hi', providerKey: 'sk-provider-key' });
+  let hdrs = captured[captured.length - 1].opts.headers;
+  assert(hdrs['X-AEGIS-Key'] === 'test-key', `byok must send the AEGIS key, got ${hdrs['X-AEGIS-Key']}`);
+  assert(hdrs['X-Provider-Key'] === 'sk-provider-key', 'byok must send the provider key');
+  assert(hdrs['X-AEGIS-Key'] !== hdrs['X-Provider-Key'], 'the two credentials must not be conflated');
+
+  // 9b. No AEGIS key configured -> the header is OMITTED, not sent empty.
+  // An anonymous BYOK call is allowed (it just cannot be billed), so this must
+  // not start throwing; but an empty-string header would be a credential that
+  // is present-and-invalid, which is a different thing to the server.
+  const anon = createClient({ apiKey: '', apiBase: 'https://example.test' });
+  await anon.byokChatCompletion({ prompt: 'hi', providerKey: 'sk-anon' });
+  hdrs = captured[captured.length - 1].opts.headers;
+  assert(!('X-AEGIS-Key' in hdrs), 'an unconfigured AEGIS key must omit the header entirely');
+  assert(hdrs['X-Provider-Key'] === 'sk-anon', 'an anonymous byok call still carries the provider key');
 
   console.log('client body-builder tests passed');
 } finally {
