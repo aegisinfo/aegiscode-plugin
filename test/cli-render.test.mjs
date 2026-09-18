@@ -28,6 +28,7 @@ const screen = require(join(cliDir, 'src', 'screen.js'));
 const format = require(join(cliDir, 'src', 'format.js'));
 const render = require(join(cliDir, 'src', 'render.js'));
 const theme = require(join(cliDir, 'src', 'theme.js'));
+const artMod = require(join(cliDir, 'src', 'art.js'));
 const { stripAnsi } = screen;
 const plain = (lines) => (Array.isArray(lines) ? lines : [lines]).map((l) => stripAnsi(l));
 
@@ -184,6 +185,36 @@ assert(bannerPlain.some((l) => l.includes('v0.1.0')), 'the banner states the ver
 assert(bannerPlain.some((l) => l.includes('nexus-brain')), 'the banner states the model');
 assert(bannerPlain.some((l) => l.includes('aegiscloud.org')), 'the banner states the base');
 assert(!banner.some((l) => /[╭╮╰╯]/.test(stripAnsi(l))), 'the banner never draws a rounded frame');
+
+// The tagline. This is the assertion the earlier copy change did not have, and
+// its absence is exactly how the string went stale: the suites pinned the
+// wordmark, the frame and every width, but nothing pinned the one line a reader
+// actually reads. Two copies existed (one here, one inline in screens.js), both
+// aged independently, and no test could tell.
+//
+// The literal is pinned rather than compared against itself, so a copy change
+// has to be a deliberate edit to this file too. The rendered line is then
+// required to *equal* the constant, which is what catches a second inline copy
+// reappearing at a call site: the join below is derived from the constant, so a
+// re-duplicated string renders the old text and fails here.
+eq(artMod.TAGLINE, 'Your intent, AI automated.', 'the tagline is the reviewed copy');
+eq(artMod.TAGLINE_SHORT, 'Your intent, automated.', 'and the narrow copy');
+const verLine = bannerPlain.find((l) => l.includes('v0.1.0'));
+assert(verLine !== undefined, 'the banner states the version');
+assert(
+  verLine.includes(`${artMod.TAGLINE}`),
+  `the banner version line carries TAGLINE verbatim — got ${JSON.stringify(verLine)}`,
+);
+assert(
+  !verLine.includes('Cloud brain in your shell'),
+  'and not the retired copy',
+);
+eq(
+  verLine.trim(),
+  `v0.1.0 ${theme.GLYPH.bullet} ${artMod.TAGLINE}`,
+  'the version line is exactly `v<version> • <tagline>`, joined from the constant',
+);
+
 // "Welcome back!" on a returning run.
 const back = plain(render.renderBanner({}, { width: 76, version: '0.1.0', firstRun: false })).join('\n');
 assert(back.includes('Welcome back!'), 'a returning run shows the back title');
