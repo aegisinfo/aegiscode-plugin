@@ -142,6 +142,47 @@ const plain = (lines) => screen.stripAnsi(text(lines));
       assert(width <= cols, `welcome row fits ${cols} cols (row was ${width})`);
     }
   }
+
+  // ── the `What's new` box is the patch note, held to the package ──────────
+  // It sat four minor versions stale — topping out at v6.3.0 while the package
+  // shipped 6.7.3 — because nothing tied it to anything. These assertions are
+  // that tie, and each one catches a different way the box can lie.
+  {
+    const pkg = require(join(cliDir, 'package.json'));
+    const commands = require(join(cliDir, 'src', 'commands.js'));
+    const news = plain(screens.welcomeLines({ light: false }, 100, 44, true));
+
+    has(news, `What's new in v${pkg.version}`,
+      "the what's-new header names the build the user is actually running");
+
+    // Never claim news from a release that has not shipped — that is the one
+    // direction a changelog can lie that a reader cannot detect.
+    const [maj, min] = pkg.version.split('.').map(Number);
+    const named = [...news.matchAll(/v(\d+)\.(\d+)/g)].map((m) => [Number(m[1]), Number(m[2])]);
+    const ahead = named.filter(([a, b]) => a > maj || (a === maj && b > min));
+    eq(ahead.length, 0,
+      `the patch note claims no release newer than v${pkg.version} (saw ${JSON.stringify(ahead)})`);
+    // And it must actually reach the current minor: the box is allowed to
+    // trail by a patch, never by a minor — a minor means the copy needs a look.
+    assert(named.some(([a, b]) => a === maj && b === min),
+      `the patch note names the current release line v${maj}.${min}`);
+
+    // Every command the box advertises has to exist. A rename left the prose
+    // pointing at a route the user cannot take, and a welcome screen is the
+    // worst place to be told about a command that is not there.
+    const advertised = [...news.matchAll(/\/([a-z][a-z0-9-]*)/g)].map((m) => m[1]);
+    assert(advertised.length >= 2, `the patch note advertises its commands (saw ${advertised.length})`);
+    for (const name of advertised) {
+      assert(commands.findCommand(name), `the patch note advertises /${name}, and the registry has it`);
+    }
+
+    // The row budget is load-bearing. At 80×24 the screen fills rows-1 exactly,
+    // so a ninth row in WHATS_NEW pushes the footer hint off the bottom of the
+    // commonest terminal there is — and `boxes()` receives an `avail` it never
+    // reads, so nothing else would stop it.
+    eq(screens.welcomeLines({ light: false }, 80, 24, true).length, 23,
+      'the welcome screen still fills an 80x24 terminal without overflowing');
+  }
 }
 
 // ── the sequence, with the screens injected ─────────────────────────────────

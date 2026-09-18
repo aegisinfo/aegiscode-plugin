@@ -42,6 +42,8 @@
 const { span, getSize, lineWidth } = require('./screen.js');
 const { themeOf, BOLD, BOLD_OFF, GLYPH } = require('./theme.js');
 
+const VERSION = require('../package.json').version;
+
 // ── local helpers (this file stays self-contained apart from theme/screen) ────
 
 /** Finite number or 0 — never NaN (which would print as "NaN"). */
@@ -1139,26 +1141,57 @@ function buildYolo(state, ctx = {}) {
 
 // ── /release-notes ───────────────────────────────────────────────────────────
 
+/**
+ * `/release-notes` — the long form of the welcome box's `What's new`.
+ *
+ * This panel was stale in a way the welcome box was not. It opened at v0.1.0
+ * and closed with three bullets declaring /login /doctor /permissions /mcp
+ * /skills /hooks /agents /resume /rewind /compact /init /export /vim /yolo
+ * "unavailable here — each says why". Every one of those is implemented now
+ * (no command reports `unavailable`, and `stubPanel` has zero callers), so the
+ * panel was telling anyone who ran it that a third of the command surface did
+ * not exist. The list below is the real one.
+ *
+ * The command count is read from the registry at call time rather than frozen
+ * as a literal, because a frozen count is precisely what nobody re-derived.
+ */
 function buildReleaseNotes(state, ctx = {}) {
   const t = themeOf(ctx);
   const out = [];
-  out.push([span(t.gold + BOLD, "What's new"), span(BOLD_OFF, '')]);
+  out.push([span(t.gold + BOLD, `What's new in v${VERSION}`), span(BOLD_OFF, '')]);
   out.push([span(t.gray, '─'.repeat(30))]);
+
   const bullets = [
-    '• v0.1.0 — aegiscode CLI: the aegiscode design system on the AEGIS pooled brain.',
-    '•   /help /status /cost /tokens /context /models /model /theme /stream (local).',
-    '•   /aegis-ask /aegis-status /aegis-recall /aegis-remember /memory /billing (tool-backed).',
-    '•   /byok /byok-set /byok-rm — bring your own provider keys (never echoed).',
-    '•   /tool <name> [json] — call any registry tool directly.',
-    '• Cost and tokens are metered in euro (€4dp below a cent).',
-    '• Config persists to ~/.aegiscode/config.json (theme/model/stream).',
-    '• Unavailable here: /login /doctor /permissions /mcp /skills /hooks /agents',
-    '•   /resume /rewind /compact /init /export /vim /yolo /confirm — each says why.',
-    '• Repo: github.com/aegisinfo/aegiscode-plugin',
+    'v6.7.3 — the shared renderer is re-staged into cli/vendor.',
+    'v6.7.1 — terminal capabilities are read from the terminal, not the platform.',
+    'v6.7.0 — a file edit renders as a coloured diff block.',
+    'v6.6.0 — autonomous mode: a persistent work queue with a detached worker.',
+    'v6.5.x — the live tool row, /cost billed from the ledger the server settled at.',
+    'v6.4.0 — `aegiscode login`/`logout`/`key`, a 0600 credential store, /cloud and /sync.',
   ];
-  for (const text of bullets) out.push([span(t.green, '•'), span(t.white, ' ' + text.slice(1))]);
-  out.push([span('', '')]);
-  out.push([span(t.gray, '/release-notes for more')]);
+  for (const text of bullets) {
+    const i = text.indexOf(' — ');
+    const head = i === -1 ? text : text.slice(0, i);
+    const body = i === -1 ? '' : text.slice(i + 3);
+    out.push([span(t.green, '•'), span(t.gold, ` ${head}`), span(t.white, body ? ` — ${body}` : '')]);
+  }
+
+  let counts = null;
+  try {
+    // Call-time require: commands.js requires this module, so a top-level
+    // require would close a cycle at load for no benefit.
+    const commands = require('./commands.js');
+    counts = { n: commands.visibleCommands().length, cats: commands.CATEGORIES.length };
+  } catch {
+    // A release-notes panel is never worth failing a render over — the bullets
+    // above stand on their own without the count.
+  }
+  if (counts) {
+    out.push([span('', '')]);
+    out.push([span(t.gray, ` ${counts.n} commands across ${counts.cats} categories — /help lists them.`)]);
+  }
+  out.push([span(t.gray, ' The version above is read from the package; the prose is not.')]);
+  out.push([span(t.gray, ' Repo: github.com/aegisinfo/aegiscode-plugin')]);
   return out;
 }
 

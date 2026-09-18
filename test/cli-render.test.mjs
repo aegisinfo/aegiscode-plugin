@@ -3,8 +3,8 @@
  * The terminal host's rendering surface, driven directly (no TTY, no child
  * process).
  *
- * What it pins: the aegiscode-dev welcome frame (a gold full-width rule over the
- * two-tone mark, the coral-bold title, a version line), width safety (a line
+ * What it pins: the ÆGIS welcome frame (a gold full-width rule over the
+ * one-ink wordmark, the coral-bold title, a version line), width safety (a line
  * never exceeds the terminal — a wrapped escape sequence corrupts every line
  * after it), the accounting line (tokens beside €, which is the whole reason the
  * CLI exists), the glyph fidelity (`❯` prompt, `⎿` hook, `✻` done) and the
@@ -164,13 +164,20 @@ eq(screen.w(rule), 76, 'the header rule spans the terminal width');
 assert(rule.startsWith('━') && rule.endsWith('━'), 'the header rule is capped with ━');
 assert(rule.includes('─'), 'and filled with ─');
 assert(banner[0].includes(theme.C.gold), 'and painted in the gold token');
-// The art is present, and every art row is the same display width.
-const artRows = bannerPlain.filter((l) => /[█▓▒░]/.test(l));
-assert(artRows.length >= 5, 'the banner contains the welcome mark');
+// The art is present, and every art row is the same display width. The mark is
+// the ÆGIS wordmark in box runes — not the retired mascot/moon/whale composition,
+// which drew with █▓▒░.
+const artRows = bannerPlain.filter((l) => /[╔╗╚╝╠╣╦╩║═]/.test(l));
+assert(artRows.length >= 3, 'the banner contains the welcome mark');
 const artWidths = new Set(artRows.map((l) => screen.w(l)));
 eq(artWidths.size, 1, `every art row is the same display width (got ${[...artWidths].join('/')})`);
-// Both ink halves are used: mascot gold + whale blue/lavender/dim.
-assert(banner.some((l) => l.includes(theme.C.gold)) && banner.some((l) => l.includes(theme.C.lavender)), 'the mark is two-tone (gold mascot, whale ink)');
+// One ink: the wordmark is gold, exactly as the desktop inks it. The old
+// composition was two-tone (gold mascot, lavender whale ink); if a second hue
+// reappears in the mark rows, art.js has drifted back to a composition.
+const artPaint = banner.filter((l) => /[╔╗╚╝╠╣╦╩║═]/.test(stripAnsi(l)));
+assert(artPaint.length >= 3, 'the mark rows must be painted, not plain');
+assert(artPaint.every((l) => l.includes(theme.C.gold)), 'the mark is drawn in the gold token');
+assert(!artPaint.some((l) => l.includes(theme.C.lavender)), 'the mark is one ink: no second hue');
 // Title + version line.
 assert(bannerPlain.some((l) => l.includes('Welcome to AEGIS Code')), 'the banner shows the welcome title');
 assert(bannerPlain.some((l) => l.includes('v0.1.0')), 'the banner states the version');
@@ -244,4 +251,4 @@ assert(toolOut.every((l) => screen.w(l) <= 60), 'tool output respects the width'
 console.log('CLI render test passed');
 console.log('  accounting: 1,562 tok · 1,250/312 · €0.0007 · grouped + 4dp verified');
 console.log(`  glyphs: prompt ${theme.GLYPH.cursor} · hook ${theme.GLYPH.hook} · done ${theme.GLYPH.bloom}`);
-console.log('  banner: gold ━ rule at full width, two-tone art rows equal width, coral title');
+console.log('  banner: gold ━ rule at full width, wordmark rows equal width, coral title');

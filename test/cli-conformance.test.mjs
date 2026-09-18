@@ -155,50 +155,69 @@ assert(same(theme.DONE_VERBS, ['Churned', 'Worked']),
   'the completion verbs must be Churned (chat) and Worked (tools used)');
 
 // ── 4. The welcome art ───────────────────────────────────────────────────────
-// The mascot face, verbatim from the binary (msS template) and from
-// aegiscodex-dev/src/art.js.
-assert(same(art.FACE, [' ▐▛███▜▌', '▝▜█████▛▘', '  ▘▘ ▝▝']),
-  `the mascot face rows must match the extracted art, got ${JSON.stringify(art.FACE)}`);
-assert(art.MOON.length === 7, `MOON must be 7 rows, got ${art.MOON.length}`);
-assert(art.WHALE.length === 8, `WHALE must be 8 rows, got ${art.WHALE.length}`);
-assert(art.MOON.some((r) => r.includes('▓▓▓')), 'the moon must be drawn with the lit-rim shade');
-assert(art.WHALE.some((r) => r.includes('██')), 'the whale must carry its eye');
+// The mark is the ÆGIS wordmark, adopted verbatim from the sibling project's
+// `src/ui/components/layout/WelcomeMessage.tsx` (which `assets/demo.svg`, the
+// canonical rendering, is kept in sync with). It REPLACED the Claude-binary
+// composition — mascot face, crescent moon, diving whale — so the literals
+// below are the guard that the CLI and the desktop keep drawing one welcome
+// screen. An earlier revision composed the right half from WHALE alone and
+// silently dropped the moon from the banner; inlining the whole mark here is
+// what makes that class of drift fail the build instead of shipping.
+const MARK = [
+  '╔═╗╔═╗╔═╗╦╔═╗',
+  '╠═╣║╣ ║ ╦║╚═╗',
+  '╩ ╩╚═╝╚═╝╩╚═╝',
+];
+assert(same(art.WELCOME_MARK, MARK),
+  `the welcome mark must match the aegiscodex- wordmark, got ${JSON.stringify(art.WELCOME_MARK)}`);
+assert(same(art.WELCOME_ART, MARK), 'WELCOME_ART must BE the wordmark, not a composition built from it');
+assert(same(art.WELCOME_ART_STACKED, MARK),
+  'WELCOME_ART_STACKED must still resolve to the mark — the capability matrix enumerates both names');
+// 3 rows x 13 cells. The size is load-bearing: the banner centres the mark with
+// it, and the desktop draws it at this size.
+assert(MARK.length === 3, `the mark must be 3 rows, got ${MARK.length}`);
+assert(MARK.every((r) => cellWidth(r) === 13),
+  `every mark row must be 13 cells, got ${MARK.map(cellWidth).join('/')}`);
 
-// Every row of a composition must be the same width, or centring drifts.
+// The old composition must be GONE, not merely unreferenced: a lingering export
+// keeps the dead art reachable from any consumer and from the next reader.
+for (const dead of ['FACE', 'MOON', 'WHALE', 'MOON_WHALE', 'MASCOT_ART']) {
+  assert(art[dead] === undefined, `art.${dead} must no longer be exported (the mark is the wordmark now)`);
+}
+
+// Every row of the mark must be the same width, or centring drifts.
 const uniform = (rows, name) => {
   const widths = new Set(rows.map(cellWidth));
   assert(widths.size === 1, `${name}: every row must be the same width, got ${[...widths].join('/')}`);
 };
 uniform(art.WELCOME_ART, 'WELCOME_ART');
-uniform(art.MOON_WHALE, 'MOON_WHALE');
-// stackVertical() centres each row without right-filling (as the reference
-// does), so the stacked mark is only uniform once center() pads it to a width.
-const stackedMax = Math.max(...art.WELCOME_ART_STACKED.map(cellWidth));
-uniform(art.center(art.WELCOME_ART_STACKED, stackedMax), 'center(WELCOME_ART_STACKED)');
-assert(art.WELCOME_ART_STACKED.some((r) => r.includes('▐▛███▜▌')), 'the stacked mark must keep the mascot');
-assert(art.WELCOME_ART_STACKED.some((r) => r.includes('▒▒▒')), 'the stacked mark must keep the whale');
+uniform(art.WELCOME_ART_STACKED, 'WELCOME_ART_STACKED');
+uniform(art.center(art.WELCOME_ART_STACKED, 13), 'center(WELCOME_ART_STACKED)');
 
-// The wide mark is the mascot + (moon + whale). The crescent must actually be
-// there: an earlier revision of welcomeArtParts() composed the right half from
-// WHALE alone and silently dropped the moon from the banner.
-const wide = art.WELCOME_ART;
-assert(wide.some((r) => r.includes('▓▓▓')), 'the wide welcome mark must include the crescent moon');
-assert(wide.some((r) => r.includes('▒▒▒')), 'the wide welcome mark must include the whale body');
-assert(wide.some((r) => r.includes('▐▛███▜▌')), 'the wide welcome mark must include the mascot face');
+// The wordmark is drawn in box runes, so a stencil edit that dropped ╔ or ╦
+// would erase the product name rather than mis-shade it.
+assert(art.WELCOME_ART.some((r) => r.includes('╔═╗')), 'the mark must carry the Æ cap runes');
+assert(art.WELCOME_ART.some((r) => r.includes('╦')), 'the mark must carry the Æ crossbar');
 
-// welcomeArtParts() is what the banner actually draws, so it must carry the
-// moon too — this is the regression guard for the bug above.
-const parts = art.welcomeArtParts(120);
+// welcomeArtParts() is what the banner actually draws, so it must carry the mark.
+const parts = art.welcomeArtParts();
 uniform(parts.rows.map(([l, r]) => l + ' '.repeat(parts.gutter) + r), 'welcomeArtParts rows');
-const rightHalf = parts.rows.map(([, r]) => r).join('\n');
 const leftHalf = parts.rows.map(([l]) => l).join('\n');
-assert(rightHalf.includes('▓▓▓'), 'the right half of the banner mark must contain the moon');
-assert(rightHalf.includes('▒▒▒'), 'the right half of the banner mark must contain the whale');
-assert(leftHalf.includes('▐▛███▜▌'), 'the left half of the banner mark must contain the mascot');
+const rightHalf = parts.rows.map(([, r]) => r).join('');
+assert(leftHalf.includes('╔═╗'), 'the left half of the banner mark must carry the wordmark');
+// The right half is empty by design — the mark is drawn in ONE ink (gold), the
+// same `theme.colors.primary` the desktop uses. Asserted rather than assumed so
+// that a future two-tone mark has to come here and update `width` with it.
+assert(rightHalf === '', `the mark draws nothing in its right half, got ${JSON.stringify(rightHalf)}`);
 assert(parts.width === cellWidth(parts.rows[0][0]) + parts.gutter + cellWidth(parts.rows[0][1]),
   'welcomeArtParts width must equal left + gutter + right');
-const narrow = art.welcomeArtParts(24);
-assert(narrow.rows.some(([l]) => l.includes('▐▛███▜▌')), 'the narrow mark must still contain the mascot');
+assert(parts.width === 13, `the mark must report 13 cells, got ${parts.width}`);
+// The width argument went with the wide/narrow split — 13 cells fits anywhere
+// the banner's own frame fits. Passing one anyway must not change the answer,
+// or a call site that still passes `cols` would keep looking correct while the
+// branch quietly came back.
+assert(same(art.welcomeArtParts(24), parts),
+  'welcomeArtParts must ignore a width argument: there is no narrow mark any more');
 
 // center() keeps every row aligned and actually offsets the art.
 const centered = art.center(art.WELCOME_ART, 100);
@@ -236,9 +255,13 @@ assert(sources.render.includes('stencilGlyph'),
 // Terminal / zsh host, a font stack with no box-drawing, and a legacy console.
 {
   const INK = { blue: '\x1b[34m', lavender: '\x1b[35m', dim: '\x1b[2m', white: '\x1b[37m', gold: '\x1b[33m' };
-  // Only the WHALE half is tinted per shade; artRow paints the mascot half solid
-  // gold, so a mascot outline rune like ▐ needs no entry in the ink map. Testing
-  // the whole mark would therefore demand ink for runes that are never tinted.
+  // The mark is now drawn in ONE ink, so `tintWhale` no longer sees it, and the
+  // old version of this block — "the whale half must ink every rune it draws" —
+  // would pass vacuously on an empty half. What is still worth guarding is the
+  // bug that block was written for: the ink map must be keyed by the rune the
+  // terminal ACTUALLY RENDERS. A raw-rune table matched nothing once the row had
+  // been stencilled, and the two-tone half went uncoloured on win32/darwin while
+  // looking perfect on Linux. So the shades are stencilled first, then offered.
   const capsMod = require(join(cliDir, 'src', 'caps.js'));
   const realCaps = capsMod.caps();
   const CLASSES = [
@@ -246,19 +269,28 @@ assert(sources.render.includes('stencilGlyph'),
     ['edges', { glyphs: 'unicode', face: 'edges', star: 'native' }], // no box-drawing in the font
     ['ascii', { glyphs: 'ascii', face: 'edges', star: 'narrow' }], // legacy console
   ];
+  // The runes the ink map names, paired with the ink it names for them.
+  //
+  // Deliberately NOT asserted as a rune-level round trip: the ASCII pass maps
+  // both ░ and · onto '.', so two shades become one rune and a "did you ink the
+  // rune you drew" test would be asking a question with no answer. The property
+  // that survives the collision is the one worth pinning — every rune that is
+  // drawn comes out of tintWhale in a span, in order, and carrying the style the
+  // table named for the shade it came from.
+  const SHADES = [
+    ['▓', INK.blue], ['▒', INK.lavender], ['░', INK.dim],
+    ['█', INK.white], [art.STAR, INK.gold], ['·', INK.dim],
+  ];
   try {
     for (const [name, patch] of CLASSES) {
       capsMod.setCaps(patch);
-      const parts = art.welcomeArtParts(100);
-      const whale = parts.rows.map((r) => r[1] || '').join('');
-      const runes = [...new Set(whale.split(''))].filter((c) => c !== ' ');
-      assert(runes.length > 0, `the ${name} whale must draw something`);
-      const inked = new Set(
-        rend.tintWhale(runes.join(''), INK).filter((s) => s.s).map((s) => s.t),
-      );
-      for (const rune of runes) {
-        assert(inked.has(rune), `the ${name} whale must ink its '${rune}' shade`);
-      }
+      const drawn = SHADES.map(([rune]) => art.stencilGlyph(rune)).join('');
+      const spans = rend.tintWhale(drawn, INK);
+      assert(spans.map((s) => s.t).join('') === drawn,
+        `the ${name} ink map must emit every rune it is given, got ${spans.map((s) => s.t).join('')}`);
+      assert(spans.every((s) => s.s), `no rune may fall through ${name} uncoloured`);
+      assert(same(spans.map((s) => s.s), SHADES.map(([, ink]) => ink)),
+        `the ${name} ink map must key the runes AS DRAWN (${drawn}), in the table's order`);
     }
   } finally {
     capsMod.setCaps(realCaps);
@@ -333,5 +365,5 @@ assert(stripCode(sources.app).includes('GLYPH.hook'), 'the one-shot meta line mu
 console.log('CLI conformance test passed');
 console.log(`  palette: ${Object.keys(theme.C).length} roles, every RGB identical to aegiscodex-dev`);
 console.log(`  glyphs:  cursor ${theme.GLYPH.cursor} · hook ${theme.GLYPH.hook} · bloom ${theme.GLYPH.bloom} · ${theme.GLYPH.spin.length}-frame spin`);
-console.log(`  art:     mascot + crescent + whale — wide ${cellWidth(wide[0])} cells, moon present in both halves' routing`);
+console.log(`  art:     the aegiscodex- wordmark — ${MARK.length} rows × ${cellWidth(MARK[0])} cells, one gold ink`);
 console.log(`  verbs:   ${theme.VERBS.length} working verbs, ${theme.DONE_VERBS.join('/')} on completion`);

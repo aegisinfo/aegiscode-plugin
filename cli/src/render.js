@@ -4,8 +4,8 @@
  * The CLI's renderers — the start-up banner, transcript turns, the per-turn
  * accounting line, the status bar, the live working line and the transcript's
  * markdown body. The presentation layer is a fidelity port of
- * `aegiscodex-dev`: gold `━`/`─` rules, the two-tone welcome mark (gold mascot,
- * blue/lavender/dim whale), the coral-bold welcome title, the `❯` prompt, the
+ * `aegiscodex-dev`: gold `━`/`─` rules, the one-ink ÆGIS wordmark (box runes,
+ * in gold), the coral-bold welcome title, the `❯` prompt, the
  * `⎿` hook rows, the `●` answer/stream cursor and the `✻` done glyph.
  *
  * Every function returns lines (strings carrying SGR escapes) rather than
@@ -97,7 +97,8 @@ function tintWhale(str, t) {
   return spans;
 }
 
-/** One centred welcome-art row: gold mascot on the left, tinted whale right. */
+/** One centred welcome-art row: the gold wordmark on the left, and (when a
+ *  two-tone mark returns) the tinted right half. */
 function artRow(ctx, row, parts, leftPad) {
   const t = themeOf(ctx);
   const left = row[0] || '';
@@ -120,10 +121,10 @@ function artRow(ctx, row, parts, leftPad) {
 }
 
 /**
- * The start-up banner, matching aegiscodex-dev's welcome legs: a gold `━`+`─`
- * rule across the full terminal, the centred welcome mark (mascot half gold,
- * moon/whale half blue/lavender/dim), the coral-bold welcome title and a
- * version line, then the compact identity block.
+ * The start-up banner: a gold `━`+`─` rule across the full terminal, the
+ * centred welcome mark (the ÆGIS wordmark, in gold — the same mark and the same
+ * ink the desktop app draws), the coral-bold welcome title and a version line,
+ * then the compact identity block.
  */
 function renderBanner(ctx, info = {}) {
   const t = themeOf(ctx);
@@ -138,7 +139,7 @@ function renderBanner(ctx, info = {}) {
   );
   lines.push('');
 
-  const parts = welcomeArtParts(width);
+  const parts = welcomeArtParts();
   if (width >= parts.width + 2) {
     const leftPad = Math.max(0, Math.floor((width - parts.width) / 2));
     for (const row of parts.rows) lines.push(artRow(ctx, row, parts, leftPad));

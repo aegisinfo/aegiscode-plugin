@@ -18,98 +18,75 @@ function capsOf(target) {
 }
 
 /**
- * Welcome art — the aegiscodex-dev mark, adopted wholesale.
+ * Welcome art — the ÆGIS wordmark, adopted verbatim from `aegiscodex-`.
  *
- * The composition is copied from `aegiscodex-dev/src/art.js`, which took the
- * glyph rows from the shipped Claude Code binary: a feather plume (░), a top hat
- * (█ ▓ ▒), the spark face (▐▛███▜▌ / ▝▜█████▛▘ / ▘▘ ▝▝), plus a crescent moon and
- * a diving whale for the second brain. Side-by-side when the terminal is wide
- * enough, stacked when it isn't.
+ * This is the mark the rest of the family already draws: the wordmark block in
+ * `aegiscodex-/src/ui/components/layout/WelcomeMessage.tsx`, which is kept in
+ * sync with `aegiscodex-/assets/demo.svg`, the canonical rendering. The CLI now
+ * shows the same welcome screen as the desktop host instead of its own art.
  *
- * Every row of a block is the same display width, so `center()` and
- * `joinSideBySide()` stay exact. `test/cli-conformance.test.mjs` asserts both
- * that property and that these rows still match aegiscodex-dev's source, so the
- * mark can't drift.
+ * It REPLACES the earlier Claude-binary composition (feather plume, top hat,
+ * ▐▛███▜▌ face, crescent moon, diving whale). That mark was three blocks joined
+ * side by side, which is why this file carried a stacking path, a `✦` star pass
+ * and a two-ink split; a single 13-cell block needs none of them, so the banner
+ * draws it in one ink — gold — exactly as `theme.colors.primary` inks it in the
+ * desktop, and the wide/narrow branch in both consumers now always takes the
+ * wide path.
  *
- * Which pass is applied is decided by the terminal's capabilities, not by
- * `process.platform` — see the portability section below and `caps.js`.
+ * Every row is the same display width with no trailing blank, so `center()` and
+ * `padCells()` stay exact. `test/cli-conformance.test.mjs` pins these rows to
+ * the literals they were lifted from, so the mark cannot drift from aegiscodex-.
+ *
+ * Which stencil pass is applied is decided by the terminal's capabilities, not
+ * by `process.platform` — see the portability section below and `caps.js`.
  */
 
-// The mascot face — exact glyphs from the binary (msS template).
-const FACE = [' ▐▛███▜▌', '▝▜█████▛▘', '  ▘▘ ▝▝'];
-
-// Top hat + feather plume, composed from the extracted row glyphs.
-const HAT = [
-  '  ✦         ░░░░░░░░░░      ✦',
-  '           ░░░░░░░░░░░░░░░░',
-  '                 █████▓▓░',
-  '                 ███▓░',
-  '                 ███▓░',
-  '                 ███▓░',
-  '               ░▓▓███▓▓░',
-  '          ▒▒░░▒▒     ▒ ▒▒',
+// The ÆGIS wordmark: 3 rows × 13 cells, uniform. Row 1 is the cap line, row 2
+// carries the Æ crossbar (╦) and the G/S shoulders, row 3 the baseline.
+//
+// Deliberately not named after the old spaced `'A E G I S'` string: that
+// export was removed and `cli-conformance.test.mjs` fails the build if its name
+// reappears in this file's exports. The guard is about that string, not this
+// block, so the block takes a name of its own rather than the guard being
+// loosened to accommodate it.
+const WELCOME_MARK = [
+  '╔═╗╔═╗╔═╗╦╔═╗',
+  '╠═╣║╣ ║ ╦║╚═╗',
+  '╩ ╩╚═╝╚═╝╩╚═╝',
 ];
 
-// Plume + hat + face: the left half of the welcome mark.
-const MASCOT_ART = [
-  '        ✦               █████▓▓░',
-  '             ✦        ███▓░     ░░',
-  '         ░░░░         ███▓░',
-  '       ░░░░░░░░       ███▓░',
-  '     ░░░░░░░░░░░░     ███▓░',
-  '              ██▓░░      ▓',
-  '              ░▓▓███▓▓░',
-  ...FACE,
-];
+/** The welcome mark: the wordmark, with nothing drawn beside it. */
+const WELCOME_ART = WELCOME_MARK;
 
-// Crescent moon in a starry night sky — lit rim (▓) with a faint earthshine
-// body (░). Rows are equal code-point length (13).
-const MOON = [
-  '  ✦   ▓▓▓  ✦ ',
-  '    ▓▓▓▓▓   ✦',
-  '  ▓▓▓▓▓▓▓▓▓ ✦',
-  '  ▓▓▓▓▓▓▓░░░ ',
-  '  ▓▓▓▓░░░░░░ ',
-  '    ░░░░░░   ',
-  '  ✦   ·   ·  ',
-];
-
-// The diving whale: spout (░), eye (██) on the rounded head, body (▒) sweeping
-// right to a small forked fluke (▓), water line (░) beneath. Rows are equal
-// code-point length (18).
-const WHALE = [
-  '   ✦   ░ ░ ░      ',
-  '    ✦ ░░░░░       ',
-  '     ▒▒▒▒▒▒▒▒▒▒▒▒ ',
-  '    ▒▒▒▒▒▒▒▒▒▒▒▒▒ ',
-  '  ██▒▒▒▒▒▒▒▒▒▒▒▒▓▓',
-  '  ██▒▒▒▒▒▒▒▒▒▒▒▒▓ ',
-  '   ▒▒▒▒▒▒▒▒▒▒▒▒▒▒ ',
-  '    ░░░░░░░░░░░░  ',
-];
-
-// Moon above the whale — the right half of the mark, 2-col gutter. The moon is
-// padded with a trailing blank row so joinSideBySide keeps both blocks aligned.
-const MOON_WHALE = joinSideBySide([...MOON, ''], WHALE, 2);
-
-/** Full welcome mark: mascot + (moon + whale) side by side, bottom-aligned. */
-const WELCOME_ART = joinSideBySide(MASCOT_ART, MOON_WHALE, 2);
-
-/** Narrow-terminal fallback: mascot stacked above (moon + whale). */
-const WELCOME_ART_STACKED = stackVertical(MASCOT_ART, MOON_WHALE, 1);
+/**
+ * There is no stacked variant any more: the mark is 13 cells, so it fits any
+ * terminal that can draw the banner's own frame. Kept as an alias rather than
+ * deleted because `welcomeArtFor()` and the capability matrix enumerate both
+ * names, and a second constant that happens to equal the first is cheaper than
+ * a branch in two consumers.
+ */
+const WELCOME_ART_STACKED = WELCOME_MARK;
 
 /** Welcome copy, in aegiscode-dev's frame: coral title over the mark. */
 const WELCOME_TITLE = 'Welcome to AEGIS Code';
 const WELCOME_BACK = 'Welcome back!';
-const TAGLINE = 'Cloud brain in your shell.';
+// One owner for the tagline: `render.js` joins it into the banner's version
+// line and `screens.js` centres it on the welcome screen. It used to be written
+// out twice — once here, once inline in `screens.js` — so a copy change landed
+// in one place and left the other stale.
+const TAGLINE = 'Your intent, AI automated.';
+// For terminals too narrow for the full line. `centered()` clips rather than
+// wraps, and a truncated tagline reads as a rendering fault, so this is a real
+// fallback and not a stylistic variant.
+const TAGLINE_SHORT = 'Your intent, automated.';
 
 // ── Terminal portability ─────────────────────────────────────────────────────
-// The block-glyph palette and ✦ stars are single-width on most terminals, but
-// not everywhere: a legacy Windows console font lacks the U+259B..U+259F face
-// edges and mangles █▓▒░ entirely; Terminal.app has no quartile edges and
-// renders ✦ through the two-cell emoji fallback. Each pass swaps offending code
-// points 1:1 (same character count per row) so the width maths stays exact and
-// the mark keeps its shape.
+// The wordmark is drawn with U+2550 box-drawing runes. Those are single-width on
+// most terminals, but not everywhere: a legacy Windows console font has no
+// box-drawing block at all, Terminal.app's fallback font renders the quarters
+// (▐▛▜▌▝▘) wrong and ✦ through the two-cell emoji fallback. Each pass swaps
+// offending code points 1:1 (same character count per row) so the width maths
+// stays exact and the mark keeps its shape.
 //
 // The pass is keyed on the terminal's CAPABILITIES (`caps.js`), never on
 // `process.platform`. That distinction is the whole point: PowerShell inside
@@ -127,11 +104,31 @@ const TAGLINE = 'Cloud brain in your shell.';
 // untinted on Windows. `test/cli-terminal-caps.test.mjs` pins all of it.
 const STAR = '✦';
 
-/** The quartile/quadrant face edges — the runes Apple and older Windows fonts lack. */
+/** The quartile/quadrant face edges. The wordmark no longer draws them, but the
+ *  `face` capability still resolves through this list, so the pass stays. */
 const EDGE_RUNES = ['▐', '▛', '▜', '▌', '▝', '▘'];
 
-/** Full ASCII pass: the block palette, the face edges, the star, the mid-dot. */
+/**
+ * The box-drawing runes the wordmark is made of. A legacy console has none of
+ * them, and without a mapping the mark would be drawn in a font that has no
+ * glyphs for it — boxes of tofu where the product name should be.
+ *
+ * Every corner, tee and cross becomes `+` (the classic ASCII box) and the two
+ * straight strokes keep their meaning as `-` and `|`, so the stencilled mark is
+ * still legible as ÆGIS rather than as a row of plusses. Ten runes, ten 1:1
+ * swaps: the mark stays 13 cells wide and 3 rows tall on every terminal.
+ */
+const BOX_RUNES = ['╔', '╗', '╚', '╝', '╠', '╣', '╦', '╩', '║', '═'];
+const BOX_STENCIL = new Map([
+  ...['╔', '╗', '╚', '╝', '╠', '╣', '╦', '╩'].map((c) => [c, '+']),
+  ['═', '-'],
+  ['║', '|'],
+]);
+
+/** Full ASCII pass: the wordmark's box runes, the block palette, the face
+ *  edges, the star, the mid-dot. */
 const ASCII_STENCIL = new Map([
+  ...BOX_STENCIL,
   ['█', '#'],
   ['▓', '@'],
   ['▒', '='],
@@ -212,84 +209,33 @@ function portability(rows) {
   return portabilityFor(rows, null);
 }
 
-/** The mark that fits the current terminal: side-by-side when there's room. */
-function welcomeArtFor(cols) {
-  const wide = portability(WELCOME_ART);
-  const stacked = portability(WELCOME_ART_STACKED);
-  const W = Math.max(...wide.map(cells));
-  return cols >= W + 4 ? wide : stacked;
+/** The welcome mark, as this terminal will render it. */
+function welcomeArtFor() {
+  return portability(WELCOME_ART);
 }
 
 /**
- * Split the mark into its two halves so each can carry its own theme ink.
+ * The mark, ready for the banner: one row per output row, each as a
+ * `[left, right]` pair so the two consumers' ink split keeps working.
  *
- * Rows are padded to a whole-cell width with `padCells()`, not `padEnd()`: a
- * terminal that draws a rune two cells wide (`AEGIS_WIDE_RUNES=✦`, or a font
- * that falls back to an emoji glyph) would otherwise be padded by *code point*
- * and every row after it would drift one cell to the right of the one above.
+ * The right half is always empty now. The pair shape is kept because
+ * `render.js`'s `artRow()` is built around it — `left` is painted gold, `right`
+ * per-shade — and collapsing it would mean a second, cosmetic signature for the
+ * same data. A future two-tone mark drops straight back into the right slot.
+ *
+ * The width argument the consumers used to pass is gone with the wide/narrow
+ * split: 13 cells fits everywhere the banner itself fits, so there is nothing
+ * left for the terminal's column count to decide.
  *
  * @returns {{rows: Array<[string,string]>, width: number, gutter: number}}
  */
-function welcomeArtParts(cols) {
-  const mascot = portability(MASCOT_ART);
-  const moonWhale = portability(MOON_WHALE);
-  const L = Math.max(...mascot.map(cells));
-  const R = Math.max(...moonWhale.map(cells));
-  const wide = cols >= L + R + 2 + 4;
-  const gutter = wide ? 2 : 1;
-  if (wide) {
-    // The right half carries the moon *and* the whale. Using WHALE alone here —
-    // which the reference does, because it only wants the per-mascot ink split —
-    // would silently drop the crescent from the welcome screen this CLI renders.
-    const n = Math.max(mascot.length, moonWhale.length);
-    const rows = [];
-    for (let i = 0; i < n; i++) {
-      // Same bottom-align rule as joinSideBySide — subtract the offset.
-      const li = i - (n - mascot.length);
-      const ri = i - (n - moonWhale.length);
-      rows.push([padCells(mascot[li] ?? '', L), padCells(moonWhale[ri] ?? '', R)]);
-    }
-    return { rows, width: L + gutter + R, gutter };
-  }
-  const w = Math.max(L, R);
-  const centerBlock = (rows) => rows.map((r) => ' '.repeat(Math.max(0, Math.floor((w - cells(r)) / 2))) + r);
+function welcomeArtParts() {
+  const rows = portability(WELCOME_MARK);
   return {
-    rows: [
-      ...centerBlock(mascot).map((c) => [c, '']),
-      ['', ''],
-      ...centerBlock(moonWhale).map((r) => ['', r]),
-    ],
-    width: w,
-    gutter,
+    rows: rows.map((r) => [r, '']),
+    width: Math.max(...rows.map(cells)),
+    gutter: 0,
   };
-}
-
-/** Stack two art blocks vertically, each centred, separated by `gap` rows. */
-function stackVertical(top, bottom, gap = 1) {
-  const w = Math.max(...[...top, ...bottom].map(cells));
-  const centerBlock = (rows) =>
-    rows.map((r) => ' '.repeat(Math.max(0, Math.floor((w - cells(r)) / 2))) + r);
-  return [...centerBlock(top), ...Array(gap).fill(''), ...centerBlock(bottom)];
-}
-
-/** Join two art stacks row-aligned (bottom-aligned by default). */
-function joinSideBySide(left, right, gutter = 2, align = 'bottom') {
-  const L = Math.max(...left.map(cells));
-  const R = Math.max(...right.map(cells));
-  const n = Math.max(left.length, right.length);
-  return Array.from({ length: n }, (_, i) => {
-    // Bottom-align puts each block's LAST row on the output's last row, so a
-    // shorter block starts lower and its index runs *behind* the output index.
-    // Adding the offset instead of subtracting it pushed the shorter block off
-    // the bottom edge and silently dropped its top rows: the moon+whale half,
-    // two rows shorter than the mascot, lost its spout and its top star and
-    // hung two rows below the baseline.
-    const li = align === 'bottom' ? i - (n - left.length) : i;
-    const ri = align === 'bottom' ? i - (n - right.length) : i;
-    const l = padCells(left[li] ?? '', L);
-    const r = padCells(right[ri] ?? '', R);
-    return l + ' '.repeat(gutter) + r;
-  });
 }
 
 /** Centre every row of an art block inside `width` (left pad + right fill). */
@@ -310,19 +256,16 @@ function padBoth(rows, width) {
 }
 
 module.exports = {
-  FACE,
-  HAT,
-  MASCOT_ART,
-  MOON,
-  WHALE,
-  MOON_WHALE,
+  WELCOME_MARK,
   WELCOME_ART,
   WELCOME_ART_STACKED,
   WELCOME_TITLE,
   WELCOME_BACK,
   TAGLINE,
+  TAGLINE_SHORT,
   STAR,
   EDGE_RUNES,
+  BOX_RUNES,
   PASSES,
   STENCILS,
   stencilFor,
@@ -331,8 +274,6 @@ module.exports = {
   portabilityFor,
   welcomeArtFor,
   welcomeArtParts,
-  stackVertical,
-  joinSideBySide,
   center,
   padBoth,
 };

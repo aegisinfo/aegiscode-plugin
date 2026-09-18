@@ -32,7 +32,7 @@ const { getSize, paint, span, lineWidth, clip, w } = require('./screen.js');
 const events = require('./events.js');
 const { nextKey, KEY } = events;
 const { C, BOLD, BOLD_OFF, GLYPH, THEME_TABLE, themeOf } = require('./theme.js');
-const { welcomeArtParts } = require('./art.js');
+const { TAGLINE, TAGLINE_SHORT, welcomeArtParts } = require('./art.js');
 const { renderDiffPreview } = require('./markdown.js');
 const render = require('./render.js');
 const { updateConfig, configExists, loadConfig } = require('./config.js');
@@ -52,14 +52,30 @@ const TIPS = [
   ' Press ? for shortcuts',
 ];
 
+/**
+ * The `What's new` box — newest release first, two rows per release, **eight
+ * rows in total**. The row count is load-bearing, not cosmetic: at 80×24 the
+ * welcome screen already fills exactly `rows - 1`, so a ninth row pushes the
+ * footer hint off the bottom of the commonest terminal there is. Retire the
+ * oldest entry rather than adding one.
+ *
+ * This block went four minor versions stale (it still topped out at v6.3.0
+ * while the package shipped 6.7.3) because nothing held it to anything. Two
+ * things do now: the box header names `VERSION`, so the screen always says
+ * which build is running, and every `/command` named below is asserted to
+ * exist in the registry by `test/cli-onboarding.test.mjs`. The prose stays
+ * hand-written — a changelog is prose — but it can no longer advertise a
+ * command that was renamed away, and it cannot claim to be news for a release
+ * the user is not running.
+ */
 const WHATS_NEW = [
-  ' v6.3.0: onboarding — trust check,',
-  '  theme picker and this welcome',
-  ' v6.1.0: the / palette, the full',
-  '  command registry, session',
-  '  persistence and auto-checkpoints',
-  ' v6.0.0: the aegiscodex-dev design',
-  '  system — palette, mark, verbs',
+  ' v6.7.x: caps read from the tty,',
+  '  edits render as diff blocks',
+  ' v6.6.0: autonomous mode — a',
+  '  persistent work queue',
+  ' v6.5.0: live tool rows, /cost',
+  '  from the ledger the pool set',
+  ' v6.4.0: `aegiscode login`',
   ' /release-notes for more',
 ];
 
@@ -240,11 +256,11 @@ async function showThemePicker(ctx, title = `Welcome to ${PRODUCT}`) {
 // ── welcome ──────────────────────────────────────────────────────────────────
 
 /**
- * The welcome screen's lines: gold rule, the two-tone mark, the coral title,
+ * The welcome screen's lines: gold rule, the wordmark, the coral title,
  * the two boxes, the footer hint. Pure, so a test can assert all of it.
  *
  * The mark reuses `render.artRow`, the same renderer the scrollback banner
- * uses, so the mascot cannot render two different ways in two places.
+ * uses, so the mark cannot render two different ways in two places.
  */
 function welcomeLines(ctx, cols, rows, firstRun = true) {
   const t = themeOf(ctx);
@@ -268,7 +284,7 @@ function welcomeLines(ctx, cols, rows, firstRun = true) {
     // An update notice is never worth failing a launch over.
   }
 
-  const parts = welcomeArtParts(cols);
+  const parts = welcomeArtParts();
   if (cols >= parts.width + 2) {
     const leftPad = Math.max(0, Math.floor((cols - parts.width) / 2));
     for (const row of parts.rows) {
@@ -286,11 +302,11 @@ function welcomeLines(ctx, cols, rows, firstRun = true) {
   const title = firstRun ? `Welcome to ${PRODUCT}` : 'Welcome back!';
   lines.push(centered(title, cols, t.coral + BOLD));
   // Shorten the subtitle rather than clipping it: a truncated tagline reads as
-  // a rendering fault, a shorter one just reads as a shorter one.
-  const tagline =
-    cols >= 40
-      ? 'Cloud brain in your shell — one account, three hosts.'
-      : 'Cloud brain in your shell.';
+  // a rendering fault, a shorter one just reads as a shorter one. The threshold
+  // is derived from the string's own width, not a fixed column count — the copy
+  // lives in `art.js` now, so a hardcoded breakpoint here would silently start
+  // clipping the moment the tagline grew by a word.
+  const tagline = cols >= w(TAGLINE) + 4 ? TAGLINE : TAGLINE_SHORT;
   lines.push(centered(tagline, cols, t.gray));
   lines.push([span('', '')]);
 
@@ -334,9 +350,15 @@ function boxes(t, cols, avail) {
   const twoUp = Math.floor((cols - gap) / 2);
   const tipRows = TIPS.map((s) => `${GLYPH.pointer}${s}`);
   const newsRows = WHATS_NEW;
+  // Name the running build in the header. `WHATS_NEW` is hand-written prose and
+  // will always lag the release it describes by however long it takes someone
+  // to remember; the header cannot, so the box is never *silently* stale — a
+  // user on a newer build reads "What's new in vX" over notes that end earlier
+  // and can see the gap for what it is.
+  const newsHead = `What's new in v${VERSION}`;
   if (twoUp >= 30) {
     let a = boxLines(t, 'Tips for getting started', tipRows, twoUp);
-    let b = boxLines(t, "What's new", newsRows, twoUp);
+    let b = boxLines(t, newsHead, newsRows, twoUp);
     // Equalise the heights so both bottom rules land on the same row — boxes of
     // different heights leave a ragged pair of corners otherwise.
     const h = Math.max(a.length, b.length);
@@ -358,7 +380,7 @@ function boxes(t, cols, avail) {
   }
   // Narrow: stack, so neither box is rendered at an unreadable width.
   const wd = Math.max(20, cols - 1);
-  return [...boxLines(t, 'Tips for getting started', tipRows, wd), ...boxLines(t, "What's new", newsRows, wd)];
+  return [...boxLines(t, 'Tips for getting started', tipRows, wd), ...boxLines(t, newsHead, newsRows, wd)];
 }
 
 /**

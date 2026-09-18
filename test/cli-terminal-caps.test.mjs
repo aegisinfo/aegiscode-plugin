@@ -104,9 +104,11 @@ test('the welcome screen is byte-identical on PowerShell-in-Windows-Terminal and
   const z = bannerFor(zsh());
   assert.equal(p.length, z.length, 'the two frames must have the same row count');
   assert.deepEqual(p, z, 'the PowerShell welcome screen must be the zsh welcome screen');
-  // …and it is the real mark, not a fallback that happens to match.
-  assert.ok(p.join('\n').includes('▐▛███▜▌'), 'the mascot face must be the native block palette');
-  assert.ok(p.join('\n').includes('✦'), 'the star must be native, not stencilled to *');
+  // …and it is the real mark, not a fallback that happens to match. The mark is
+  // the ÆGIS wordmark, so the runes that prove it is native are the box runes —
+  // the retired composition's mascot face (▐▛███▜▌) no longer appears at all.
+  assert.ok(p.join('\n').includes('╔═╗'), 'the Æ cap runes must be native on a VT host');
+  assert.ok(p.join('\n').includes('╦'), 'the Æ crossbar must be native, not stencilled to +');
   assert.ok(p.join('\n').includes('━'), 'the banner rule must be the heavy box rune');
   assert.ok(!p.join('\n').includes('#'), 'no cell of the ASCII pass may survive on a VT host');
 });
@@ -154,9 +156,12 @@ test('a legacy Windows console gets the full ASCII pass', () => {
   assert.equal(g.warn, '!');
   assert.equal(g.hook, '_|');
   assert.deepEqual(g.spin, ['|', '/', '-', '\\', '*', '-']);
-  // The frame is still a frame — the mark is stencilled, not dropped.
+  // The frame is still a frame — the mark is stencilled, not dropped. The
+  // wordmark is box-drawn, so the ASCII pass rewrites it to the classic `+`
+  // box; no box rune, block rune, face edge or star may reach the console.
   const frame = bannerFor(c).join('\n');
-  assert.ok(frame.includes('#'), 'the block palette must be stencilled');
+  assert.ok(frame.includes('+'), 'the box runes must be stencilled to the ASCII box');
+  assert.ok(!/[╔╗╚╝╠╣╦╩║═]/.test(frame), 'no box rune may reach a console that lacks them');
   assert.ok(!frame.includes('█'), 'no block rune may reach a console that lacks them');
   assert.ok(!frame.includes('▐'), 'no face-edge rune may survive the ASCII pass');
   assert.ok(!frame.includes('✦'), 'no star rune may survive the ASCII pass');
@@ -179,7 +184,9 @@ test('Apple Terminal keeps its edge pass, and only its edge pass', () => {
   assert.equal(c.star, 'narrow', 'Apple renders ✦ through the wide emoji fallback');
   const frame = bannerFor(c).join('\n');
   assert.ok(!frame.includes('▐'), 'the face edges must be stencilled');
-  assert.ok(frame.includes('█'), 'the block palette is native on Apple and must not be stencilled');
+  // Apple keeps the wordmark: the edge pass only rewrites ▐▛▜▌▝▘, and the mark is
+  // drawn in a different rune class entirely, so it must come through untouched.
+  assert.ok(frame.includes('╔═╗'), 'the wordmark is box-drawn, so the edge pass must leave it alone');
   assert.ok(!frame.includes('✦'), 'the star must be stencilled on Apple');
 });
 
@@ -198,7 +205,7 @@ test('the passes compose instead of being picked one-of-three', () => {
   // The ASCII pass subsumes every other pass — a terminal with no block glyphs
   // has no quartile edges and no ✦ either.
   const a = art.stencilFor(pwsh(LEGACY_ENV));
-  for (const rune of ['█', '▓', '▒', '░', ...art.EDGE_RUNES, '✦']) {
+  for (const rune of [...art.BOX_RUNES, '█', '▓', '▒', '░', ...art.EDGE_RUNES, '✦']) {
     assert.ok(a.has(rune), `the ASCII pass must cover ${rune}`);
   }
 
@@ -221,7 +228,11 @@ test('every pass is width-preserving: each rune swaps 1:1', () => {
         star: 'narrow',
       },
     }[name];
-    for (const block of [art.WELCOME_ART, art.WELCOME_ART_STACKED, art.FACE, art.MOON, art.WHALE, art.MOON_WHALE]) {
+    // Only the surviving blocks: WELCOME_ART and WELCOME_ART_STACKED are both
+    // the wordmark now. The old composition's parts (FACE/MOON/WHALE/MOON_WHALE)
+    // are deliberately unexported — cli-conformance.test.mjs asserts they are
+    // gone — so listing them here would throw on `block.length`, not test art.
+    for (const block of [art.WELCOME_ART, art.WELCOME_ART_STACKED]) {
       const ported = art.portabilityFor(block, target);
       assert.equal(ported.length, block.length, `${name}: row count`);
       ported.forEach((row, i) => {
