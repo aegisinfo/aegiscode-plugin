@@ -8,7 +8,7 @@
  * `sessions.json`, while the terminal host kept `~/.aegiscode/history.jsonl`
  * and the MCP plugin could see neither — three hosts, one account, three
  * disjoint views of the conversation. The implementation now lives in
- * `client/session-store.js`, which is the tree all three hosts already bundle,
+ * `client/session-store.js`, which is the tree every host already bundles,
  * and every call here forwards to it.
  *
  * Two things that matter are deliberately unchanged:

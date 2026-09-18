@@ -15,7 +15,7 @@ const { createClient } = require('../client/aegis.js');
 const credentials = require('../client/credentials.js');
 const { createTools } = require('./tools.js');
 
-// The account credential is resolved the same way in all three hosts: the
+// The account credential is resolved the same way in all four hosts: the
 // environment first, then the 0600 store the terminal host writes with
 // `aegiscode login` (or /key), then a legacy config.json. This host used to
 // read `AEGIS_API_KEY` from the environment alone, so a user who signed in from

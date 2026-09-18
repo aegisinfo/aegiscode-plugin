@@ -39,7 +39,7 @@ const { createClient } = sharedClient;
 // The shared credential store (`client/credentials.js`) — the same 0600 file
 // the terminal host writes with `aegiscode login` and the MCP plugin reads. The
 // app resolves its own account key through it, so signing in once serves all
-// three hosts; see resolveStartupKey() and persistApiKey() below.
+// four hosts; see resolveStartupKey() and persistApiKey() below.
 let credentials;
 try {
   credentials = require('../client/credentials.js');

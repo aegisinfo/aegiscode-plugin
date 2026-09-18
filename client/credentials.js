@@ -4,13 +4,13 @@
  * credentials.js — the ONE AEGIS account credential store, shared by every
  * host in this repo (terminal `aegiscode`, the MCP plugin, the desktop app).
  *
- * Why it lives in `client/`: this directory is the only tree all three hosts
- * already bundle. The MCP plugin ships `mcp/` + `client/` and nothing else, so
+ * Why it lives in `client/`: this directory is the only tree every host
+ * already bundles. The MCP plugin ships `mcp/` + `client/` and nothing else, so
  * a reader placed here needs no cross-package dependency — which is what the
  * alternative (the MCP host requiring `cli/src/credentials.js`) would have
  * forced, and why that host used to read `AEGIS_API_KEY` from the environment
- * alone while the CLI could save a key to disk. One login, one file, three
- * hosts: that is the point of this module.
+ * alone while the CLI could save a key to disk. One login, one file, all
+ * four hosts: that is the point of this module.
  *
  * Zero dependencies, no host imports. The data dir is resolved here
  * (`aegisHome()`) rather than imported from the CLI's config.js, so this file
