@@ -356,7 +356,10 @@ function createClient(opts = {}) {
    * Two credentials, two headers, on purpose: the provider key authenticates the
    * upstream call, the AEGIS key says whose bank pays the handling fee. With no
    * AEGIS key configured the header is omitted and the call stays anonymous —
-   * allowed, just unbilled (see _byok_identify_user on the server).
+   * the server accepts it but cannot bill it (see _byok_identify_user on the
+   * server), which is why the engine refuses a byok turn outright without one
+   * (desktop/lib/local/engine.js): sending this header is what turns a BYOK turn
+   * into billable traffic instead of a free ride.
    */
   async function byokChatCompletion({
     provider = 'openai',

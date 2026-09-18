@@ -124,8 +124,13 @@ function createSettingsStore({ dir, safeStorage } = {}) {
   function save(data) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const tmp = `${file}.tmp-${process.pid}`;
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+    // 0600, written before the rename so the file is never briefly readable:
+    // this store holds provider keys, and both hosts are now able to write it
+    // (the CLI uses the same file, without Electron's safeStorage, so at-rest
+    // base64 is all the protection there is — file mode is the real control).
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
     fs.renameSync(tmp, file);
+    try { fs.chmodSync(file, 0o600); } catch {}
   }
 
   /** Provider CRUD must never touch a reserved (AEGIS-key) namespace. */

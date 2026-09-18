@@ -60,6 +60,14 @@ const DEFAULT_CONFIG = {
   // chooses, and app.js's validatePinnedModel() clears a stored id the catalog
   // does not advertise.
   model: null,
+  // Which class turns run on: 'aegis' (the pool, authenticated and paid for by
+  // the account key) or 'byok' (the user's own provider key, relayed and billed
+  // a handling fee). Persisted so `/class byok` survives a restart — a class
+  // choice that silently reverted would send the next launch's turn somewhere
+  // the user did not choose, and on a BYOK setup there is no pooled key to fall
+  // back to. Defaulted to the pooled class, which is the only one an account
+  // key alone can run.
+  modelClass: 'aegis',
   // Phase 6: the full model table (seeded from src/models.js MODELS on first
   // read by pickerModels()). 'currentModelId' mirrors `model` under the
   // aegiscode- name so /model add/remove/switch stay compatible both ways.

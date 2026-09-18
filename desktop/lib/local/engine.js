@@ -714,14 +714,27 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
     if (cls === 'byok') {
       // The server's catalog names every provider it accepts a key for, the
       // models each unlocks, and whether an AEGIS account key is even needed
-      // to ask (it is not — see byokProviders' own docstring). Deliberately
-      // NOT gated on aegis.apiKey the way the pooled class above is: BYOK's
-      // whole point is a caller who brings their own credential, and the
-      // catalog itself answers to an anonymous request.
+      // to ask (it is not — the catalog answers an anonymous request).
+      // Deliberately NOT gated on aegis.apiKey the way the pooled class above
+      // is: BYOK's whole point is a caller who brings their own credential, and
+      // hiding the catalog would hide the answer to "which key do I go and get"
+      // from exactly the person deciding whether to bother. Nothing here
+      // enforces billing either: the desktop is one client of a route that is
+      // unauthenticated by design, so refusing in this process would stop
+      // exactly one host out of many. The relay owns that decision, and reports
+      // it via `fee.require_balance` below.
       let providers = [];
+      let fee = null;
       try {
         const data = await aegis.byokProviders();
         providers = (data && data.providers) || [];
+        // The handling fee AEGIS adds on top of the caller's vendor bill. It is
+        // the server's own published rate (services/pricing.price_byok_call) and
+        // is passed through untouched — never re-derived here, because a client
+        // that hardcodes a fee is a client that can disagree with the ledger.
+        // Absent until the server publishes one, and the UI must then say
+        // nothing rather than show a guess.
+        fee = (data && data.fee) || null;
       } catch {
         providers = [];
       }
@@ -744,6 +757,8 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
       return {
         class: cls, models, providers,
         needsProviderKey: models.length > 0 && !models.some((m) => m.configured),
+        needsAegisKey: !aegis.apiKey,
+        fee,
       };
     }
     // Custom endpoints: the model id is the *user's* choice — a provider model
@@ -1093,6 +1108,16 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
         err.status = 400;
         throw err;
       }
+      // …and the AEGIS account key is what makes the turn BILLABLE at all. The
+      // relay authenticates on the provider key and resolves the payer
+      // separately, from X-AEGIS-Key (app.py `_byok_identify_user`): with no
+      // account key the fee is logged against user 0 as uncollected, and with
+      // AEGIS_BYOK_REQUIRE_BALANCE off — the default — the turn is served
+      // anyway. That is the server's documented behaviour, so nothing is
+      // refused here: `listModels` reports the missing key as `needsAegisKey`
+      // and the settings UI says plainly where the fee lands, which is the part
+      // a client can do honestly. Enforcement lives in the relay's own gate,
+      // which every caller passes through.
 
       // Custom classes carry no enumerable model list (see listModels), so a
       // blank id here means the user never typed one. Fail loudly in-process

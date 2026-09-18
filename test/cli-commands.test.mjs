@@ -400,6 +400,10 @@ for (const name of ['compact', 'recap']) {
     const pushed = [];
     const ctx = {
       model: null,
+      // The class the next turn runs on. 'aegis' is the real default (app.js
+      // commandCtx), so a handler that branches on it takes the same branch
+      // here as it does on a fresh install.
+      modelClass: 'aegis',
       effort: 'high',
       thinking: false,
       themeIndex: 1,
@@ -428,6 +432,25 @@ for (const name of ['compact', 'recap']) {
       refreshSpend: async () => null,
       state: () => ({ version: '0.0.0', cwd: home, home, tokens: {}, permissions: { mode: 'ask', rules: {} } }),
       loadModels: async () => {},
+      // The class surface (app.js's makeCommandContext). /class, /models and
+      // /byok-key read all of these, so the stub must carry them for the same
+      // reason it carries keyStatus: a handler run with no arguments has to be
+      // able to reach everything the real context offers.
+      listModelsFor: async () => [],
+      switchClass: (cls) => ({ ok: true, class: cls, prev: 'aegis', cleared: null }),
+      classLabel: (cls) => String(cls || ''),
+      classes: () => [],
+      // The provider-key store: an in-memory stand-in for the real
+      // desktop/lib/settings.js rows, so /byok-key and /byok-rm-key exercise
+      // their own logic instead of throwing on a missing store.
+      settings: () => ({
+        rows: {},
+        set(provider, { key } = {}) { this.rows[provider] = { key }; return { provider, configured: Boolean(key) }; },
+        get(provider) { return { provider, configured: Boolean(this.rows[provider]) }; },
+        rawKey(provider) { return (this.rows[provider] && this.rows[provider].key) || null; },
+        remove(provider) { delete this.rows[provider]; },
+      }),
+      byokNamespace: (p) => `byok:${p}`,
       openStream: () => {},
       closeStream: () => {},
       setInput: () => {},

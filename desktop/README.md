@@ -5,14 +5,51 @@ with an **agentic tool loop**: the model can read, write, and edit files,
 list directories, glob, grep, run shell commands in a persistent session, and
 delegate whole sub-tasks to subagents. It does **not** require Claude Code.
 
+## Install
+
+Download a build from the
+[releases page](https://github.com/aegiscloud/aegiscode-desktop/releases), or
+install from npm:
+
 ```bash
-npm install -g aegis-desktop
-aegis
+npm install -g aegis-desktop     # requires Node 18+
+aegis                            # launch
 ```
+
+Either way, on first launch:
+
+1. Open **Settings** in the sidebar.
+2. Paste an AEGIS key into the **API key** row — get a free one at
+   <https://aegiscloud.org>. `AEGIS_API_KEY` is picked up from the environment
+   if you would rather not paste it.
+3. Pick a model class from the picker at the bottom of the composer.
+
+The published package is [`aegis-desktop`](https://www.npmjs.com/package/aegis-desktop)
+on npm; this repo is its source. No AEGIS account is needed for the Ollama or
+custom-endpoint classes.
+
+## Using it
+
+Everything is in the window — there is no slash-command line to learn. Plain
+text in the composer is a prompt.
+
+| Where | What it does |
+|---|---|
+| **Composer** | Type and press `Enter`. `Shift+Enter` for a newline. |
+| **Class picker** | Bottom of the composer — switches the route mid-conversation, context intact. |
+| **Model dropdown** | Next to it — pins a model id for the selected class, or leaves it on "server default (auto)". |
+| **Settings** (sidebar) | API key, provider keys, tool-confirmation toggle. |
+| **Queue card** (sidebar) | The unattended work queue — same file the CLI drains. |
+| **Quick Launcher card** | Enable/rebind the global hotkey. |
+| **remember** (on any reply) | Pin that message to cross-machine cloud memory. |
+
+Approval cards appear inline before `exec`, `writeFile` or `editFile` runs:
+**Allow once**, **Allow for this session**, or **Deny**. Turn them off entirely
+with **Settings → "Confirm before running tools"** — on by default.
 
 ## Model classes
 
-Pick any of four transports from the model-class picker, switchable
+Pick any of five transports from the model-class picker, switchable
 mid-conversation with context intact:
 
 | Class | Transport | Key held in |
@@ -21,10 +58,40 @@ mid-conversation with context intact:
 | **Ollama** | local `ollama` daemon | no key needed |
 | **Custom OpenAI-compatible** (LM Studio, OpenRouter, vLLM, …) | direct from the desktop app | main process — never sent to the renderer |
 | **Anthropic-compatible** (Claude, or any Messages-format gateway) | direct from the desktop app | main process |
+| **Bring your own key** | your provider key, relayed by AEGIS — see below | main process |
 
 Get a free AEGIS key at **https://aegiscloud.org**, or use your own
 Ollama/OpenAI-compatible/Anthropic-compatible endpoint — no AEGIS account
 needed for those.
+
+### Bring your own key (BYOK)
+
+For the providers AEGIS does **not** run in its pool — bring your own key and
+the models that key unlocks appear as their own entries, one per provider.
+
+1. **Settings** → find the row named `BYOK: <Provider>` (OpenAI, Anthropic,
+   DeepSeek, Groq, xAI, Mistral, Gemini, OpenRouter, …).
+2. Paste your provider key and **Save**. There is no base-URL field on these
+   rows: a BYOK turn always talks to AEGIS's own relay
+   (`/api/v1/byok/chat/completions`), which is what attaches your AEGIS key.
+3. Select the **Bring your own key** class and pick a model.
+
+**What it costs.** AEGIS pays your provider nothing on this lane, so there is no
+provider cost to take a margin on — instead your AEGIS account is charged a flat
+**handling fee** per 1k tokens, for the routing, prompt assembly, caching, tool
+bridging and uptime that still happen server-side. The rate is the server's own
+(published on `GET /api/v1/byok/providers`) and is shown in Settings directly
+under the provider rows; it is never hardcoded here, so it cannot drift from the
+ledger that bills you. It is deliberately below the pooled price for the same
+traffic — BYOK stays the cheaper lane, it just is not the free one.
+
+**Two keys are needed.** Your provider key *and* an AEGIS account key: the
+handling fee has to be billed somewhere. With no AEGIS key connected the class
+shows every model but says exactly that, rather than failing opaquely.
+
+Note that a **BYOK turn is single-shot** — the relay takes no `tools` parameter,
+so the agentic tool loop below is off for these models. Use a pooled or direct
+class when you want file and shell access.
 
 ## Tools available to the model
 
@@ -180,7 +247,16 @@ The app registers an `aegis://` protocol handler:
 ## Run from source
 
 ```bash
-cd desktop
+git clone https://github.com/aegiscloud/aegiscode-desktop.git
+cd aegiscode-desktop
+npm install
+npm start
+```
+
+Or, from the monorepo checkout, run this directory directly:
+
+```bash
+cd aegiscode-plugin/desktop
 npm install
 npm start
 ```
@@ -217,6 +293,14 @@ bin/aegis.js         `aegis` CLI entry point for the global npm install
 This directory is part of the [aegiscode-plugin](../README.md) monorepo,
 which also ships a Claude Code plugin and the shared `client/aegis.js`
 transport over the same AEGIS backend — see the repo root for that fuller
-architecture picture. A read-only mirror of just this directory (for
-browsing or `git clone`) lives at
-[aegiscloud/aegiscode-desktop](https://github.com/aegiscloud/aegiscode-desktop).
+architecture picture, and [cli/README.md](../cli/README.md) for the terminal
+host over the same engine.
+
+**Two repos, one product.** This directory is the source of truth. The
+standalone repo at
+[aegiscloud/aegiscode-desktop](https://github.com/aegiscloud/aegiscode-desktop)
+is a `git subtree split` of it — same code, published separately so it can be
+cloned and built on its own. Edits land here and are synced out; nothing is
+authored there. The npm package
+[`aegis-desktop`](https://www.npmjs.com/package/aegis-desktop) is built from
+that standalone repo.

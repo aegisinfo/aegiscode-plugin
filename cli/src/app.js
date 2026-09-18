@@ -22,7 +22,7 @@ const readline = require('node:readline');
 const os = require('node:os');
 const { randomUUID } = require('node:crypto');
 const { createTools, createClient, usageTokens, buildSystemPrompt } = require('./deps.js');
-const { createEngine } = require('./engine.js');
+const { createEngine, HOST_CLASSES, DEFAULT_CLASS, byokNamespace } = require('./engine.js');
 const { GLYPH, VERBS, themeOf, RESET, THEME_TABLE } = require('./theme.js');
 const { LiveRegion, termWidth, w } = require('./screen.js');
 const { editPreview } = require('./diff.js');
@@ -126,6 +126,10 @@ function createApp(options = {}) {
     options.engine ||
     createEngine({
       client,
+      // The live class — read per turn rather than captured, for the same
+      // reason confirmMode is a callback: a captured value made `/class`
+      // cosmetic, changing the panel and not what the next turn ran on.
+      getClass: () => commandCtx.modelClass,
       getConfirmMode: () => {
         if (options.confirmMode !== undefined) return confirmMode;
         try {
@@ -135,6 +139,14 @@ function createApp(options = {}) {
         }
       },
     });
+  // How a class is named in every surface that shows one (the status line, the
+  // class panel, the model picker's title). One definition, because the engine
+  // owns the label table (CLASS_LABELS) and re-spelling it here would let the
+  // picker and /class disagree about what the user is about to run on. Guarded
+  // because an injected engine (tests, embedding) may predate the class surface.
+  const classLabelOf = (cls) =>
+    typeof engine.classLabel === 'function' ? engine.classLabel(cls) : String(cls || '');
+
   // Set by runInteractive: a question/answer channel for the engine's
   // tool-approval requests. Left null in one-shot (-p) runs, where there is
   // no one to ask — see the approval branch in ask() below.
@@ -149,6 +161,10 @@ function createApp(options = {}) {
   const commandCtx = {
     light: opts.light,
     model: opts.model,
+    // Which class the next turn runs on. 'aegis' is the default because it is
+    // the one class an account key alone can run — BYOK additionally needs a
+    // provider key, so defaulting to it would break a fresh install.
+    modelClass: DEFAULT_CLASS,
     // `null` = "auto": send no effort, so the server sizes the turn from the
     // ask. This is the *budget* control on the pooled class (aegis1 sizes the
     // token ladder from it), which is why it is not defaulted to a rung here —
@@ -443,6 +459,82 @@ function createApp(options = {}) {
   // providers without a client release.
   const MODEL_CACHE_MS = 5 * 60_000;
   const modelCache = { at: 0, models: [] };
+  // The BYOK half of the same question. A BYOK model id is `provider:model`
+  // (the engine's splitByokModel), built from the server's provider catalog
+  // plus the provider rows this machine actually holds a key for — so this list
+  // is per-machine, not per-account, and cannot be served by the pooled catalog.
+  const byokCache = { at: 0, models: [] };
+
+  async function loadByokModels({ force = false } = {}) {
+    const fresh = byokCache.models.length && Date.now() - byokCache.at < MODEL_CACHE_MS;
+    if (!force && fresh) return byokCache.models;
+    // An injected engine (tests, embedding) may predate the class surface; an
+    // empty list is the honest answer then, not a fabricated one.
+    if (typeof engine.listModels !== 'function') return [];
+    const res = await engine.listModels('byok');
+    // The engine's row is `{id: "provider:model", label, provider, configured}`.
+    // `note` is added here because it is the field both renderers actually paint
+    // (the picker draws `m.note || m.model`, /models draws `m.note || m.label`)
+    // and because "openai:gpt-4o" alone does not say whether this machine holds
+    // the key the relay would ask for — a row without one is a turn that 400s,
+    // so it names the command that fixes it.
+    byokCache.models = ((res && res.models) || []).map((m) => ({
+      ...m,
+      note: m.configured ? 'key on this machine' : `no key — /byok-key ${m.provider}`,
+    }));
+    byokCache.at = Date.now();
+    return byokCache.models;
+  }
+
+  /**
+   * The ids pinnable on one class — the ONE function `/model`, alt+p and
+   * `/models` all read, so the picker cannot offer something the class the turn
+   * runs on would reject. Both branches swallow their failure into "nothing to
+   * offer": a catalog is a convenience, and an offline client must still be
+   * able to chat on the server's own default.
+   */
+  async function listModelsFor(cls) {
+    const want = HOST_CLASSES.includes(cls) ? cls : commandCtx.modelClass;
+    try {
+      return want === 'byok' ? await loadByokModels() : await loadModels();
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Switch the live class. Refuses anything this host cannot run (engine.js's
+   * HOST_CLASSES is the authority — the local/custom classes stay stubs).
+   *
+   * A pin is cleared when it does not belong to the class being entered: a
+   * pooled id pinned under byok would be parsed as provider `<pooled id>` and
+   * fail at the relay with a confusing "no key saved for …" instead of here,
+   * with a reason. Symmetrically, `anthropic:claude-…` under aegis is an id the
+   * pooled catalog does not advertise, which is the silent-fallback case
+   * validatePinnedModel exists to prevent.
+   */
+  function switchClass(next) {
+    const want = String(next == null ? '' : next).trim().toLowerCase();
+    if (!HOST_CLASSES.includes(want)) {
+      return { ok: false, error: `unknown class "${next}" — classes: ${HOST_CLASSES.join(', ')}` };
+    }
+    const prev = commandCtx.modelClass;
+    commandCtx.modelClass = want;
+    let cleared = null;
+    if (prev !== want && commandCtx.model) {
+      const isByokId = String(commandCtx.model).includes(':');
+      if (want === 'byok' ? !isByokId : isByokId) {
+        cleared = commandCtx.model;
+        commandCtx.model = null;
+      }
+    }
+    updateConfig({
+      modelClass: want,
+      model: commandCtx.model,
+      currentModelId: commandCtx.model,
+    });
+    return { ok: true, class: want, prev, cleared };
+  }
 
   /**
    * Fetch (or return the cached) model catalog. Rejects when the account cannot
@@ -474,6 +566,23 @@ function createApp(options = {}) {
   async function validatePinnedModel() {
     const pinned = commandCtx.model;
     if (!pinned) return null;
+    // A BYOK pin is validated by shape, not by the pooled catalog: the catalog
+    // can never contain a `provider:model` id, so checking it here would clear
+    // every legitimate BYOK pin on every launch.
+    if (commandCtx.modelClass === 'byok') {
+      if (String(pinned).includes(':')) return null;
+      commandCtx.model = null;
+      updateConfig({ model: null, currentModelId: null });
+      emit(
+        render.renderNotice(
+          ctx(),
+          'warn',
+          `pinned model "${pinned}" belongs to the pooled class — on BYOK an id is ` +
+            '"<provider>:<model>"; pin cleared, /models lists what this machine can relay.'
+        )
+      );
+      return pinned;
+    }
     let models;
     try {
       models = await loadModels();
@@ -895,6 +1004,7 @@ function createApp(options = {}) {
     return {
       version: VERSION,
       model: commandCtx.model || 'server default',
+      class: commandCtx.modelClass,
       effort: commandCtx.effort,
       thinking: commandCtx.thinking,
       theme: commandCtx.light ? 'light' : 'dark',
@@ -918,13 +1028,15 @@ function createApp(options = {}) {
       permissions: { mode: rules.defaultMode, rules },
       // The selectable (pickable) catalog, not the raw payload: alias tiers are
       // dropped, live ids only (see models.js pickerEntries).
-      models: pickerEntries(modelCache.models),
+      // Whichever class is live decides what is pinnable — the pooled ids the
+      // server advertises, or the `provider:model` ids this machine can relay.
+      models: pickerEntries(commandCtx.modelClass === 'byok' ? byokCache.models : modelCache.models),
       commands: visibleCommands(),
       transcript: transcript.slice(),
       sessions: [],
       memory: {},
       lastRecap: commandCtx.lastRecap,
-      backend: 'aegis',
+      backend: commandCtx.modelClass,
       url: client.apiBase,
     };
   }
@@ -977,7 +1089,7 @@ function createApp(options = {}) {
     let lines = null;
     if (o.type === 'panel') lines = o.lines;
     else if (o.type === 'palette') lines = overlays.renderPalette(visibleCommands(), { query: o.query || '', sel: o.sel || 0 }, W, rows);
-    else if (o.type === 'model') lines = overlays.renderModelPicker(o.items || [], o.sel || 0, W, rows, o.current != null ? o.current : commandCtx.model);
+    else if (o.type === 'model') lines = overlays.renderModelPicker(o.items || [], o.sel || 0, W, rows, o.current != null ? o.current : commandCtx.model, o.cls || commandCtx.modelClass, classLabelOf);
     else if (o.type === 'effort') lines = overlays.renderEffortPicker(o.sel || 0, W, commandCtx.effort);
     else if (o.type === 'resume') lines = overlays.renderResumeList(o.items || [], o.sel || 0, W, rows);
     else if (o.type === 'confirm') lines = render.renderApproval(ctx(), o.info || {}, W).map((s) => [spanRow(s)]);
@@ -1042,10 +1154,26 @@ function createApp(options = {}) {
       runPrompt: (text) => runPrompt(text),
       ask: (text) => ask(text),
       runTool: (name, args) => runTool(name, args),
-      // The AEGIS catalog fetch `/model` and alt+p expect (see loadModels).
-      // Wired on the app's context so the chatflow's `Object.assign`-based
-      // context inherits it too — one definition, both hosts.
-      loadModels: (o) => loadModels(o),
+      // The catalog `/model` and alt+p expect. Routed through listModelsFor so
+      // it follows the LIVE class: on the pooled class that is the server's
+      // catalog (loadModels), on byok the `provider:model` ids this machine can
+      // relay. Wired on the app's context so the chatflow's `Object.assign`
+      // based context inherits it too — one definition, both hosts, and the
+      // picker can never offer something the class would reject.
+      loadModels: () => listModelsFor(commandCtx.modelClass),
+      // The provider-key store (`byok:<provider>` rows) /byok-key writes. Read
+      // through a function, not captured, because an injected engine may not
+      // carry one.
+      settings: () => engine.settings || null,
+      // The one spelling of a provider's settings row, shared with the engine
+      // that reads it (`byok:<provider>`) — see engine.js byokNamespace.
+      byokNamespace: (p) => byokNamespace(p),
+      // The class surface: /class switches, /models lists for whichever class
+      // is live (the frozen state carries the current one as c.ctx.modelClass).
+      listModelsFor: (cls) => listModelsFor(cls),
+      switchClass: (cls) => switchClass(cls),
+      classLabel: (cls) => classLabelOf(cls),
+      classes: () => (typeof engine.listClasses === 'function' ? engine.listClasses() : []),
       refreshSpend: () => refreshSpend(),
       state: () => buildState(),
       setInput: () => {},
@@ -1567,6 +1695,9 @@ function createApp(options = {}) {
     } catch {
       return;
     }
+    // The class first: a stored BYOK pin is only meaningful under byok, and the
+    // pin check right after this reads whichever class won.
+    if (HOST_CLASSES.includes(cfg.modelClass)) commandCtx.modelClass = cfg.modelClass;
     if (!opts.model && cfg.model) commandCtx.model = cfg.model;
     // `null` in the config is "auto" and is deliberately not assigned over the
     // default — there is nothing to restore, because nothing is pinned.

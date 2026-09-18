@@ -870,7 +870,15 @@ async function runSession(host) {
     if (overlay.type === 'palette') {
       ol = overlays.renderPalette(host.visibleCommands(), { query: paletteQuery(overlay.query), sel: overlay.sel }, cols, termRows);
     } else if (overlay.type === 'model') {
-      ol = overlays.renderModelPicker(overlay.items || [], overlay.sel || 0, cols, termRows, overlay.current);
+      // The class rides on the overlay (set where it was opened, commands.js
+      // /model) with the live ctx as the fallback, and the label comes from the
+      // engine's table via the host — so this path and app.js's renderOverlay
+      // paint the same title, subtitle and row semantics for the same overlay.
+      ol = overlays.renderModelPicker(
+        overlay.items || [], overlay.sel || 0, cols, termRows, overlay.current,
+        overlay.cls || ctx.modelClass,
+        typeof host.classLabel === 'function' ? host.classLabel : null
+      );
     } else if (overlay.type === 'effort') {
       ol = overlays.renderEffortPicker(overlay.sel || 0, cols, ctx.effort);
     } else if (overlay.type === 'resume') {

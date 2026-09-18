@@ -791,6 +791,13 @@ const COMMANDS = [
     desc: 'Switch AI model — pin an id ("-" clears it)',
     handler: async (c, args) => {
       const id = (args.sub || '').trim();
+      // Which class the pin applies to — /model is class-scoped, because the
+      // id spaces are disjoint: the pooled catalog is server-advertised ids,
+      // byok is `provider:model`. Every branch below reads the live class, so
+      // the copy and the picker's contents describe the route the next turn
+      // will actually take (app.js's buildState().models is class-scoped too).
+      const cls = (c.ctx && c.ctx.modelClass) || 'aegis';
+      const byok = cls === 'byok';
       if (!id) {
         note(c, `model: ${c.ctx.model || 'server default'}`);
         // Populate the picker from the server first — app.js's state().models
@@ -802,27 +809,39 @@ const COMMANDS = [
           // Say why, and what unblocks it: an unreachable catalog is almost
           // always a missing key or no network, and "no models advertised"
           // read as "the platform has none" rather than "this client could not
-          // ask".
-          note(c, c.state().online
-            ? 'Could not read the model catalog (offline, or the server refused it) — /models retries.'
-            : // The key travels in the environment only (client/aegis.js reads
-              // AEGIS_API_KEY); /login is an unavailable command here, so
-              // pointing at it would send the user to a refusal.
-              'No API key set, so the model catalog cannot be read — export AEGIS_API_KEY (free at https://aegiscloud.org), then retry /model.');
+          // ask". On byok "no models" has a third cause — the relay is fine and
+          // the account is fine, this machine simply holds no provider key yet,
+          // which is exactly what /byok-key fixes.
+          note(c, byok
+            ? 'No relayable models — this machine holds no provider key yet. Save one with /byok-key <provider>, then retry /model.'
+            : c.state().online
+              ? 'Could not read the model catalog (offline, or the server refused it) — /models retries.'
+              : // The key travels in the environment only (client/aegis.js reads
+                // AEGIS_API_KEY); /login is an unavailable command here, so
+                // pointing at it would send the user to a refusal.
+                'No API key set, so the model catalog cannot be read — export AEGIS_API_KEY (free at https://aegiscloud.org), then retry /model.');
           c.render();
           return true;
         }
         // A pin that is not in the catalog is not honoured — the pool answers
         // from its own default with no error. Say so where the pin is visible
-        // rather than letting the reply look like the pinned model.
+        // rather than letting the reply look like the pinned model. On byok the
+        // failure mode is different and louder (the relay 400s on a provider it
+        // has no key for), so the sentence names the right one.
         if (c.ctx.model && !models.some((m) => m.id === c.ctx.model)) {
-          note(c, `pinned model "${c.ctx.model}" is not in the catalog — the pool will answer with its own default; pick one below.`);
+          note(c, byok
+            ? `pinned model "${c.ctx.model}" is not one this machine can relay — pick from the list below.`
+            : `pinned model "${c.ctx.model}" is not in the catalog — the pool will answer with its own default; pick one below.`);
         }
         // The overlay's own copy promises /model add|remove (overlays.js, a
         // separate workstream); this build refuses both, so say here how a
         // model is actually selected.
-        note(c, '/model <id> pins one for this session; /models lists what the server advertises.');
-        c.openOverlay({ type: 'model', items: models, sel: 0, current: c.ctx.model });
+        note(c, byok
+          ? '/model <id> pins one for this session; /models lists what this machine can relay.'
+          : '/model <id> pins one for this session; /models lists what the server advertises.');
+        // `cls` rides on the overlay so the picker's title and subtitle render
+        // for the class that opened it, even if /class moves while it is open.
+        c.openOverlay({ type: 'model', items: models, sel: 0, current: c.ctx.model, cls });
         return true;
       }
       if (id === 'list') {
@@ -834,14 +853,22 @@ const COMMANDS = [
         return true;
       }
       if (id === 'add' || id === 'remove' || id === 'rm') {
-        note(c, 'Model add/remove isn\'t supported in this build — pin an existing server id with /model <id>.');
+        note(c, byok
+          ? 'Model add/remove isn\'t supported in this build — on the byok class the list follows the provider keys you hold (/byok-key <provider>), then /model <provider>:<model>.'
+          : 'Model add/remove isn\'t supported in this build — pin an existing server id with /model <id>.');
         c.render();
         return true;
       }
       if (id === '-') {
         c.ctx.model = null;
         c.saveConfig({ model: null, currentModelId: null });
-        note(c, 'Model pin cleared — the server will choose.');
+        note(c, byok
+          // There is no such thing as a byok default: the relay addresses a
+          // provider by the id itself, so "nothing pinned" is not a fallback
+          // here, it is a turn that will 400 with "model must be
+          // <provider>:<model>". Said now rather than at the next send.
+          ? 'Model pin cleared. The byok class has no server default — the next turn needs <provider>:<model>, so pin one from /models before sending.'
+          : 'Model pin cleared — the server will choose.');
         c.render();
         return true;
       }
@@ -852,15 +879,20 @@ const COMMANDS = [
       // dir, so the write stays inside that dir.
       c.saveConfig({ model: id, currentModelId: id });
       note(c, `Pinned model: ${id}`);
-      // The server accepts an id it does not advertise and answers from its own
-      // default — no error, a different model, and the spend attributed to the
-      // id that was pinned. Warn (never refuse: the catalog is cached, and
-      // refusing would break a pin made against a server that is briefly
-      // unreachable) so the mismatch is visible at the moment it is created.
+      // A pin the class cannot honour is the same problem on both classes and
+      // only the consequence differs, so both branches say the consequence.
+      // Pooled: the server accepts an id it does not advertise and answers from
+      // its own default — no error, a different model, and the spend attributed
+      // to the id that was pinned. Byok: the id is parsed as a provider name,
+      // so a pooled id becomes "no key saved for <that id>" at the relay.
+      // Warn, never refuse: the catalog is cached, and refusing would break a
+      // pin made against a server that is briefly unreachable.
       await loadModels(c);
       const models = c.state().models || [];
       if (models.length && !models.some((m) => m.id === id)) {
-        note(c, `"${id}" is not in the AEGIS Cloud catalog — the pool will answer with its own default. /models lists the real ids.`);
+        note(c, byok
+          ? `"${id}" is not one this machine can relay — a byok id is "<provider>:<model>", and the relay will refuse anything else. /models lists the real ids.`
+          : `"${id}" is not in the AEGIS Cloud catalog — the pool will answer with its own default. /models lists the real ids.`);
       }
       c.render();
       return true;
@@ -1914,7 +1946,7 @@ const COMMANDS = [
         [span(C.gray, '─'.repeat(34))],
         [
           span(set ? C.green : C.gray, `  ${set} of ${providers.length} providers set`),
-          span(C.gray, '  — /byok-set <provider>'),
+          span(C.gray, '  — /byok-key <provider>'),
         ],
         '',
         ...byokProviderLines(providers),
@@ -1926,7 +1958,7 @@ const COMMANDS = [
   },
   {
     name: 'byok-set', args: ['provider'], hint: '<provider>', category: 'auth',
-    desc: 'Set YOUR provider key (prompted, never echoed, never in history)',
+    desc: 'Store your provider key on your AEGIS ACCOUNT (pooled route) — for the byok class use /byok-key',
     tool: 'aegis_byok_set',
     secret: 'key',
     build: (arg) => ({ provider: String(arg || '').trim() }),
@@ -1986,10 +2018,194 @@ const COMMANDS = [
     build: (arg) => ({ provider: String(arg || '').trim() }),
   },
   {
+    name: 'class', args: ['class'], hint: '[aegis|byok]', category: 'model',
+    desc: 'Show or switch which class turns run on: pooled AEGIS Cloud, or your own key',
+    handler: async (c, a) => {
+      const args = a || {};
+      const cur = (c.ctx && c.ctx.modelClass) || 'aegis';
+      const label = (id) => (c.classLabel ? c.classLabel(id) : id);
+      const want = String(args.class || '').trim().toLowerCase();
+      if (!want) {
+        // Awaited: the engine's listClasses() is async (it probes for a local
+        // Ollama before answering), and a context that offers no class surface
+        // at all falls back to the two static rows below.
+        const classes = await Promise.resolve(c.classes ? c.classes() : []).catch(() => []);
+        const rows = classes.length ? classes : [{ class: 'aegis' }, { class: 'byok' }];
+        const lines = [
+          [span(C.gold + BOLD, 'Class'), span(BOLD_OFF, '  — which route the next turn takes')],
+          [span(C.gray, '─'.repeat(52))],
+        ];
+        for (const k of rows) {
+          const id = k.class;
+          const on = id === cur;
+          // The distinction that matters to a user: who pays, and with which
+          // credential. Stated per class rather than in a footnote.
+          const note =
+            id === 'byok'
+              ? k.configured
+                ? 'your key, relayed by AEGIS — billed a handling fee'
+                : 'needs a provider key: /byok-key <provider>'
+              : 'the pool — your AEGIS account key pays for it';
+          lines.push([
+            span(on ? C.green : C.gray, `  ${on ? '●' : '○'} ${String(id).padEnd(6)}`),
+            span(on ? C.green : C.gray, label(id)),
+            span(C.gray, `  ${note}`),
+          ]);
+        }
+        lines.push('', [span(C.gray, '  switch with /class byok or /class aegis')]);
+        panel(c, lines);
+        c.render();
+        return true;
+      }
+      const res = c.switchClass(want);
+      if (!res.ok) {
+        c.push({ role: 'error', text: res.error });
+        return true;
+      }
+      c.push({ role: 'done', text: `class: ${res.class} — ${label(res.class)}` });
+      if (res.cleared) {
+        c.push({
+          role: 'note',
+          text: `cleared the pin "${res.cleared}" — it does not belong to this class. /models lists what fits.`,
+        });
+      }
+      // Entering byok with nothing pinned fails the very next turn: the relay's
+      // model id must be "<provider>:<model>" and there is no server default to
+      // fall back to (engine.js chatCompletion throws a 400 on a bare id). So
+      // land on one this machine can actually run — a provider it holds a key
+      // for wins, since the alternative 400s on the key rather than the id.
+      if (res.class === 'byok' && !(c.ctx && c.ctx.model)) {
+        const models = (await c.listModelsFor('byok')) || [];
+        const pick = models.find((m) => m.configured) || models[0];
+        if (pick) {
+          c.ctx.model = pick.id;
+          c.saveConfig({ model: pick.id, currentModelId: pick.id });
+          c.push({
+            role: 'note',
+            text: pick.configured
+              ? `using ${pick.id} — /models lists the rest.`
+              : `using ${pick.id}, but no ${pick.provider} key is saved yet — /byok-key ${pick.provider}.`,
+          });
+        } else if (models.length === 0) {
+          c.push({
+            role: 'note',
+            text: 'nothing to relay yet — save a provider key with /byok-key <provider>, then /models.',
+          });
+        }
+      }
+      return true;
+    },
+  },
+  {
     name: 'models', aliases: ['model-list'], hint: '', category: 'model',
-    desc: 'List the model ids you can pin with /model',
-    tool: 'aegis_list_models',
-    build: () => ({}),
+    desc: 'List the model ids you can pin with /model, for the class you are on',
+    handler: async (c) => {
+      const cls = (c.ctx && c.ctx.modelClass) || 'aegis';
+      const models = (await c.listModelsFor(cls)) || [];
+      const lines = [
+        [span(C.gold + BOLD, 'Models'), span(BOLD_OFF, `  — ${c.classLabel ? c.classLabel(cls) : cls}`)],
+        [span(C.gray, '─'.repeat(52))],
+      ];
+      if (!models.length) {
+        lines.push('', [
+          span(
+            C.gray,
+            cls === 'byok'
+              ? '  nothing to relay yet — save a provider key with /byok-key <provider>'
+              : '  no models advertised — check the account with /status, then retry'
+          ),
+        ]);
+      } else {
+        const pinned = c.ctx && c.ctx.model;
+        for (const m of models) {
+          const on = pinned === m.id;
+          lines.push([
+            span(on ? C.green : C.gray, `  ${on ? '●' : '○'} `),
+            span(on ? C.green : C.gray, String(m.id).padEnd(30)),
+            span(C.gray, m.note || m.label || ''),
+          ]);
+        }
+        lines.push('', [span(C.gray, '  pin one with /model <id> — /model alone opens the picker')]);
+      }
+      panel(c, lines);
+      c.render();
+      return true;
+    },
+  },
+  {
+    name: 'byok-key', args: ['provider'], hint: '<provider> [key]', category: 'auth',
+    desc: 'Save YOUR provider key on THIS MACHINE — the key the byok class sends',
+    handler: async (c, a) => {
+      const args = a || {};
+      const typed = String(args.provider || '').trim().toLowerCase();
+      if (!typed) {
+        c.push({ role: 'error', text: 'Usage: /byok-key <provider> — /byok lists the providers.' });
+        return true;
+      }
+      const store = c.settings && c.settings();
+      if (!store || typeof store.set !== 'function') {
+        c.push({ role: 'error', text: 'this client has no provider-key store.' });
+        return true;
+      }
+      // Resolve the alias against the server's catalog so the row is written
+      // under the id the relay will actually be asked for (`/byok-key OpenAI`
+      // and `/byok-key openai` must be one key, not two).
+      const providers = await byokCatalog(c.client);
+      const match = providers ? findByokProvider(providers, typed) : null;
+      if (match && match.ambiguous) {
+        c.push({ role: 'error', text: `"${typed}" matches ${match.ambiguous.join(', ')} — retype the exact id.` });
+        return true;
+      }
+      const p = match && match.provider;
+      const id = (p && p.id) || typed;
+      // A second token is the scriptable path (`/byok-key openai sk-…`); with
+      // none we prompt — readSecret never echoes and never enters history.
+      const rest = String(args._rest || '').trim();
+      const sp = rest.indexOf(' ');
+      let key = sp === -1 ? '' : rest.slice(sp + 1).trim();
+      if (!key) {
+        if (p && p.key_url) c.push({ role: 'note', text: `create a ${p.label || id} key at ${p.key_url}` });
+        key = String((await c.readSecret(`${id} key: `)) || '').trim();
+      }
+      if (!key) {
+        c.push({ role: 'note', text: 'nothing saved.' });
+        return true;
+      }
+      if (p && p.key_prefix && !key.startsWith(p.key_prefix)) {
+        c.push({ role: 'note', text: `heads up: ${id} keys normally start with "${p.key_prefix}" — saved anyway.` });
+      }
+      store.set(c.byokNamespace(id), { key });
+      c.push({
+        role: 'done',
+        text: `saved a ${id} key on this machine — /models lists its models, /class byok runs on it.`,
+      });
+      return true;
+    },
+  },
+  {
+    name: 'byok-rm-key', args: ['provider'], hint: '<provider>', category: 'auth',
+    desc: 'Forget the provider key saved on this machine',
+    handler: async (c, a) => {
+      const args = a || {};
+      const id = String(args.provider || '').trim().toLowerCase();
+      if (!id) {
+        c.push({ role: 'error', text: 'Usage: /byok-rm-key <provider> — /byok lists the providers.' });
+        return true;
+      }
+      const store = c.settings && c.settings();
+      if (!store || typeof store.remove !== 'function') {
+        c.push({ role: 'error', text: 'this client has no provider-key store.' });
+        return true;
+      }
+      const row = c.byokNamespace(id);
+      const had = typeof store.rawKey === 'function' ? store.rawKey(row) : null;
+      store.remove(row);
+      c.push({
+        role: had ? 'done' : 'note',
+        text: had ? `removed the ${id} key from this machine.` : `no ${id} key was saved on this machine.`,
+      });
+      return true;
+    },
   },
   {
     name: 'tool', args: ['name', 'json'], hint: '<name> [json]', category: 'aegis',

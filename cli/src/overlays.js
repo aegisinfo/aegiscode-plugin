@@ -140,13 +140,32 @@ function renderPalette(commands, state = {}, width = 80, height = 24) {
  * @param {number} width
  * @param {number} height
  * @param {string|null} current the currently-pinned model id
+ * @param {string} [cls] which class the next turn runs on ('aegis' | 'byok').
+ *   The rows are already class-scoped by the caller (app.js listModelsFor), but
+ *   the copy must be too: "manage the list with /model add|remove" is true of
+ *   the pooled catalog and meaningless on BYOK, where the list is not a stored
+ *   list at all but a function of which provider keys this machine holds — so
+ *   the subtitle names the command that actually changes it.
+ * @param {(cls: string) => string} [classLabel] the caller's label table
+ *   (engine.js CLASS_LABELS, via app.js) so the class is named one way in every
+ *   surface rather than re-spelled here.
  */
-function renderModelPicker(models, sel = 0, width = 80, height = 24, current = null) {
+function renderModelPicker(models, sel = 0, width = 80, height = 24, current = null, cls = null, classLabel = null) {
   const lines = [];
+  const byok = cls === 'byok';
+  const label = typeof classLabel === 'function' && cls ? classLabel(cls) : null;
   lines.push(blank(width));
-  lines.push([span('', ' '), span(C.white + BOLD, 'Select model'), span(BOLD_OFF, '')]);
+  lines.push([
+    span('', ' '), span(C.white + BOLD, 'Select model'), span(BOLD_OFF, ''),
+    ...(label ? [span(C.gray, `  — ${label}`)] : []),
+  ]);
   lines.push([span('', ' '), span(C.gray, 'Switch between models. Your pick becomes the default for new sessions.')]);
-  lines.push([span('', ' '), span(C.gray, 'Manage the list with /model add|remove — /model <id> switches directly.')]);
+  lines.push([
+    span('', ' '),
+    span(C.gray, byok
+      ? 'Add one with /byok-key <provider> — /models lists what this machine can relay.'
+      : 'Manage the list with /model add|remove — /model <id> switches directly.'),
+  ]);
   lines.push(blank(width));
   for (let i = 0; i < models.length; i++) {
     const m = models[i] || {};

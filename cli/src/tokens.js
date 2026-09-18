@@ -42,24 +42,52 @@ const RATES = {
 };
 
 /**
+ * Rate rows a model id may name as a whole word rather than as a prefix.
+ * Anthropic spells its family *inside* the id — "claude-opus-4" matches no
+ * prefix — so prefix matching alone cannot see it.
+ */
+const RATE_FAMILIES = Object.keys(RATES).filter((k) => k !== 'default');
+
+/**
  * The rate row for a model id, provider, or alias. Exact id wins, then the
- * longest matching prefix, then the Sonnet-class default — the same resolution
- * order contextWindowFor uses, so the cost meter and the context meter cannot
- * disagree about which family a model belongs to.
+ * longest matching prefix, then a family named inside the id, then the
+ * Sonnet-class default — the same resolution order contextWindowFor uses, so
+ * the cost meter and the context meter cannot disagree about which family a
+ * model belongs to.
  */
 function ratesFor(model) {
-  const id = String(model || '').toLowerCase();
-  if (!id) return RATES.default;
-  if (RATES[id]) return RATES[id];
-  let best = null;
-  let bestLen = 0;
-  for (const [prefix, rates] of Object.entries(RATES)) {
-    if (id.startsWith(prefix) && prefix.length > bestLen) {
-      best = rates;
-      bestLen = prefix.length;
+  const raw = String(model || '').toLowerCase();
+  if (!raw) return RATES.default;
+  // `/class byok` selects a "provider:model" id, and the provider half is a
+  // routing label, not a rate: rating it as written fell through every prefix
+  // to RATES.default, so an Opus BYOK turn was priced at Sonnet's $3/$15
+  // against the vendor's real $5/$25.
+  const ids = [raw];
+  const tail = raw.slice(raw.lastIndexOf(':') + 1);
+  if (tail && tail !== raw) ids.push(tail);
+  for (const id of ids) {
+    if (RATES[id]) return RATES[id];
+    let best = null;
+    let bestLen = 0;
+    for (const [prefix, rates] of Object.entries(RATES)) {
+      if (id.startsWith(prefix) && prefix.length > bestLen) {
+        best = rates;
+        bestLen = prefix.length;
+      }
+    }
+    if (best) return best;
+  }
+  // Longest family-key hit wins, so an overlapping pair resolves the same way
+  // twice running rather than by object key order.
+  let family = null;
+  let familyLen = 0;
+  for (const key of RATE_FAMILIES) {
+    if (raw.includes(key) && key.length > familyLen) {
+      family = RATES[key];
+      familyLen = key.length;
     }
   }
-  return best || RATES.default;
+  return family || RATES.default;
 }
 
 // System prompt + tool definitions overhead, roughly, in tokens.
@@ -97,11 +125,21 @@ const CONTEXT_WINDOWS = {
 
 /** The context budget to show/guard against for a model id, provider, or raw model string. */
 function contextWindowFor(model) {
-  const id = String(model || '').toLowerCase();
-  if (!id) return CONTEXT_WINDOW;
-  if (CONTEXT_WINDOWS[id]) return CONTEXT_WINDOWS[id];
-  for (const [prefix, win] of Object.entries(CONTEXT_WINDOWS)) {
-    if (id.startsWith(prefix)) return win;
+  const raw = String(model || '').toLowerCase();
+  if (!raw) return CONTEXT_WINDOW;
+  // Same two-candidate lookup as ratesFor above, for the same reason: a byok
+  // id ("deepseek:deepseek-v4-flash") carries a routing label in front of the
+  // model, and matching it as written left the 1M-token DeepSeek window reading
+  // as the 200k default — a meter that would have told a user they were at 20%
+  // of a context that was 4% full.
+  const ids = [raw];
+  const tail = raw.slice(raw.lastIndexOf(':') + 1);
+  if (tail && tail !== raw) ids.push(tail);
+  for (const id of ids) {
+    if (CONTEXT_WINDOWS[id]) return CONTEXT_WINDOWS[id];
+    for (const [prefix, win] of Object.entries(CONTEXT_WINDOWS)) {
+      if (id.startsWith(prefix)) return win;
+    }
   }
   return CONTEXT_WINDOW;
 }

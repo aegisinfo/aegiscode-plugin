@@ -414,6 +414,14 @@ function buildModelList(currentId, models, ctx = {}) {
   const t = themeOf(ctx);
   const list = Array.isArray(models) ? models : [];
   const cur0 = str(currentId);
+  // Which class these rows belong to. On byok a row is `provider:model` (the
+  // engine's listModels('byok') shape) and `model` is unset, so the third
+  // column would otherwise print "(default)" down the whole panel; the row's
+  // `note` is what actually tells the user whether this machine holds the key.
+  // The usage line follows the class too: /model add|remove is refused by this
+  // build, and on byok the list is not a stored list at all — it is a function
+  // of which provider keys exist, so the command that changes it is /byok-key.
+  const byok = ctx.modelClass === 'byok';
   const lines = [];
   lines.push([span(t.gold + BOLD, 'Models'), span(BOLD_OFF, '')]);
   lines.push([span(t.gray, '─'.repeat(30))]);
@@ -423,7 +431,7 @@ function buildModelList(currentId, models, ctx = {}) {
     const cur = idv !== '' && idv === cur0;
     const id = (cur ? '▶ ' : '  ') + idv;
     const name = str(m.name || m.label || m.model);
-    const model = str(m.model) || '(default)';
+    const model = byok ? str(m.note) || str(m.model) : str(m.model) || '(default)';
     lines.push([
       span(t.white, id), span('', ' '.repeat(Math.max(1, 26 - [...id].length))),
       span(t.gray, name), span('', ' '.repeat(Math.max(1, 22 - [...name].length))),
@@ -432,7 +440,11 @@ function buildModelList(currentId, models, ctx = {}) {
   }
   if (!list.length) lines.push([span('', ' '), span(t.gray, '(no models configured)')]);
   lines.push([span('', '')]);
-  lines.push([span(t.gray, 'Switch: /model <id> · Add: /model add <id> <name> <model> <baseURL> [apiKey] · Remove: /model remove <id>')]);
+  lines.push([
+    span(t.gray, byok
+      ? 'Switch: /model <id> · Add a provider key: /byok-key <provider> · Run on it: /class byok'
+      : 'Switch: /model <id> · Add: /model add <id> <name> <model> <baseURL> [apiKey] · Remove: /model remove <id>'),
+  ]);
   return lines;
 }
 

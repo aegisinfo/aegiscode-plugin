@@ -160,22 +160,53 @@ const RATES = {
 };
 
 /**
+ * The rate rows a model id may name as a whole word rather than as a prefix.
+ * Anthropic spells its family *inside* the id — "claude-opus-4" matches no
+ * prefix — so prefix matching alone cannot see it.
+ */
+const RATE_FAMILIES = Object.keys(RATES).filter((k) => k !== 'default');
+
+/**
  * The rate row for a model id, provider, or alias. Exact id wins, then the
- * longest matching prefix, then the Sonnet-class default.
+ * longest matching prefix, then a family named inside the id, then the
+ * Sonnet-class default.
  */
 function ratesFor(model) {
-  const id = String(model || '').toLowerCase();
-  if (!id) return RATES.default;
-  if (RATES[id]) return RATES[id];
-  let best = null;
-  let bestLen = 0;
-  for (const [prefix, rates] of Object.entries(RATES)) {
-    if (id.startsWith(prefix) && prefix.length > bestLen) {
-      best = rates;
-      bestLen = prefix.length;
+  const raw = String(model || '').toLowerCase();
+  if (!raw) return RATES.default;
+  // A byok model id carries its provider as a routing label:
+  // "anthropic:claude-opus-4", "deepseek:deepseek-v4-flash". The label is not
+  // a rate, and rating it as written fell through every prefix to
+  // RATES.default — so an Opus BYOK turn was priced at Sonnet's $3/$15 against
+  // the vendor's real $5/$25. 15x, on the one class whose figure can only ever
+  // be an estimate, because there the vendor bills the caller and AEGIS only
+  // relays. Try the whole id first, then the model behind the label.
+  const ids = [raw];
+  const tail = raw.slice(raw.lastIndexOf(':') + 1);
+  if (tail && tail !== raw) ids.push(tail);
+  for (const id of ids) {
+    if (RATES[id]) return RATES[id];
+    let best = null;
+    let bestLen = 0;
+    for (const [prefix, rates] of Object.entries(RATES)) {
+      if (id.startsWith(prefix) && prefix.length > bestLen) {
+        best = rates;
+        bestLen = prefix.length;
+      }
+    }
+    if (best) return best;
+  }
+  // Longest family-key hit wins, so an overlapping pair resolves the same way
+  // twice running rather than by object key order.
+  let family = null;
+  let familyLen = 0;
+  for (const key of RATE_FAMILIES) {
+    if (raw.includes(key) && key.length > familyLen) {
+      family = RATES[key];
+      familyLen = key.length;
     }
   }
-  return best || RATES.default;
+  return family || RATES.default;
 }
 
 /**

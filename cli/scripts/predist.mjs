@@ -61,6 +61,12 @@ const FILES = [
   'desktop/lib/local/shell.js',
   'desktop/lib/local/agents.js',
   'desktop/lib/local/prompt.js',
+  // The provider-config store: one row per provider (base URL + key), and the
+  // row the 'byok' class reads for a per-provider key. The CLI now selects that
+  // class (src/engine.js), so it needs the same store the desktop writes —
+  // created without a safeStorage argument, which the store already supports
+  // (base64 at rest, file mode 0600). Pure node builtins, so it stages cleanly.
+  'desktop/lib/settings.js',
   // engine.js requires all three at load time (turn-guard -> git-scope, and
   // worktree-lock), so leaving them out stages a vendor tree whose engine
   // throws MODULE_NOT_FOUND before it can answer anything — which is what

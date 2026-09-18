@@ -2658,12 +2658,30 @@ async function loadModels(cls) {
       hint = null; // carries a link, built below
     } else if (!list.length) {
       hint = cls === 'ollama' ? 'Ollama not running or no models pulled.' : 'No models listed.';
+    } else if (cls === 'byok' && data && data.needsAegisKey &&
+               data.fee && data.fee.require_balance) {
+      // Only when the SERVER says it enforces this (fee.require_balance). This
+      // desktop cannot know that on its own: with the flag off, an
+      // unattributed turn is served by design and only its fee goes
+      // uncollected, so refusing or warning here would contradict the server
+      // and send the user to a screen they do not need. Checked BEFORE
+      // needsProviderKey because when the server does enforce, the account key
+      // is the blocker and the provider key is not yet the question.
+      hint = `${list.length} model${list.length === 1 ? '' : 's'} available — ` +
+        'this server requires an AEGIS account key: the BYOK handling fee is billed there.';
     } else if (cls === 'byok' && data && data.needsProviderKey) {
       // Unlike the pooled 'aegis' class, byok still shows every model here —
       // the catalog answers with no key at all — but none of them are
       // usable until a provider key is saved in Provider settings below.
       hint = `${list.length} model${list.length === 1 ? '' : 's'} available — ` +
         'add a provider key in Provider settings below to use one.';
+    } else if (cls === 'byok' && data && data.needsAegisKey &&
+               data.fee && !data.fee.disabled) {
+      // Not a refusal — the server serves unattributed turns and logs the fee
+      // as uncollected — but the user is paying a handling fee and should know
+      // which account it lands on, or that it currently lands on none.
+      hint = `${list.length} model${list.length === 1 ? '' : 's'} available — ` +
+        'connect an AEGIS account key above so the BYOK handling fee is billed to you.';
     } else {
       hint = `${list.length} model${list.length === 1 ? '' : 's'} available.`;
     }
@@ -2842,6 +2860,29 @@ async function loadSettings() {
         onSave: (_baseURL, key) => saveSetting(provider, '', key),
         onRemove: () => removeSetting(provider),
       }));
+    }
+    // What AEGIS charges for relaying the turn, stated outright. The figure is
+    // the server's own (`fee` on GET /api/v1/byok/providers); nothing is shown
+    // when it publishes none, because a hardcoded client-side fee is one that
+    // can drift from the ledger that actually bills. Until this line existed
+    // the only place the fee was ever disclosed was the CLI's `/class byok`
+    // output — a desktop user's per-turn cost figure was the vendor's rate with
+    // no mention that AEGIS also collects.
+    const fee = byokData && byokData.fee;
+    if (fee && !fee.disabled &&
+        (Number(fee.in_usd_per_1k) > 0 || Number(fee.out_usd_per_1k) > 0)) {
+      const note = document.createElement('div');
+      note.className = 'setting-row';
+      note.id = 'byok-fee-note';
+      const text = document.createElement('div');
+      text.className = 'setting-name';
+      const per1k = (n) => `${Number(n).toFixed(4)}`;
+      text.textContent =
+        `BYOK handling fee: ${per1k(fee.in_usd_per_1k)} / 1k in, ` +
+        `${per1k(fee.out_usd_per_1k)} / 1k out — billed to your AEGIS account ` +
+        'on top of your own provider bill.';
+      note.appendChild(text);
+      els.settingsList.appendChild(note);
     }
   } catch {
     /* catalog unreachable (offline, server down) — the two custom rows above still work */
@@ -3306,6 +3347,15 @@ async function send() {
       if (est) bits.push(`~${est.input + est.output} tokens`);
     }
     if (turn.cost != null) bits.push(fmtCost(turn.cost, turn.real));
+    // …and on the byok class, whose money that figure is. The relay never
+    // returns a settled charge (nothing on that route emits one), so this is
+    // always the rate table's estimate of the caller's OWN provider bill — and
+    // AEGIS additionally collects a handling fee on the same turn, which this
+    // response cannot price. One bit, and the number stops reading as the whole
+    // cost of a BYOK turn.
+    if (cls === 'byok' && turn.cost != null) {
+      bits.push('your provider bill (est.) + AEGIS handling fee');
+    }
     // …AND the running session total beside it, which is the number the CLI
     // prints. The per-turn figure answers "what did that call cost"; only the
     // rolling one answers "what has this conversation cost", and it was the

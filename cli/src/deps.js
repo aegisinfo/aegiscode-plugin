@@ -56,6 +56,12 @@ const usagePath = resolveShared(path.join('desktop', 'renderer', 'usage.js'));
 // class) so the CLI's chat loop is the same tool loop as the GUI's, not a
 // second implementation that can drift out of step with it.
 const enginePath = resolveShared(path.join('desktop', 'lib', 'local', 'engine.js'));
+// The provider-config store the desktop's settings pane writes (one row per
+// provider: base URL + key, 0600 on disk). The CLI reads the same file for the
+// 'byok' class' per-provider keys, so a key saved in either host is the same
+// key — and so there is one implementation of "where a provider key lives"
+// rather than a second one that drifts.
+const settingsPath = resolveShared(path.join('desktop', 'lib', 'settings.js'));
 // Subagent role presets (/agents lists these; the model's task tool delegates
 // to them by name) — lives beside engine.js, staged into the same vendor dir.
 const agentsPath = resolveShared(path.join('desktop', 'lib', 'local', 'agents.js'));
@@ -80,6 +86,7 @@ const { createClient } = require(clientPath);
 const { createTools } = require(toolsPath);
 const { usageTokens } = require(usagePath);
 const { createLocalEngine } = require(enginePath);
+const { createSettingsStore, isReservedNamespace } = require(settingsPath);
 const { agentRoles, agentRoleLabel } = require(agentsPath);
 const { buildSystemPrompt } = require(promptPath);
 const updater = require(updatePath);
@@ -92,12 +99,14 @@ module.exports = {
   createTools,
   usageTokens,
   createLocalEngine,
+  createSettingsStore,
+  isReservedNamespace,
   agentRoles,
   agentRoleLabel,
   buildSystemPrompt,
   updater,
   queue,
   autonomous,
-  paths: { client: clientPath, tools: toolsPath, usage: usagePath, engine: enginePath, agents: agentsPath, prompt: promptPath, update: updatePath, queue: queuePath, autonomous: autonomousPath },
+  paths: { client: clientPath, tools: toolsPath, usage: usagePath, engine: enginePath, settings: settingsPath, agents: agentsPath, prompt: promptPath, update: updatePath, queue: queuePath, autonomous: autonomousPath },
   roots,
 };

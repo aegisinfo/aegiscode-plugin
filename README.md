@@ -97,17 +97,33 @@ laptop is searchable from another.
 
 ### Bring your own key (BYOK)
 
-`aegis_ask` normally spends from your AEGIS token bank. To use your own
-Anthropic, Groq, or OpenAI key at your own cost instead, set it once:
+Two lanes, and they are genuinely different. Pick by **where you want the key to
+live**, not by which is cheaper.
 
-```
-set my anthropic key to sk-ant-...
-```
+| | Lane A — account key | Lane B — machine key |
+|---|---|---|
+| What it stores | your provider key on your **AEGIS account** | your provider key on **this machine** |
+| Who talks to the vendor | AEGIS, server-side | AEGIS, server-side (relay) |
+| Best for | Claude Code on any machine you sign in to | one terminal, no key ever on the account |
+| Plugin | `set my anthropic key to sk-ant-…` (`aegis_byok_set`) | — |
+| CLI | `/byok-set anthropic` | `/byok-key anthropic` |
+| Desktop | Settings → provider row | Settings → provider row |
 
-From then on, `aegis_ask` calls for that provider use your key directly — no
-more running out of AEGIS credit. Remove it any time by calling
-`aegis_byok_set` again with no key. Keys are encrypted at rest server-side and
-never returned in full (only a masked preview).
+`aegis_ask` normally spends from your AEGIS token bank. Lane A replaces the
+*provider credential* with yours; the request still runs through AEGIS, so your
+account is charged a small **BYOK handling fee** — a flat rate, not a margin on
+the vendor's price, because AEGIS pays that vendor nothing on this lane. It is
+published by the server and always below the pooled price for the same traffic,
+so bringing your own key stays the cheaper lane — it is just no longer the free
+one. Run `/byok` in the CLI (or check Settings in the desktop) to see the live
+figure; it is never hardcoded in a client.
+
+Keys are encrypted at rest server-side and never returned in full (only a masked
+preview). Remove one any time by calling `aegis_byok_set` again with no key.
+
+**Which providers?** The catalogue grows server-side, so ask rather than
+remember: `/byok` in the CLI, or `GET /api/v1/byok/providers`. Each entry names
+the provider, the models that key unlocks, and where the vendor issues it.
 
 ### Configuration
 
@@ -137,11 +153,31 @@ From a source checkout, `node cli/bin/aegiscode.js` runs the same code with no
 install. The older `aegis-terminal` / `aegis-term` spelling is deprecated: it was
 the 0.1.x name of this same package, now folded into `aegiscode`.
 
-Plain text is a prompt; `/help` lists commands (`/balance` shows tokens beside
-€ on every ledger row, `/model` pins an id, `/byok-set` stores your own provider
-key without echoing it). `--json` gives machine-readable output with the usage
-object, the token total and the balance. See
-[cli/README.md](cli/README.md) and [docs/cli-host-plan.md](docs/cli-host-plan.md).
+Plain text is a prompt; `/help` lists every command. Type it and go — the four
+you need first are `/class` (which route your turns take), `/models` (what you
+can pin), `/model` (pin one), and `/byok-key` (save your own provider key on
+this machine, without echoing it). `--json` gives machine-readable output with
+the usage object, the token total and the balance. See
+[cli/README.md](cli/README.md) for the full command manual.
+
+### Model classes
+
+A **class** is the route a turn takes — who talks to the vendor, and whose
+credential pays. `/class` with no argument shows the picker; switching takes
+effect on your next turn, with the conversation intact.
+
+| Class | Route | Who pays |
+|---|---|---|
+| `aegis` *(default)* | the AEGIS pool — one id, `nexus-brain`, auto-routed across whichever providers are live | your AEGIS account balance |
+| `byok` | your provider key, relayed by AEGIS (`/api/v1/byok/chat/completions`) | your provider, **plus** the AEGIS handling fee on your account |
+
+Under `byok` every model id is compound — `provider:model`, e.g.
+`anthropic:claude-sonnet-4-5`. `/models` lists exactly what your saved keys
+unlock, and `/class` refuses to leave you on a class with no key rather than
+failing later at the relay. A BYOK turn is **single-shot**: the relay takes no
+`tools` parameter, so the agentic tool loop is off by construction, not by
+preference. Ollama, LM Studio and any custom endpoint are desktop-only classes —
+the CLI deliberately exposes two.
 
 It carries the `aegiscodex-dev` design — palette, welcome art, prompt glyphs and
 command vocabulary — pinned by `test/cli-conformance.test.mjs`; `test/cli-render.test.mjs`,

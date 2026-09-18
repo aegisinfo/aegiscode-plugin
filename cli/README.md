@@ -159,9 +159,9 @@ command for command — 75 entries across nine categories:
 |---|---|
 | Session & context | `/clear` `/compact` `/cost` `/exit` `/new` `/recap` `/resume` `/rewind` `/agents` `/status` `/teleport` `/version` `/clone` `/schedule` |
 | Workspace | `/run` `/build` `/cd` `/copy` `/init` `/review` `/prs` |
-| Model & behavior | `/model` `/effort` `/thinking` `/theme` `/vim` `/router` `/confirm` `/yolo` `/permissions` `/hooks` `/skills` `/mcp` |
+| Model & behavior | `/model` `/models` `/class` `/effort` `/thinking` `/theme` `/vim` `/router` `/confirm` `/yolo` `/permissions` `/hooks` `/skills` `/mcp` |
 | Data | `/context` `/export` `/tokens` `/sync` |
-| Auth | `/key` `/login` `/logout` `/credentials` `/byok` `/byok-set` `/byok-rm` |
+| Auth | `/key` `/login` `/logout` `/credentials` `/byok` `/byok-set` `/byok-rm` `/byok-key` `/byok-rm-key` |
 | Support | `/help` `/doctor` `/troubleshooting` `/feedback` `/bug` `/issue` `/onboarding` `/benchmark` `/release-notes` `/billing` `/cloud` |
 | Aegis plugin | `/aegis-ask` `/aegis-status` `/aegis-recall` `/aegis-remember` `/memory` `/aegis-council` `/aegis-multi` `/aegis-print` `/aegis-import` `/tool` |
 | Fun | `/radio` `/waifu` |
@@ -177,6 +177,218 @@ handler — `/run` detects and drives this project's dev command, `/init` sniffs
 the project and writes `AEGIS.md`, `/export` writes the transcript out,
 `/resume` and `/rewind` read the session store, `/cd` moves the working
 directory, `/doctor` runs diagnostics.
+
+## Model selection
+
+Three layers, from broadest to narrowest. You only need the first one.
+
+**1. The class — which route the turn takes.**
+
+```bash
+/class            # show the picker
+/class aegis      # pooled AEGIS Cloud (the default)
+/class byok       # your own provider key, relayed by AEGIS
+```
+
+A class is *whose credential pays and who talks to the vendor*, not a model.
+Switching applies to your **next** turn and leaves the conversation intact. The
+choice is written to `~/.aegiscode/config.json` (`modelClass`), so it survives a
+restart.
+
+| Class | Route | Who pays |
+|---|---|---|
+| `aegis` *(default)* | the AEGIS pool — one id, `nexus-brain` (alias `aegis-brain`), auto-routed server-side across whichever providers are live | your AEGIS account balance |
+| `byok` | your provider key, relayed via `POST /api/v1/byok/chat/completions` | your provider direct, **plus** a small AEGIS handling fee on your account |
+
+**2. The model id — what to pin.**
+
+```bash
+/models                 # what you can pin, for the class you are on
+/model                  # open the picker
+/model nexus-brain      # pin it
+/model -                # clear the pin, back to the class default
+```
+
+`/models` is class-aware: it answers from the pool catalogue under `aegis`, and
+from the models your saved keys actually unlock under `byok`. A pooled id is
+**cleared with a reason** if you switch to `byok` while it is pinned, instead of
+failing later at the relay.
+
+Under `byok` every id is compound — `provider:model`:
+
+```bash
+/models                       # e.g.  anthropic:claude-sonnet-4-5
+/model anthropic:claude-sonnet-4-5
+```
+
+```bash
+aegiscode -m nexus-brain -p "…"                      # pin at launch
+aegiscode -m anthropic:claude-sonnet-4-5 -p "…"      # a BYOK id at launch
+```
+
+**3. Effort — how hard it reasons.**
+
+```bash
+/effort                # show
+/effort low|medium|high
+```
+
+Effort scales the token budget the provider is given, so it is the dial that
+actually changes reasoning depth on a reasoning model (see the root README for
+the per-provider mechanics).
+
+> **A BYOK turn is single-shot.** The relay takes no `tools` parameter, so the
+> agentic tool loop is off by construction — no file edits, no shell, no
+> subagents, no approval cards. `/class` says so rather than letting you discover
+> it mid-task.
+
+## Bring your own key
+
+Two lanes. The one people mix up is which key goes where, so state it plainly:
+**`/byok-set` stores on your AEGIS account; `/byok-key` stores on this machine.**
+
+| | `/byok-set <provider>` | `/byok-key <provider>` |
+|---|---|---|
+| Key lives | on your AEGIS account, encrypted server-side | in `~/.aegiscode/settings.json` (mode `0600`) |
+| Follows you to other machines | yes | no |
+| Reaches the vendor via | AEGIS, server-side | AEGIS's BYOK relay |
+| Needed for `/class byok`? | no | **yes** — this is the one the relay reads |
+
+### Save a key on this machine
+
+```bash
+/byok                        # list every provider, and which are already set
+/byok-key openai             # prompts, no echo, never enters history
+/byok-key openai sk-…        # scriptable form
+/byok-rm-key openai          # forget it
+```
+
+The first command is the one to run when you don't know a provider id. The
+catalogue is server-side and grows, so `/byok` is the authority — each row names
+the provider, the models its key unlocks, where the vendor issues it, and the
+prefix a valid key starts with. A typo'd or wrong-vendor key is caught before it
+is stored.
+
+### Save a key on your account
+
+```bash
+/byok-set anthropic          # prompts, no echo
+/byok-rm anthropic           # remove it
+```
+
+### What a BYOK turn costs
+
+Bringing your own key does not make the turn free, and it is not meant to. AEGIS
+pays the vendor nothing on this lane, so there is no provider cost to take a
+margin on — the account is charged a flat **handling fee** per 1k tokens
+instead, for the routing, prompt assembly, caching, tool bridging and uptime
+that still happen server-side. It is deliberately well under the pooled price
+for the same traffic, so BYOK stays the cheaper lane; it just is not the free
+one.
+
+The figure is published by the server (`GET /api/v1/byok/providers` returns
+`fee`) and never hardcoded in this client, so what you see is what is charged.
+Two consequences worth knowing:
+
+- A BYOK turn needs an **AEGIS account key** as well as your provider key — that
+  is where the fee is billed. Without one the relay refuses up front and says so,
+  rather than running the turn and dropping the charge.
+- If a fee is ever configured to zero the lane is genuinely free, and nothing in
+  this client needs to change to reflect that.
+
+Removing a key is the only thing that stops the key being sent; unsetting
+`/class byok` switches the route but leaves the key on disk.
+
+## Command manual
+
+Copy-paste, in the order you actually need them.
+
+### Install and sign in
+
+```bash
+npm install -g aegiscode           # requires Node 18+
+aegiscode login                    # prompts for your AEGIS key, no echo
+aegiscode key status               # verify: masked key + which source is in use
+aegiscode                          # start a session
+```
+
+No AEGIS key yet? Get one at <https://aegiscloud.org>. To run entirely on your
+own provider key instead, skip `login` and see
+[Bring your own key](#bring-your-own-key) — note that lane still bills its fee to
+an AEGIS account.
+
+### Day one in a repo
+
+```bash
+cd ~/my-project
+aegiscode                          # first run asks you to trust the folder
+/init                              # sniff the project, write AEGIS.md
+/status                            # key, class, model, effort, cwd — one panel
+```
+
+Then just type. Plain text is a prompt.
+
+### Ask one question and leave
+
+```bash
+aegiscode "explain this stack trace"
+aegiscode -p "summarise docs/design.md" --json
+echo "why is the sky blue" | aegiscode -p -
+```
+
+`--json` emits the answer plus the usage object, token total and balance.
+
+### Switch how you're paying
+
+```bash
+/class                             # see both routes and who pays
+/class byok                        # use your own key
+/byok-key openai                   # …save one first if it says you have none
+/models                            # what that key unlocks
+/model openai:gpt-4o               # pin one
+/class aegis                       # back to the pool
+```
+
+### Control the budget
+
+```bash
+/effort low                        # cheaper, shallower
+/effort high                       # deeper reasoning
+/cost                              # this session
+/balance                           # tokens beside € on every ledger row
+/billing                           # spend and plan
+```
+
+### Keep the work
+
+```bash
+/compact                           # shrink the context, keep the thread
+/export markdown ~/notes/session.md
+/resume                            # pick up a saved session
+/rewind 3                          # back up three turns
+/sync                              # push pending, then pull
+```
+
+### When something is wrong
+
+```bash
+/doctor                            # diagnostics, in one panel
+/status                            # key + class + model actually in effect
+/byok                              # which provider keys are set
+/troubleshooting
+```
+
+### Unattended work
+
+```bash
+aegiscode autonomous add "fix the flaky retry test" --cwd ~/repo
+aegiscode autonomous list
+aegiscode autonomous proceed --commit
+```
+
+Queued tasks always run on the pooled brain (`nexus-brain`); a task naming
+another model is refused where you can still see it. `--commit` commits only the
+paths that task's own tool layer wrote.
 
 ## Account key and cloud sync
 
