@@ -99,17 +99,29 @@ function estimateTokens(text) {
  * genuinely reported nothing (no usage, no prompt, no reply) still lands in
  * `unknown` instead of being handed a fabricated zero.
  *
+ * `reasoning` is the extended-thinking trace, and it is OUTPUT: a reasoning
+ * model bills its chain of thought as output tokens, which is why the wire's
+ * own `output_tokens` already includes it. The desktop renders that trace in
+ * its own element (app.js `reasoningText`) rather than in the reply body, so
+ * the two streams had to be added back together here — an estimate measured off
+ * the visible answer alone sat still for the entire think phase, which on a
+ * reasoning model is both the longest and the most expensive part of the turn.
+ *
  * @param {string} [prompt]
  * @param {string} [reply]
+ * @param {string} [reasoning]
  * @returns {{input: number, output: number, cacheRead: number, cacheWrite: number}|null}
  */
-function estimatedBuckets(prompt, reply) {
+function estimatedBuckets(prompt, reply, reasoning) {
   const hasPrompt = typeof prompt === 'string' && prompt.length > 0;
-  const hasReply = typeof reply === 'string' && reply.length > 0;
+  const out =
+    (typeof reply === 'string' ? reply : '') +
+    (typeof reasoning === 'string' ? reasoning : '');
+  const hasReply = out.length > 0;
   if (!hasPrompt && !hasReply) return null;
   return {
     input: estimateTokens(prompt),
-    output: estimateTokens(reply),
+    output: estimateTokens(out),
     cacheRead: 0,
     cacheWrite: 0,
     real: false,
@@ -339,7 +351,7 @@ function rollTurn(roll, usage, opts = {}) {
     // estimate here is what makes the live roll and the rebuilt roll the same
     // number, and what stops the total standing still on exactly the turns the
     // pool declined to report on — the symptom this fallback exists to remove.
-    const est = estimatedBuckets(opts.prompt, opts.reply);
+    const est = estimatedBuckets(opts.prompt, opts.reply, opts.reasoning);
     if (!est) {
       // Nothing reported AND no text to estimate from. The single case that
       // stays uncounted: `unknown` names the gap, where a fabricated zero would
@@ -441,7 +453,10 @@ function ledgerRow(usage, turn, opts = {}) {
     if (calls !== undefined) row.calls = calls;
     return row;
   }
-  const est = estimatedBuckets(opts.prompt, opts.reply);
+  // `reasoning` is part of the billed output, so it is estimated with the
+  // reply — a stored row for a thinking-heavy turn must not persist a count
+  // that excludes the longest thing the model wrote.
+  const est = estimatedBuckets(opts.prompt, opts.reply, opts.reasoning);
   if (!est) return null;
   const row = { tokens: est };
   if (calls !== undefined) row.calls = calls;

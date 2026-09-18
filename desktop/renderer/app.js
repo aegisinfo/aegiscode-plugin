@@ -296,6 +296,11 @@ function renderRollMeter(sessionId, live) {
     roll = rollTurn(roll || emptyRoll(), undefined, {
       prompt: live.prompt,
       reply: live.reply,
+      // The thinking trace is billed output too — see `estimatedBuckets`. Left
+      // out, this preview measured only the visible answer, so on a reasoning
+      // model the meter sat on one number for the whole (longest, priciest)
+      // phase of the turn and looked dead while the AI was demonstrably working.
+      reasoning: live.reasoning,
     });
   }
   const line = roll ? fmtRoll(roll) : '';
@@ -331,6 +336,7 @@ function ledgerFields(usage, model, turn, text) {
     calls: text && text.calls,
     prompt: text && text.prompt,
     reply: text && text.reply,
+    reasoning: text && text.reasoning,
   });
   const fields = row ? Object.assign({}, row) : {};
   if (model) fields.model = model;
@@ -3168,7 +3174,7 @@ async function send() {
     // Live estimate so the topbar meter keeps moving while the reply streams
     // in, instead of sitting frozen on the previous turn's total until this
     // one resolves — see renderRollMeter's `live` param.
-    renderRollMeter(sessionId, { prompt, reply: streamedText });
+    renderRollMeter(sessionId, { prompt, reply: streamedText, reasoning: reasoningText });
     stickToBottom();
   });
 
@@ -3248,7 +3254,7 @@ async function send() {
     // count is never read as a reported one. Printing nothing here while the
     // session total moved was the other half of "the counter looks dead".
     else {
-      const est = estimatedBuckets(prompt, text);
+      const est = estimatedBuckets(prompt, text, text === reasoningText ? '' : reasoningText);
       if (est) bits.push(`~${est.input + est.output} tokens`);
     }
     if (turn.cost != null) bits.push(fmtCost(turn.cost, turn.real));
@@ -3267,6 +3273,10 @@ async function send() {
       // CLI's `appendHistory` rule and the reason the total moves every turn.
       prompt,
       reply: text,
+      // The thinking trace is billed output and is not part of `text`, so it is
+      // counted here too — guarded, because the same string must never be
+      // estimated twice if a turn ever collapses the two into one.
+      reasoning: text === reasoningText ? '' : reasoningText,
     });
     const rollLine = fmtRoll(roll);
     if (rollLine) bits.push(`session: ${rollLine}`);
@@ -3282,6 +3292,10 @@ async function send() {
         ...ledgerFields(data && data.usage, model, turn, {
           prompt,
           reply: text,
+          // The thinking trace is billed output and is not part of `text`; it
+          // has to persist too, or reopening the window rebuilds a roll short
+          // by the longest part of the turn.
+          reasoning: text === reasoningText ? '' : reasoningText,
           calls: data && data.calls,
         }),
       });
@@ -3316,11 +3330,16 @@ async function send() {
       // on this path the figure is the text estimate, marked `est` — and
       // never a fabricated zero.
       const turn = turnAccounting(undefined, model, {});
-      const roll = foldRoll(sessionId, undefined, { model, prompt, reply: text });
+      const roll = foldRoll(sessionId, undefined, {
+        model,
+        prompt,
+        reply: text,
+        reasoning: text === reasoningText ? '' : reasoningText,
+      });
       const stopBits = ['stopped by you'];
       if (turn.tokens != null) stopBits.push(`tokens: ${turn.tokens}`);
       else {
-        const est = estimatedBuckets(prompt, text);
+        const est = estimatedBuckets(prompt, text, text === reasoningText ? '' : reasoningText);
         if (est) stopBits.push(`~${est.input + est.output} tokens`);
       }
       const stopRollLine = fmtRoll(roll);
@@ -3330,7 +3349,11 @@ async function send() {
         await sync.append(sessionId, {
           role: 'assistant',
           content: text,
-          ...ledgerFields(undefined, model, turn, { prompt, reply: text }),
+          ...ledgerFields(undefined, model, turn, {
+            prompt,
+            reply: text,
+            reasoning: text === reasoningText ? '' : reasoningText,
+          }),
         });
       } catch {
         /* persistence is non-fatal */
