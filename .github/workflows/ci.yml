@@ -174,6 +174,54 @@ jobs:
       - name: Desktop shell smoke test
         run: node test/desktop-shell.mjs
 
+      # --- 8. Main-process dispatch: IPC channel wiring (no Electron binary) --
+      # Deliberately NOT part of the step-5 glob: that glob is `*.test.mjs`, and
+      # this file is not named that. It spent months silently never running --
+      # `85c1522` added an `ipcMain.on` channel and the test's stub only ever
+      # implemented `handle`, so it broke and nobody saw it.
+      #
+      # Running it is safe on a bare checkout: it needs no desktop/node_modules
+      # (verified against a clean `git archive HEAD`), because main.js reaches
+      # for electron and ../client/aegis.js behind try/catch.
+      #
+      # Do NOT fix this by widening the step-5 glob to `*.mjs`: that would drag
+      # in electron-smoke.mjs, which needs Electron + xvfb and is why it has its
+      # own job below. An explicit step is the correct shape here.
+      - name: Model/sync dispatch test
+        run: node test/model-dispatch.mjs
+
+      # --- 9. Orphan guard: every test/*.mjs must be run by something --------
+      # The step-5 glob comment claims enumeration is how tests silently never
+      # ran -- but the glob itself has the same hole for any file not named
+      # `*.test.mjs`. This asserts each top-level test/*.mjs is either
+      # glob-matched or listed here as explicitly run, so a new non-`*.test.mjs`
+      # test can't be added and silently ignored.
+      - name: Orphan test guard
+        run: |
+          set -euo pipefail
+          # Files run by their own explicit step (above/below) or their own job.
+          explicit="smoke.mjs desktop-shell.mjs model-dispatch.mjs electron-smoke.mjs"
+          rc=0
+          for f in $(ls -1 test/*.mjs); do
+            base="$(basename "$f")"
+            case "$base" in
+              *.test.mjs) continue ;;
+            esac
+            found=0
+            for e in $explicit; do
+              [ "$base" = "$e" ] && found=1
+            done
+            if [ "$found" -eq 0 ]; then
+              echo "::error::$f is not named *.test.mjs and is not in the explicit-run list -- it would never run in CI"
+              rc=1
+            fi
+          done
+          if [ "$rc" -ne 0 ]; then
+            echo "Add it to an explicit step, or to the 'explicit' list in this guard once you have."
+            exit 1
+          fi
+          echo "Orphan test guard clean: every test/*.mjs is accounted for."
+
   electron-smoke:
     name: Headless Electron smoke (P3.6)
     runs-on: ubuntu-latest

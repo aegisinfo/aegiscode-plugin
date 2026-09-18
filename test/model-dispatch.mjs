@@ -5,7 +5,7 @@
  * maps with a stub engine and the real sessions store against a temp dir.
  */
 import { createRequire } from 'node:module';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -194,10 +194,20 @@ try {
 
   // 3. registerModelIpc wires model:<name> and sync:<name> channels, and
   //    model:chat forwards deltas over CHAT_DELTA_CHANNEL.
+  // The stub must model BOTH registrar calls `registerModelIpc` makes. It
+  // wires the dispatch map with `handle`, plus one `on` listener
+  // (`model:readTextFile`) that answers via `event.returnValue` because the
+  // preload bridge is sendSync. A stub with only `handle` throws
+  // `ipcMain.on is not a function`, so `listeners` is kept separate: an `on`
+  // channel that a `handle` assertion would otherwise see as wired.
   const fakeIpc = {
     handles: {},
+    listeners: {},
     handle(name, cb) {
       this.handles[name] = cb;
+    },
+    on(name, cb) {
+      this.listeners[name] = cb;
     },
   };
   registerModelIpc(fakeIpc, engine, dir);
@@ -208,6 +218,39 @@ try {
   for (const n of SYNC_NAMES) {
     assert(fakeIpc.handles[`${SYNC_PREFIX}${n}`], `missing channel ${SYNC_PREFIX}${n}`);
   }
+
+  // 3b. `model:readTextFile` must be wired with `on`, NOT `handle`. The
+  //     preload bridge is sendSync (editPreview consumes its reader
+  //     synchronously and cannot await an invoke promise), and sendSync is
+  //     answered only by an `ipcMain.on` listener — moving it into the
+  //     dispatch map above would register a `handle` that sendSync never
+  //     reaches, silently breaking the diff preview. This pins the WIRING;
+  //     the containment rules themselves are covered by
+  //     test/desktop-preview-read.test.mjs.
+  const readChannel = `${MODEL_PREFIX}readTextFile`;
+  assert(
+    typeof fakeIpc.listeners[readChannel] === 'function',
+    `${readChannel} must be registered with ipcMain.on (sendSync never reaches handle)`
+  );
+  assert(
+    !fakeIpc.handles[readChannel],
+    `${readChannel} must not be a handle — a sendSync call would never reach it`
+  );
+  writeFileSync(join(dir, 'preview.txt'), 'preview-body');
+  const previewEvent = {};
+  fakeIpc.listeners[readChannel](previewEvent, { file: 'preview.txt', cwd: dir });
+  assert(
+    previewEvent.returnValue &&
+      previewEvent.returnValue.text === 'preview-body' &&
+      previewEvent.returnValue.truncated === false,
+    'model:readTextFile answers synchronously via event.returnValue'
+  );
+  const refusedEvent = {};
+  fakeIpc.listeners[readChannel](refusedEvent, { file: '../escape.txt', cwd: dir });
+  assert(
+    refusedEvent.returnValue === null,
+    'model:readTextFile answers null on a refused path instead of throwing'
+  );
 
   const sentDeltas = [];
   const fakeSender = {
@@ -388,8 +431,12 @@ try {
   const hbServer = { fail: true };
   const hbIpc = {
     handles: {},
+    listeners: {},
     handle(name, cb) {
       this.handles[name] = cb;
+    },
+    on(name, cb) {
+      this.listeners[name] = cb;
     },
   };
   const hbWired = registerModelIpc(
