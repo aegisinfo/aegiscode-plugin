@@ -2658,30 +2658,22 @@ async function loadModels(cls) {
       hint = null; // carries a link, built below
     } else if (!list.length) {
       hint = cls === 'ollama' ? 'Ollama not running or no models pulled.' : 'No models listed.';
-    } else if (cls === 'byok' && data && data.needsAegisKey &&
-               data.fee && data.fee.require_balance) {
-      // Only when the SERVER says it enforces this (fee.require_balance). This
-      // desktop cannot know that on its own: with the flag off, an
-      // unattributed turn is served by design and only its fee goes
-      // uncollected, so refusing or warning here would contradict the server
-      // and send the user to a screen they do not need. Checked BEFORE
-      // needsProviderKey because when the server does enforce, the account key
-      // is the blocker and the provider key is not yet the question.
+    } else if (cls === 'byok' && data && data.needsAegisKey) {
+      // Enforced by this CLIENT, not by the server, so it no longer waits on
+      // the server's fee.require_balance flag (off by default): the shared
+      // local engine refuses a keyless BYOK send outright (401), because an
+      // unattributed turn is served and billed to nobody — the fee lands on
+      // user 0 as uncollected. Saying "required" here is now literal, not a
+      // nudge. Checked BEFORE needsProviderKey because the account key is the
+      // blocker and the provider key is not yet the question.
       hint = `${list.length} model${list.length === 1 ? '' : 's'} available — ` +
-        'this server requires an AEGIS account key: the BYOK handling fee is billed there.';
+        'an AEGIS account key is required: the BYOK handling fee is billed there.';
     } else if (cls === 'byok' && data && data.needsProviderKey) {
       // Unlike the pooled 'aegis' class, byok still shows every model here —
       // the catalog answers with no key at all — but none of them are
       // usable until a provider key is saved in Provider settings below.
       hint = `${list.length} model${list.length === 1 ? '' : 's'} available — ` +
         'add a provider key in Provider settings below to use one.';
-    } else if (cls === 'byok' && data && data.needsAegisKey &&
-               data.fee && !data.fee.disabled) {
-      // Not a refusal — the server serves unattributed turns and logs the fee
-      // as uncollected — but the user is paying a handling fee and should know
-      // which account it lands on, or that it currently lands on none.
-      hint = `${list.length} model${list.length === 1 ? '' : 's'} available — ` +
-        'connect an AEGIS account key above so the BYOK handling fee is billed to you.';
     } else {
       hint = `${list.length} model${list.length === 1 ? '' : 's'} available.`;
     }

@@ -1258,4 +1258,59 @@ const fakeTools = {
   assert(badModel && /provider.*model/.test(badModel.message), `a bare model id is refused, got ${badModel && badModel.message}`);
 }
 
+// ---- byok: the ACCOUNT key is required, so every turn is billable ----------
+// The relay bills from X-AEGIS-Key alone: `_byok_identify_user` resolves the
+// payer from it and app.py charges only `if _byok_user_id:`. With no account
+// key the turn is still served but charged to nobody — the handling fee is
+// logged against user 0 as uncollected, i.e. a free ride. So the send is
+// refused HERE, in-process, and the proof that no unattributed turn goes out is
+// that the relay stub throws the moment it is reached.
+{
+  const relayed = [];
+  const keylessAegis = {
+    apiKey: '',
+    async byokProviders() {
+      return { providers: [{ id: 'anthropic', label: 'Anthropic', models: ['claude-sonnet-5'] }] };
+    },
+    async byokChatCompletion(args) {
+      relayed.push(args);
+      return { choices: [{ message: { content: 'hi' } }] };
+    },
+  };
+  // The provider key IS stored, so the refusal below can only be about the
+  // account key — the earlier "no key saved for <provider>" path is not in play.
+  const storedKeys = new Map([['byok:anthropic', 'sk-ant-real']]);
+  const keylessSettings = {
+    get: (p) => ({ provider: p, baseURL: '', configured: storedKeys.has(p), keyMask: storedKeys.has(p) ? 'sk-…' : null }),
+    set: () => {},
+    rawKey: (p) => storedKeys.get(p) || null,
+    remove: () => ({ ok: true }),
+    list: () => [],
+  };
+  const keylessEng = createLocalEngine({ aegis: keylessAegis, settings: keylessSettings, ollama, providers });
+
+  // The catalog still answers with no account key at all — that is how a user
+  // finds out which provider key to go and get — so only the SEND is refused.
+  const listed = await keylessEng.listModels('byok');
+  assert(listed.models.length === 1, `a keyless-draft catalog still lists, got ${listed.models.length}`);
+  assert(listed.needsAegisKey === true, 'and reports the missing account key rather than hiding it');
+
+  let refusedByok = null;
+  try {
+    await keylessEng.chat({ class: 'byok', model: 'anthropic:claude-sonnet-5', prompt: 'hi' }, () => {});
+  } catch (e) { refusedByok = e; }
+  assert(refusedByok, 'a keyless byok send is refused');
+  assert(refusedByok.status === 401, `refused as unauthenticated, got status ${refusedByok.status}`);
+  assert(/account key/.test(refusedByok.message), `the refusal names the fix, got ${refusedByok.message}`);
+  assert(relayed.length === 0, 'and the relay is never reached, so no unattributed (unbilled) turn goes out');
+
+  // Same engine, same provider key, account key connected: the turn is
+  // attributable, so it is sent — and the server can bill it, funded or not
+  // (charge_byok clamps the debit at zero and records the rest as owed).
+  keylessAegis.apiKey = 'aegis-key';
+  await keylessEng.chat({ class: 'byok', model: 'anthropic:claude-sonnet-5', prompt: 'hi' }, () => {});
+  assert(relayed.length === 1, 'with the account key connected the byok turn is sent, so the fee has a payer');
+  assert(relayed[0].providerKey === 'sk-ant-real', 'and it is still the provider key that authenticates upstream');
+}
+
 console.log('engine tests passed');

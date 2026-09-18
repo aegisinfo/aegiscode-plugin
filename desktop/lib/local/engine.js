@@ -1111,13 +1111,24 @@ function createLocalEngine({ aegis, settings, ollama, providers, tools, promptBu
       // …and the AEGIS account key is what makes the turn BILLABLE at all. The
       // relay authenticates on the provider key and resolves the payer
       // separately, from X-AEGIS-Key (app.py `_byok_identify_user`): with no
-      // account key the fee is logged against user 0 as uncollected, and with
-      // AEGIS_BYOK_REQUIRE_BALANCE off — the default — the turn is served
-      // anyway. That is the server's documented behaviour, so nothing is
-      // refused here: `listModels` reports the missing key as `needsAegisKey`
-      // and the settings UI says plainly where the fee lands, which is the part
-      // a client can do honestly. Enforcement lives in the relay's own gate,
-      // which every caller passes through.
+      // account key the server can attribute the handling fee to no one, so it
+      // is logged against user 0 as uncollected — an anonymous free ride the
+      // fee exists to close. Require the account key here so EVERY BYOK turn is
+      // attributed and every caller pays the handling fee: a funded balance is
+      // debited immediately, an unfunded one records the fee as owed
+      // (token_bank.charge_byok clamps to zero and never refuses), and nobody
+      // is served free. Balance is the server's own concern, not this gate's —
+      // with a balance or without one, the account still pays. `listModels`
+      // still answers anonymously (the catalog is how a user finds out which
+      // key to get), so this refuses only the send, and only until a key lands.
+      if (cls === 'byok' && !aegis.apiKey) {
+        const err = new Error(
+          'byok: connect your AEGIS account key first — the BYOK handling fee is billed there. ' +
+            'Add it in the Status card (or run /login), then try again.'
+        );
+        err.status = 401;
+        throw err;
+      }
 
       // Custom classes carry no enumerable model list (see listModels), so a
       // blank id here means the user never typed one. Fail loudly in-process

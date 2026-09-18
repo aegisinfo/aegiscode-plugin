@@ -354,17 +354,27 @@ function createClient(opts = {}) {
    *
    * The caller's *AEGIS* key is sent alongside the provider key as X-AEGIS-Key.
    * Two credentials, two headers, on purpose: the provider key authenticates the
-   * upstream call, the AEGIS key says whose bank pays the handling fee. With no
-   * AEGIS key configured the header is omitted and the call stays anonymous:
-   * the relay still serves it, and `_byok_identify_user` on the server resolves
-   * no payer, so `charge_byok` logs the fee against user 0 as uncollected. The
-   * turn is not refused — `AEGIS_BYOK_REQUIRE_BALANCE` (off by default) is the
-   * server's own gate and the only place that decides this, deliberately, so
-   * that pre-existing unauthenticated BYOK clients do not start getting 402s on
-   * upgrade (aegis1 tests/test_byok_fee.py pins the anonymous path as allowed).
-   * No client enforces it either: the desktop is one caller of a route that is
-   * unauthenticated by design. What this header changes is attribution — sending
-   * it is what makes the fee collectable from the account it belongs to.
+   * upstream call, the AEGIS key says whose bank pays the handling fee —
+   * `_byok_identify_user` on the server resolves the payer from it, and nothing
+   * else. With no AEGIS key the header is omitted and the call is anonymous;
+   * THIS function still sends it, because it is a transport and the route is
+   * unauthenticated by design (aegis1 tests/test_byok_fee.py pins the anonymous
+   * path as allowed) — refusing here would break every other caller of a
+   * published endpoint.
+   *
+   * Attribution is the whole game, because an unattributed turn is the one way
+   * a BYOK call escapes the fee: the relay serves it, `charge_byok` never runs
+   * (`app.py` charges only `if _byok_user_id:`), and the call is logged against
+   * user 0 as uncollected — a free ride. So the shipped HOSTS refuse a keyless
+   * BYOK send before the relay is reached: desktop/lib/local/engine.js raises
+   * 401, and the desktop app and the CLI share that engine (the CLI stages it
+   * as cli/vendor/desktop/lib/local/engine.js), so one gate covers both. Every
+   * turn is then attributable, and therefore billable: a funded balance is
+   * debited, an unfunded one is recorded as owed — `charge_byok` clamps the
+   * debit at zero and never refuses the call, so "cannot pay" and "must not be
+   * billed" stop being the same thing. `AEGIS_BYOK_REQUIRE_BALANCE` (off by
+   * default) remains the server's own, separate 402 gate and is not what makes
+   * the fee land.
    */
   async function byokChatCompletion({
     provider = 'openai',

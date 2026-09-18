@@ -195,9 +195,13 @@ try {
   assert(hdrs['X-AEGIS-Key'] !== hdrs['X-Provider-Key'], 'the two credentials must not be conflated');
 
   // 9b. No AEGIS key configured -> the header is OMITTED, not sent empty.
-  // An anonymous BYOK call is allowed (it just cannot be billed), so this must
-  // not start throwing; but an empty-string header would be a credential that
-  // is present-and-invalid, which is a different thing to the server.
+  // The transport stays anonymous-capable on purpose (the route is
+  // unauthenticated by design, and this must not start throwing), but a
+  // keyless BYOK turn is now refused one layer up, by the shared local engine,
+  // because an unattributed turn is served and billed to nobody. What is pinned
+  // HERE is only the wire detail: omit the header, never send it empty — an
+  // empty-string header is a credential that is present-and-invalid, which is a
+  // different thing to the server.
   const anon = createClient({ apiKey: '', apiBase: 'https://example.test' });
   await anon.byokChatCompletion({ prompt: 'hi', providerKey: 'sk-anon' });
   hdrs = captured[captured.length - 1].opts.headers;
