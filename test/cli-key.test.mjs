@@ -45,8 +45,14 @@ const tmpHome = (n) => fs.mkdtempSync(path.join(os.tmpdir(), `aegiscode-key-${n}
 async function withHome(dir, fn) {
   const prevHome = process.env.AEGISCODE_HOME;
   const prevKey = process.env.AEGIS_API_KEY;
+  const prevMemToken = process.env.AEGIS_MEMORY_TOKEN;
   process.env.AEGISCODE_HOME = dir;
   delete process.env.AEGIS_API_KEY;
+  // resolveMemoryToken() ranks env above the stored value, same as
+  // resolveApiKey() — a real AEGIS_MEMORY_TOKEN left exported in the dev
+  // shell would otherwise outrank the 'mem-tok' this suite stores and stays
+  // invisible everywhere except this one assertion.
+  delete process.env.AEGIS_MEMORY_TOKEN;
   try {
     // `await` is load-bearing: without it the finally below restores the env as
     // soon as the body's first await yields, and every later read/write in the
@@ -57,6 +63,8 @@ async function withHome(dir, fn) {
     else process.env.AEGISCODE_HOME = prevHome;
     if (prevKey === undefined) delete process.env.AEGIS_API_KEY;
     else process.env.AEGIS_API_KEY = prevKey;
+    if (prevMemToken === undefined) delete process.env.AEGIS_MEMORY_TOKEN;
+    else process.env.AEGIS_MEMORY_TOKEN = prevMemToken;
   }
 }
 

@@ -38,7 +38,12 @@ globalThis.fetch = async (url, opts) => {
 };
 
 try {
-  const client = createClient({ apiKey: 'test-key', apiBase: 'https://example.test' });
+  // memoryToken: '' pins the client to the mocked /api/verify-api-key exchange
+  // below rather than a real AEGIS_MEMORY_TOKEN left in the dev shell's
+  // environment — createClient() only falls back to the env var when the opt
+  // is `undefined`, and this suite's memory-token assertions (section 7) must
+  // see the token *this test* hands back, not whatever machine it runs on.
+  const client = createClient({ apiKey: 'test-key', apiBase: 'https://example.test', memoryToken: '' });
 
   // 1. No model + no mode -> body has no `model` key and no `nexus-*`.
   await client.chatCompletion({ prompt: 'hi' });
