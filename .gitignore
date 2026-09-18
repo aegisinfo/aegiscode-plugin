@@ -10,3 +10,7 @@ cli/vendor/
 
 # Local xvfb .debs are fetched on demand, never committed (P3.6).
 desktop/*.deb
+
+# Python tooling bytecode (the pre-commit guard blocks these paths anyway).
+__pycache__/
+*.pyc
