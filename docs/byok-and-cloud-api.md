@@ -190,7 +190,32 @@ prefix are accepted as-is. The accepted provider set is derived from the AEGIS
 provider catalog, so DeepSeek, Gemini, Groq, OpenRouter, Mistral, Cerebras,
 Fireworks, NVIDIA NIM, xAI/Grok, Together, and Sakana are all valid.
 
-### Driving it from the desktop app
+### Driving it from the desktop app and the CLI
+
+**A, the per-request relay, is the one both shipped clients expose.** They hold
+the provider key *on the machine* and attach it as `X-Provider-Key` on each
+call, so AEGIS never stores it:
+
+- **Desktop** — the BYOK class in the model picker, whose provider rows are
+  built from the server's own catalog (`GET /api/v1/byok/providers`, via the
+  engine's `listModels('byok')`) rather than a hardcoded list, so a provider
+  added server-side appears with no client release. There is no base-URL field:
+  the class always talks to AEGIS's relay. Each row is saved to the local
+  settings store as `byok:<provider>` — the row the engine reads back at
+  request time — and the AEGIS handling fee is displayed from the server's
+  published figure (`fee`).
+- **CLI** — `/class byok` switches the route, `/byok-key <provider>` (or
+  `/byok-rm-key`) manages the same `byok:<provider>` row on that machine, and
+  models are compound ids: `aegiscode -m anthropic:claude-sonnet-4-5`. `/models`
+  lists what the saved keys actually unlock. See `cli/README.md` for the full
+  surface. A BYOK turn is single-shot in both clients — the relay takes no
+  `tools` parameter.
+
+**B, the stored key, has no UI yet.** `desktop/renderer/app.js` does not call
+`byokStatus` or `byokSet` — the handlers exist in `main.js` and are bridged in
+`preload.js`, but nothing renders them. To use it today, reach it from a
+script, or from the Claude Code plugin, where it is exposed as the
+`aegis_byok_set` and `aegis_byok_status` tools.
 
 The main process already exposes both stored-key calls over whitelisted IPC:
 
@@ -199,13 +224,6 @@ The main process already exposes both stored-key calls over whitelisted IPC:
 await window.aegis.byokStatus();            // → GET  /api/user/api-keys
 await window.aegis.byokSet('openai', key);  // → POST /api/user/api-keys
 ```
-
-**There is no BYOK panel in the desktop UI yet.** `desktop/renderer/app.js`
-does not call `byokStatus` or `byokSet` — the handlers exist in `main.js` and
-are bridged in `preload.js`, but nothing renders them. Until that lands, use
-Lane 2 (Provider settings) for your own key inside the desktop app, and reach
-the relay APIs from a script or from the Claude Code plugin, where they are
-exposed as the `aegis_byok_set` and `aegis_byok_status` tools.
 
 ---
 
@@ -217,9 +235,11 @@ exposed as the `aegis_byok_set` and `aegis_byok_status` tools.
   Provider settings, key stays in the main process.
 - **Running locally with no keys at all.** Ollama in Lane 2.
 - **I need my own provider key to work through AEGIS's transport** — for
-  server-side calls, or to fan out with my own credential. Lane 3. Use the
-  per-request relay if the key must never be stored; use the stored key if you
-  want it resolved automatically on later requests.
+  server-side calls, or to fan out with my own credential. Lane 3. In the
+  desktop and the CLI, pick the **BYOK** class (`/class byok` in the terminal):
+  the key stays on your machine, AEGIS relays and bills a handling fee. Use the
+  per-request relay if the key must never be stored anywhere; use the stored key
+  if you want it resolved automatically on later server-side requests.
 
 ---
 
