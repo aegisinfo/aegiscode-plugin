@@ -61,6 +61,13 @@ const FILES = [
   'desktop/lib/local/shell.js',
   'desktop/lib/local/agents.js',
   'desktop/lib/local/prompt.js',
+  // The direct-provider transport (openaiCompatible + anthropicMessages) the
+  // desktop injects into the engine for its custom-endpoint classes. The CLI's
+  // `custom` class (src/engine.js, the /model add catalog) now injects the same
+  // real transport instead of the throwing stub it used to, so a user's own
+  // base URL + key is called directly with the full tool loop — so this file
+  // must ship. Pure node builtins (fetch), stages cleanly.
+  'desktop/lib/local/providers.js',
   // The provider-config store: one row per provider (base URL + key), and the
   // row the 'byok' class reads for a per-provider key. The CLI now selects that
   // class (src/engine.js), so it needs the same store the desktop writes —

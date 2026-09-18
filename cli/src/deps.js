@@ -81,11 +81,17 @@ const updatePath = resolveShared(path.join('client', 'update.js'));
 // must work the SAME queue with the SAME rules (scoped commits included).
 const queuePath = resolveShared(path.join('desktop', 'lib', 'local', 'queue.js'));
 const autonomousPath = resolveShared(path.join('desktop', 'lib', 'local', 'autonomous.js'));
+// The direct-provider transport (openaiCompatible + anthropicMessages). The
+// desktop injects it into createLocalEngine for its custom-endpoint classes;
+// the CLI injects the same real module for its `custom` class (the /model add
+// catalog) rather than the throwing stub it shipped before.
+const providersPath = resolveShared(path.join('desktop', 'lib', 'local', 'providers.js'));
 
 const { createClient } = require(clientPath);
 const { createTools } = require(toolsPath);
 const { usageTokens } = require(usagePath);
 const { createLocalEngine } = require(enginePath);
+const providers = require(providersPath);
 const { createSettingsStore, isReservedNamespace } = require(settingsPath);
 const { agentRoles, agentRoleLabel } = require(agentsPath);
 const { buildSystemPrompt } = require(promptPath);
@@ -99,6 +105,7 @@ module.exports = {
   createTools,
   usageTokens,
   createLocalEngine,
+  providers,
   createSettingsStore,
   isReservedNamespace,
   agentRoles,
@@ -107,6 +114,6 @@ module.exports = {
   updater,
   queue,
   autonomous,
-  paths: { client: clientPath, tools: toolsPath, usage: usagePath, engine: enginePath, settings: settingsPath, agents: agentsPath, prompt: promptPath, update: updatePath, queue: queuePath, autonomous: autonomousPath },
+  paths: { client: clientPath, tools: toolsPath, usage: usagePath, engine: enginePath, providers: providersPath, settings: settingsPath, agents: agentsPath, prompt: promptPath, update: updatePath, queue: queuePath, autonomous: autonomousPath },
   roots,
 };

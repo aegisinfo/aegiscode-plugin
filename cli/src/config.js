@@ -73,6 +73,16 @@ const DEFAULT_CONFIG = {
   // aegiscode- name so /model add/remove/switch stay compatible both ways.
   models: null,
   currentModelId: null,
+  // The named custom-model catalog behind the `custom` class — the
+  // aegiscodex-dev `/model add` concept: each entry names an endpoint the user
+  // brings themselves (own base URL + own key), called DIRECTLY through the
+  // desktop transport (providers.openaiCompatible / anthropicMessages), tools
+  // and all, never through the pooled route or the BYOK relay. Only the
+  // non-secret metadata lives here; the key is in the 0600 settings store under
+  // `custom:<id>` (engine.js), never in this file (config.json is not 0600 and
+  // participates in cloud sync). Shape: [{ id, name, model, baseURL, wire }],
+  // wire ∈ {'openai','anthropic'}.
+  customModels: [],
   // `null` = no effort pinned, i.e. "auto": each turn is sized by the server
   // from the ask itself (aegis1 services/pool_brain.py estimate_effort). The
   // old 'high' was a *pin* on the top rung of the budget ladder — the most the

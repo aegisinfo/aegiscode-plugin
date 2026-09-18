@@ -224,6 +224,7 @@ Three layers, from broadest to narrowest. You only need the first one.
 /class            # show the picker
 /class aegis      # pooled AEGIS Cloud (the default)
 /class byok       # your own provider key, relayed by AEGIS
+/class custom     # your own endpoint, called by aegiscode directly
 ```
 
 A class is *whose credential pays and who talks to the vendor*, not a model.
@@ -235,6 +236,7 @@ restart.
 |---|---|---|
 | `aegis` *(default)* | the AEGIS pool — one id, `nexus-brain` (alias `aegis-brain`), auto-routed server-side across whichever providers are live | your AEGIS account balance |
 | `byok` | your provider key, relayed via `POST /api/v1/byok/chat/completions` | your provider direct, **plus** a small AEGIS handling fee on your account |
+| `custom` | your own base URL, called **directly** by aegiscode — nothing is relayed | your provider direct. No AEGIS fee, no margin, no account balance |
 
 **2. The model id — what to pin.**
 
@@ -245,10 +247,10 @@ restart.
 /model -                # clear the pin, back to the class default
 ```
 
-`/models` is class-aware: it answers from the pool catalogue under `aegis`, and
-from the models your saved keys actually unlock under `byok`. A pooled id is
-**cleared with a reason** if you switch to `byok` while it is pinned, instead of
-failing later at the relay.
+`/models` is class-aware: it answers from the pool catalogue under `aegis`, from
+the models your saved keys actually unlock under `byok`, and from the entries you
+added with `/model add` under `custom`. A pin is **cleared with a reason** if you
+switch to a class it does not belong to, instead of failing later at the route.
 
 Under `byok` every id is compound — `provider:model`:
 
@@ -257,9 +259,17 @@ Under `byok` every id is compound — `provider:model`:
 /model anthropic:claude-sonnet-4-5
 ```
 
+Under `custom` the id is whatever you named the entry:
+
+```bash
+/models                       # e.g.  local-llama, work-gateway
+/model local-llama
+```
+
 ```bash
 aegiscode -m nexus-brain -p "…"                      # pin at launch
 aegiscode -m anthropic:claude-sonnet-4-5 -p "…"      # a BYOK id at launch
+aegiscode -m local-llama -p "…"                      # a custom id at launch
 ```
 
 **3. Effort — how hard it reasons.**
@@ -273,10 +283,40 @@ Effort scales the token budget the provider is given, so it is the dial that
 actually changes reasoning depth on a reasoning model (see the root README for
 the per-provider mechanics).
 
-> **A BYOK turn is single-shot.** The relay takes no `tools` parameter, so the
+> **A `byok` turn is single-shot.** The relay takes no `tools` parameter, so the
 > agentic tool loop is off by construction — no file edits, no shell, no
 > subagents, no approval cards. `/class` says so rather than letting you discover
-> it mid-task.
+> it mid-task. **`custom` does not have this limit** — aegiscode calls your
+> endpoint itself, so the full tool loop works normally.
+
+## Custom models — your endpoint, called directly
+
+`/model add` teaches aegiscode about an endpoint AEGIS never sees. There is no
+relay, no handling fee and no margin: the request goes straight from your machine
+to the base URL you gave, with the key you gave.
+
+```bash
+/model add local-llama  "Local Llama"  llama-3.3-70b  http://localhost:11434/v1
+/model add work-gw      "Work gateway" gpt-4o        https://gw.corp/v1  openai
+/model key local-llama                  # set or replace the key later (prompted, masked)
+/class custom                           # route turns through these
+/model local-llama                      # pin one
+/model remove local-llama               # drop the entry and its key
+```
+
+The wire protocol is detected from the base URL — `anthropic.com` gets the
+Messages API, everything else the OpenAI-compatible one — or you can pass
+`openai` / `anthropic` explicitly to override it.
+
+Where things are stored, and why it is split:
+
+| What | Where | Why |
+|---|---|---|
+| name, model, base URL, wire | `~/.aegiscode/config.json` | it is configuration, and it is not secret |
+| the API key | `~/.aegiscode/settings.json` (mode `0600`) | secrets belong in the file we chmod, keyed `custom:<id>` |
+
+The key is never written into `config.json`. A local endpoint that needs no key
+is fine — omit it and no `Authorization` header is sent.
 
 ## Bring your own key
 
@@ -377,12 +417,15 @@ echo "why is the sky blue" | aegiscode -p -
 ### Switch how you're paying
 
 ```bash
-/class                             # see both routes and who pays
+/class                             # see every route and who pays
 /class byok                        # use your own key
 /byok-key openai                   # …save one first if it says you have none
 /models                            # what that key unlocks
 /model openai:gpt-4o               # pin one
 /class aegis                       # back to the pool
+
+/model add local-llama "Local Llama" llama-3.3-70b http://localhost:11434/v1
+/class custom                      # or call your own endpoint directly
 ```
 
 ### Control the budget

@@ -73,6 +73,9 @@ const {
 const {
   aggregateSessionUsage, pruneSessionHistory, readResumeList,
 } = require('./history.js');
+// The custom-endpoint catalog behind the `custom` class and /model add|key|remove.
+const customModelsCatalog = require('./custommodels.js');
+const { VALID_WIRES } = customModelsCatalog;
 
 // Guarded: a concurrent workstream owns ./markdown.js.
 let markdownModule = null;
@@ -111,8 +114,46 @@ const EFFORT_LEVELS = overlays.EFFORT_VALUES;
 
 // ── Small handler helpers ─────────────────────────────────────────────────────
 
-const note = (c, text) => c.push({ role: 'note', text });
-const panel = (c, lines) => c.push({ role: 'panel', lines });
+/**
+ * Split a command's raw tail into tokens, honouring double quotes so a model
+ * name or id with a space stays one token
+ * (`/model add local "Llama 3 70B" http://…`). Backslash escapes a quote or a
+ * backslash inside a quoted run. Never throws — an unclosed quote simply ends
+ * at the end of the line.
+ */
+function splitArgs(raw) {
+  const text = String(raw == null ? '' : raw);
+  const out = [];
+  let cur = '';
+  let quoted = false;
+  let started = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '\\' && quoted && i + 1 < text.length && (text[i + 1] === '"' || text[i + 1] === '\\')) {
+      cur += text[++i];
+      started = true;
+      continue;
+    }
+    if (ch === '"') {
+      quoted = !quoted;
+      // A quoted empty string ("") is a real, intentional token.
+      started = true;
+      continue;
+    }
+    if (!quoted && /\s/.test(ch)) {
+      if (started) out.push(cur);
+      cur = '';
+      started = false;
+      continue;
+    }
+    cur += ch;
+    started = true;
+  }
+  if (started) out.push(cur);
+  return out;
+}
+
+const note = (c, text) => c.push({ role: 'note', text });const panel = (c, lines) => c.push({ role: 'panel', lines });
 const tip = (c, text) => c.push({ role: 'tip', text });
 const done = (c, text) => c.push({ role: 'done', text });
 const shortCwd = () => process.cwd().split('/').filter(Boolean).pop() || '~';
@@ -807,6 +848,10 @@ const COMMANDS = [
       // will actually take (app.js's buildState().models is class-scoped too).
       const cls = (c.ctx && c.ctx.modelClass) || 'aegis';
       const byok = cls === 'byok';
+      // The sub-command token, lower-cased: `add` / `key` / `remove` are the
+      // custom-endpoint catalog's verbs. A model id is never one of these in
+      // practice, and `list` already shadows a real id the same way.
+      const sub = id.toLowerCase();
       if (!id) {
         note(c, `model: ${c.ctx.model || 'server default'}`);
         // Populate the picker from the server first — app.js's state().models
@@ -861,10 +906,89 @@ const COMMANDS = [
         c.render();
         return true;
       }
-      if (id === 'add' || id === 'remove' || id === 'rm') {
-        note(c, byok
-          ? 'Model add/remove isn\'t supported in this build — on the byok class the list follows the provider keys you hold (/byok-key <provider>), then /model <provider>:<model>.'
-          : 'Model add/remove isn\'t supported in this build — pin an existing server id with /model <id>.');
+      // The /model add catalog — the aegiscodex-dev concept ported in. A user
+      // registers their own endpoint (own base URL, own model string, own key)
+      // and the CLI calls it DIRECTLY through the desktop transport, the full
+      // tool loop and all: no pooled route, no BYOK relay, no fee or margin.
+      // The classic entry form is the positional one
+      //   /model add <id> <name> <model> <baseURL> [wire]
+      // with the key prompted for (masked) right after, or supplied inline
+      //   /model add <id> <name> <model> <baseURL> [wire] <key>
+      // (the scriptable spelling, like /byok-key's second token).
+      if (sub === 'add') {
+        const parts = splitArgs(args._rest);
+        // `sub` itself is the first token of _rest, so drop its own copy.
+        const rest = parts[0] === 'add' ? parts.slice(1) : parts;
+        // The wire name is optional and only recognised when it is one of the
+        // two transports — otherwise that token is the key (so
+        // `/model add id name model url sk-…` needs no placeholder).
+        let at = 4;
+        let wire;
+        if (VALID_WIRES.includes(String(rest[at] || '').toLowerCase())) {
+          wire = String(rest[at]).toLowerCase();
+          at += 1;
+        }
+        const fields = { id: rest[0], name: rest[1], model: rest[2], baseURL: rest[3], wire };
+        if (!fields.id || !fields.model || !fields.baseURL) {
+          note(c, 'Usage: /model add <id> <name> <model> <baseURL> [openai|anthropic] [key]');
+          note(c, '  e.g. /model add local Llama-3 "meta-llama/Llama-3-70b" http://localhost:8080/v1');
+          note(c, '  the key is prompted for and stored 0600 on this machine — never in config.json.');
+          c.render();
+          return true;
+        }
+        const inlineKey = rest[at] || '';
+        const store = c.settings && c.settings();
+        const res = customModelsCatalog.addCustom({ ...fields, key: null }, store);
+        if (res.error) {
+          c.push({ role: 'error', text: `couldn't add "${fields.id}": ${res.error}` });
+          return true;
+        }
+        const entry = res.entry;
+        let key = inlineKey || '';
+        if (!key) {
+          note(c, `storing a key for "${entry.id}" — leave it blank to add it later with /model key ${entry.id}.`);
+          c.render();
+          key = String((await c.readSecret(`${entry.id} key: `)) || '').trim();
+        }
+        if (key) {
+          customModelsCatalog.setCustomKey(entry.id, key, store);
+        }
+        note(c, `added "${entry.id}" → ${entry.model} at ${entry.baseURL} (${entry.wire} wire)${key ? '' : ' — no key yet'}.`);
+        note(c, key
+          ? `run it with /class custom (then /model ${entry.id}), or /model ${entry.id} while on the custom class.`
+          : `add its key with /model key ${entry.id}, then /class custom runs it.`);
+        c.render();
+        return true;
+      }
+      if (sub === 'key') {
+        const target = splitArgs(args._rest)[1];
+        if (!target) { note(c, 'Usage: /model key <id> — /models lists your custom endpoints.'); c.render(); return true; }
+        const entry = customModelsCatalog.getCustom(target);
+        if (!entry) { note(c, `no custom endpoint "${target}" — /model add registers one.`); c.render(); return true; }
+        const store = c.settings && c.settings();
+        note(c, `storing a key for "${entry.id}" — blank clears it.`);
+        c.render();
+        const key = String((await c.readSecret(`${entry.id} key: `)) || '').trim();
+        if (!key) { note(c, 'nothing saved.'); c.render(); return true; }
+        customModelsCatalog.setCustomKey(entry.id, key, store);
+        note(c, `saved a key for "${entry.id}" on this machine — /class custom runs it.`);
+        c.render();
+        return true;
+      }
+      if (sub === 'remove' || sub === 'rm') {
+        const target = splitArgs(args._rest)[1];
+        if (!target) { note(c, 'Usage: /model remove <id>'); c.render(); return true; }
+        const store = c.settings && c.settings();
+        const { removed } = customModelsCatalog.removeCustom(target, store);
+        if (!removed) { note(c, `no custom endpoint "${target}" — /models lists your endpoints.`); c.render(); return true; }
+        // A pin on the row we just deleted would otherwise outlive its entry and
+        // fail at the next send with "no model … in the catalog".
+        if (String(c.ctx.model || '') === String(target)) {
+          c.ctx.model = null;
+          c.saveConfig({ model: null, currentModelId: null });
+          note(c, `unpinned "${target}" (its catalog entry is gone).`);
+        }
+        note(c, `removed "${target}" and forgot its key.`);
         c.render();
         return true;
       }
